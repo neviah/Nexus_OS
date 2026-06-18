@@ -532,8 +532,13 @@ function resolveModelOrder(harness: HarnessConfig, state: SystemState): string[]
 }
 
 function buildOpenAiMessages(message: string, history: ChatMessage[]) {
-  const entries = history.length > 0 ? history : [{ id: "user", role: "user", content: message, createdAt: "" }];
-  return entries.map((entry) => ({ role: entry.role, content: entry.content }));
+  const base = history.map((entry) => ({ role: entry.role, content: entry.content }));
+  const last = base[base.length - 1];
+  const alreadyIncluded = last?.role === "user" && last?.content === message;
+  if (!alreadyIncluded) {
+    base.push({ role: "user", content: message });
+  }
+  return base;
 }
 
 function extractText(payload: Record<string, unknown>): string {

@@ -11,6 +11,16 @@ import { readSystemState, writeSystemState } from "./lib/stateStore.js";
 import { getRouterSummary } from "./lib/routerStatus.js";
 import type { ChatMessage } from "./types.js";
 import { invokeHarness, streamHarness } from "./lib/harnessAdapter.js";
+import type { AdapterResult } from "./lib/harnessAdapter.js";
+import { runHarnessConformance } from "./lib/conformance.js";
+import {
+  appendTaskOutput,
+  buildReplayPrompt,
+  createTask,
+  getTask,
+  listResumableTasks,
+  updateTaskStatus,
+} from "./lib/taskResumeEngine.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -55,6 +65,12 @@ app.get("/api/harnesses", async (_req, res) => {
   const harnesses = await readHarnessRegistry();
   const status = await resolveHarnessHealth(harnesses);
   res.json({ harnesses: status });
+});
+
+app.get("/api/harnesses/conformance", async (_req, res) => {
+  const harnesses = await readHarnessRegistry();
+  const results = await runHarnessConformance(harnesses);
+  res.json({ results });
 });
 
 app.get("/api/tools/9router/status", async (_req, res) => {
@@ -151,16 +167,18 @@ app.get("/api/workspaces/:id/tree", async (req, res) => {
 });
 
 app.post("/api/chat", async (req, res) => {
-  const { harnessId, message, history } = req.body as {
+  const { harnessId, message, history, requestId } = req.body as {
     harnessId: string;
     message: string;
     history?: ChatMessage[];
+    requestId?: string;
   };
 
   const state = await readSystemState();
   const safeHistory = history ?? [];
   const harnesses = await readHarnessRegistry();
   const harness = harnesses.find((entry) => entry.id === harnessId);
+  const taskId = requestId ?? crypto.randomUUID();
 
   if (!state.onboardingComplete) {
     return res.status(412).json({
@@ -172,12 +190,28 @@ app.post("/api/chat", async (req, res) => {
     return res.status(404).json({ error: `Unknown harness: ${harnessId}` });
   }
 
-  const adapterResult = await invokeHarness({
-    harness,
+  await createTask({
+    requestId: taskId,
+    harnessId,
+    workspaceId: state.activeWorkspaceId,
+    mode: "sync",
     message,
     history: safeHistory,
-    state,
+    startedAt: new Date().toISOString(),
   });
+
+  let adapterResult: AdapterResult;
+  try {
+    adapterResult = await invokeHarness({
+      harness,
+      message,
+      history: safeHistory,
+      state,
+    });
+  } catch (error) {
+    await updateTaskStatus(taskId, "failed", { error: String(error) });
+    return res.status(502).json({ error: String(error), requestId: taskId });
+  }
 
   state.router9.logs.unshift({
     timestamp: new Date().toISOString(),
@@ -198,7 +232,13 @@ app.post("/api/chat", async (req, res) => {
     createdAt: new Date().toISOString(),
   };
 
+  await updateTaskStatus(taskId, "completed", {
+    finalOutput: adapterResult.content,
+    meta: adapterResult.meta,
+  });
+
   return res.json({
+    requestId: taskId,
     message: assistantMessage,
     meta: adapterResult.meta,
   });
@@ -216,7 +256,54 @@ app.post("/api/chat/stop", (req, res) => {
     activeStreams.delete(requestId);
   }
 
+  void updateTaskStatus(requestId, "aborted", { error: "Stopped by user" });
+
   return res.json({ ok: true });
+});
+
+app.get("/api/chat/tasks/resumable", async (_req, res) => {
+  const tasks = await listResumableTasks();
+  res.json({ tasks });
+});
+
+app.post("/api/chat/tasks/:requestId/resume", async (req, res) => {
+  const { requestId } = req.params;
+  const state = await readSystemState();
+  const task = await getTask(requestId);
+
+  if (!task) {
+    return res.status(404).json({ error: `Unknown task ${requestId}` });
+  }
+
+  if (task.status !== "failed") {
+    return res.status(400).json({ error: `Task ${requestId} is not resumable` });
+  }
+
+  const harnesses = await readHarnessRegistry();
+  const harness = harnesses.find((entry) => entry.id === task.harnessId);
+  if (!harness) {
+    return res.status(404).json({ error: `Unknown harness ${task.harnessId}` });
+  }
+
+  const replayPrompt = buildReplayPrompt(task);
+  const resumed = await invokeHarness({
+    harness,
+    message: replayPrompt,
+    history: task.history,
+    state,
+  });
+
+  await updateTaskStatus(requestId, "completed", {
+    finalOutput: `${task.partialOutput}${resumed.content}`,
+    meta: resumed.meta,
+  });
+
+  return res.json({
+    requestId,
+    resumed: true,
+    content: resumed.content,
+    meta: resumed.meta,
+  });
 });
 
 app.post("/api/chat/stream", async (req, res) => {
@@ -247,6 +334,16 @@ app.post("/api/chat/stream", async (req, res) => {
   const controller = new AbortController();
   activeStreams.set(requestId, controller);
 
+  await createTask({
+    requestId,
+    harnessId,
+    workspaceId: state.activeWorkspaceId,
+    mode: "stream",
+    message,
+    history: safeHistory,
+    startedAt: new Date().toISOString(),
+  });
+
   req.on("close", () => {
     controller.abort();
     activeStreams.delete(requestId);
@@ -257,6 +354,7 @@ app.post("/api/chat/stream", async (req, res) => {
   res.setHeader("Connection", "keep-alive");
 
   try {
+    let output = "";
     let latestMeta:
       | {
           model: string;
@@ -282,6 +380,11 @@ app.post("/api/chat/stream", async (req, res) => {
         latestMeta = chunk.meta;
       }
 
+      if (chunk.type === "delta") {
+        output += chunk.text;
+        await appendTaskOutput(requestId, chunk.text);
+      }
+
       res.write(`data: ${JSON.stringify(chunk)}\n\n`);
 
       if (chunk.type === "done") {
@@ -299,11 +402,48 @@ app.post("/api/chat/stream", async (req, res) => {
     }
     await writeSystemState(state);
 
+    await updateTaskStatus(requestId, controller.signal.aborted ? "aborted" : "completed", {
+      finalOutput: output,
+      meta: latestMeta,
+      error: controller.signal.aborted ? "Stopped by user" : undefined,
+    });
+
     res.write("data: {\"type\":\"done\"}\n\n");
     res.end();
   } catch (error) {
-    res.write(`data: ${JSON.stringify({ type: "error", message: String(error) })}\n\n`);
-    res.end();
+    const failureMessage = String(error);
+    await updateTaskStatus(requestId, "failed", { error: failureMessage });
+
+    const replayTask = await getTask(requestId);
+    if (replayTask && !controller.signal.aborted) {
+      const replayPrompt = buildReplayPrompt(replayTask);
+      try {
+        const resumed = await invokeHarness({
+          harness,
+          message: replayPrompt,
+          history: safeHistory,
+          state,
+        });
+
+        await appendTaskOutput(requestId, resumed.content);
+        await updateTaskStatus(requestId, "completed", {
+          finalOutput: `${replayTask.partialOutput}${resumed.content}`,
+          meta: resumed.meta,
+        });
+
+        res.write(`data: ${JSON.stringify({ type: "meta", meta: { ...resumed.meta, fallbackUsed: true } })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "delta", text: resumed.content })}\n\n`);
+        res.write("data: {\"type\":\"done\"}\n\n");
+        res.end();
+      } catch (replayError) {
+        await updateTaskStatus(requestId, "failed", { error: `${failureMessage} | replay-failed: ${String(replayError)}` });
+        res.write(`data: ${JSON.stringify({ type: "error", message: String(replayError) })}\n\n`);
+        res.end();
+      }
+    } else {
+      res.write(`data: ${JSON.stringify({ type: "error", message: failureMessage })}\n\n`);
+      res.end();
+    }
   } finally {
     activeStreams.delete(requestId);
   }

@@ -8,6 +8,7 @@ apps/api/node_modules/
 apps/api/dist/
 
 data/system-state.local.json
+data/inflight-tasks.local.json
 
 .DS_Store
 Thumbs.db

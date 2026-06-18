@@ -63,3 +63,48 @@ export type ChatMessage = {
   content: string;
   createdAt: string;
 };
+
+export type HarnessConformanceCheck = {
+  name: string;
+  passed: boolean;
+  details: string;
+};
+
+export type HarnessConformanceResult = {
+  harnessId: string;
+  harnessName: string;
+  endpoint: string;
+  timestamp: string;
+  checks: HarnessConformanceCheck[];
+  score: {
+    passed: number;
+    total: number;
+  };
+};
+
+export type TaskRecordStatus = "running" | "failed" | "completed" | "aborted";
+
+export type TaskRecord = {
+  requestId: string;
+  harnessId: string;
+  workspaceId: string;
+  mode: "sync" | "stream";
+  message: string;
+  history: ChatMessage[];
+  startedAt: string;
+  updatedAt: string;
+  status: TaskRecordStatus;
+  partialOutput: string;
+  finalOutput?: string;
+  error?: string;
+  meta?: {
+    model: string;
+    provider: string;
+    fallbackUsed: boolean;
+    elapsedMs: number;
+    tokenUsage: {
+      input: number;
+      output: number;
+    };
+  };
+};

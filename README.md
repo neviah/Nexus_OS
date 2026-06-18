@@ -13,6 +13,8 @@ NEXUS OS is a local-first mission control dashboard for running multiple AI harn
 - Per-harness adapter compatibility config (protocol/auth/path/stream strategy)
 - Streaming chat with token-by-token updates
 - Stop + Resend controls in unified chat status bar
+- Task resume/replay engine with persisted in-flight chat state
+- Harness conformance checks (schema + live endpoint probes)
 - Persistent local runtime state (`data/system-state.local.json`) initialized from template
 - Pinokio launcher files (`install.js`, `start.js`, `reset.js`, `update.js`, `pinokio.js`, `pinokio.json`)
 
@@ -79,6 +81,22 @@ Each harness supports adapter overrides in `config/harnesses.json` under `adapte
 - `streamPath`: generic SSE stream path
 
 This allows integrating harnesses with different API shapes without changing frontend code.
+
+## Conformance Testing
+
+Run profile/schema conformance tests:
+
+```bash
+npm --prefix apps/api run test:conformance
+```
+
+Run live endpoint conformance probe:
+
+```bash
+npm --prefix apps/api run conformance
+```
+
+The live probe checks adapter config quality and attempts health endpoint verification for each harness.
 
 ## Important Security Note
 

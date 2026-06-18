@@ -13,6 +13,8 @@
 
 - `GET /api/harnesses`
   - Returns harness registry with online/offline probe status.
+- `GET /api/harnesses/conformance`
+  - Runs configuration and live endpoint conformance checks per harness profile.
 
 ## 9router
 
@@ -43,6 +45,8 @@ Request body:
 - `POST /api/chat`
 - `POST /api/chat/stream`
 - `POST /api/chat/stop`
+- `GET /api/chat/tasks/resumable`
+- `POST /api/chat/tasks/:requestId/resume`
 
 `POST /api/chat` now uses the harness adapter layer and attempts:
 
@@ -65,3 +69,7 @@ Request body:
 ```
 
 and aborts the matching in-flight stream.
+
+`GET /api/chat/tasks/resumable` returns failed tasks that can be resumed.
+
+`POST /api/chat/tasks/:requestId/resume` replays a failed task using the task resume engine and returns resumed output.
