@@ -376,6 +376,11 @@ textarea {
   color: var(--ink-3);
 }
 
+.chip-button {
+  padding: 4px 10px;
+  font-size: 0.74rem;
+}
+
 .chat-log {
   flex: 1;
   overflow: auto;

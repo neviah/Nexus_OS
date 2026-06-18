@@ -74,6 +74,12 @@ type ChatMeta = {
   };
 };
 
+type StreamEnvelope =
+  | { type: "meta"; meta: ChatMeta }
+  | { type: "delta"; text: string }
+  | { type: "done" }
+  | { type: "error"; message: string };
+
 type BootstrapPayload = {
   appName: string;
   onboardingRequired: boolean;
@@ -108,6 +114,8 @@ function App() {
   const [chatBusy, setChatBusy] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatMeta, setChatMeta] = useState<ChatMeta | null>(null);
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
+  const [lastUserPrompt, setLastUserPrompt] = useState<string>("");
   const [workspaceTree, setWorkspaceTree] = useState<WorkspaceTreeNode | null>(null);
   const [createWorkspaceName, setCreateWorkspaceName] = useState("");
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
@@ -183,31 +191,44 @@ function App() {
     setRouterSaving(false);
   }
 
-  async function onSendMessage() {
-    if (!activeHarness || !composer.trim() || chatBusy) {
+  async function onSendMessage(resendText?: string) {
+    const textToSend = (resendText ?? composer).trim();
+    if (!activeHarness || !textToSend || chatBusy) {
       return;
     }
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
-      content: composer.trim(),
+      content: textToSend,
+      createdAt: new Date().toISOString(),
+    };
+
+    const assistantPlaceholder: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: "",
       createdAt: new Date().toISOString(),
     };
 
     const nextHistory = [...messages, userMessage];
-    setMessages(nextHistory);
+    setMessages([...nextHistory, assistantPlaceholder]);
+    setLastUserPrompt(textToSend);
     setComposer("");
     setChatBusy(true);
+    setChatMeta(null);
     setStatusMessage(`Routing ${activeHarness.name} via 9router...`);
+    const requestId = crypto.randomUUID();
+    setActiveRequestId(requestId);
 
-    const response = await fetch("/api/chat", {
+    const response = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         harnessId: activeHarness.id,
         message: userMessage.content,
         history: nextHistory,
+        requestId,
       }),
     });
 
@@ -215,14 +236,109 @@ function App() {
       const payload = (await response.json()) as { error?: string };
       setStatusMessage(payload.error ?? "Chat request failed");
       setChatBusy(false);
+      setActiveRequestId(null);
       return;
     }
 
-    const payload = (await response.json()) as { message: ChatMessage; meta: ChatMeta };
-    setMessages((current) => [...current, payload.message]);
-    setChatMeta(payload.meta);
+    const reader = response.body?.getReader();
+    if (!reader) {
+      setStatusMessage("Unable to stream response");
+      setChatBusy(false);
+      setActiveRequestId(null);
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+
+      while (true) {
+        const split = buffer.indexOf("\n\n");
+        if (split === -1) {
+          break;
+        }
+
+        const frame = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        const dataLine = frame
+          .split("\n")
+          .find((line) => line.startsWith("data:"));
+
+        if (!dataLine) {
+          continue;
+        }
+
+        const raw = dataLine.slice(5).trim();
+        let envelope: StreamEnvelope;
+
+        try {
+          envelope = JSON.parse(raw) as StreamEnvelope;
+        } catch {
+          continue;
+        }
+
+        if (envelope.type === "meta") {
+          setChatMeta(envelope.meta);
+          continue;
+        }
+
+        if (envelope.type === "delta") {
+          setMessages((current) =>
+            current.map((entry) =>
+              entry.id === assistantPlaceholder.id
+                ? { ...entry, content: `${entry.content}${envelope.text}` }
+                : entry,
+            ),
+          );
+          continue;
+        }
+
+        if (envelope.type === "error") {
+          setStatusMessage(envelope.message);
+          continue;
+        }
+
+        if (envelope.type === "done") {
+          setChatBusy(false);
+          setActiveRequestId(null);
+          setStatusMessage("Ready");
+        }
+      }
+    }
+
     setChatBusy(false);
+    setActiveRequestId(null);
     setStatusMessage("Ready");
+  }
+
+  async function onStopStream() {
+    if (!activeRequestId) {
+      return;
+    }
+
+    await fetch("/api/chat/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: activeRequestId }),
+    });
+
+    setChatBusy(false);
+    setActiveRequestId(null);
+    setStatusMessage("Streaming stopped");
+  }
+
+  async function onResend() {
+    if (!lastUserPrompt || chatBusy) {
+      return;
+    }
+    await onSendMessage(lastUserPrompt);
   }
 
   async function onCreateWorkspace(event: FormEvent) {
@@ -446,6 +562,12 @@ function App() {
                   <span className="chip">fallback: {chatMeta?.fallbackUsed ? "yes" : "no"}</span>
                   <span className="chip">time: {chatMeta?.elapsedMs ?? 0} ms</span>
                   <span className="chip">tokens: {(chatMeta?.tokenUsage.input ?? 0) + (chatMeta?.tokenUsage.output ?? 0)}</span>
+                  <button type="button" className="ghost chip-button" onClick={() => void onStopStream()} disabled={!chatBusy}>
+                    Stop
+                  </button>
+                  <button type="button" className="ghost chip-button" onClick={() => void onResend()} disabled={chatBusy || !lastUserPrompt}>
+                    Resend
+                  </button>
                 </div>
               </header>
 

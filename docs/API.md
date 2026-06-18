@@ -41,5 +41,27 @@ Request body:
 ## Chat
 
 - `POST /api/chat`
+- `POST /api/chat/stream`
+- `POST /api/chat/stop`
 
-Current behavior: returns scaffolded assistant output and route metadata. Replace this with real harness adapters in next phase.
+`POST /api/chat` now uses the harness adapter layer and attempts:
+
+1. Generic harness endpoint (`/api/chat` or `/chat`)
+2. OpenAI-compatible endpoint (`/v1/chat/completions`)
+3. Model fallback based on configured 9router fallback order
+
+`POST /api/chat/stream` returns SSE frames with envelope payloads:
+
+```json
+{ "type": "meta", "meta": { "model": "...", "provider": "9router", "fallbackUsed": false, "elapsedMs": 0, "tokenUsage": { "input": 20, "output": 0 } } }
+{ "type": "delta", "text": "token" }
+{ "type": "done" }
+```
+
+`POST /api/chat/stop` expects:
+
+```json
+{ "requestId": "uuid" }
+```
+
+and aborts the matching in-flight stream.

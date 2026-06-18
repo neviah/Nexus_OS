@@ -10,9 +10,11 @@ import { readHarnessRegistry, resolveHarnessHealth } from "./lib/harnessRegistry
 import { readSystemState, writeSystemState } from "./lib/stateStore.js";
 import { getRouterSummary } from "./lib/routerStatus.js";
 import type { ChatMessage } from "./types.js";
+import { invokeHarness, streamHarness } from "./lib/harnessAdapter.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
+const activeStreams = new Map<string, AbortController>();
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -157,7 +159,8 @@ app.post("/api/chat", async (req, res) => {
 
   const state = await readSystemState();
   const safeHistory = history ?? [];
-  const model = state.router9.defaultModel;
+  const harnesses = await readHarnessRegistry();
+  const harness = harnesses.find((entry) => entry.id === harnessId);
 
   if (!state.onboardingComplete) {
     return res.status(412).json({
@@ -165,25 +168,21 @@ app.post("/api/chat", async (req, res) => {
     });
   }
 
-  const assistantMessage: ChatMessage = {
-    id: crypto.randomUUID(),
-    role: "assistant",
-    content: [
-      `Harness: ${harnessId}`,
-      `Model: ${model}`,
-      "",
-      "This is scaffold mode. Connect your harness adapter and 9router transport to replace this stub response.",
-      "",
-      `You said: ${message}`,
-      `Conversation messages seen: ${safeHistory.length}`,
-    ].join("\n"),
-    createdAt: new Date().toISOString(),
-  };
+  if (!harness) {
+    return res.status(404).json({ error: `Unknown harness: ${harnessId}` });
+  }
+
+  const adapterResult = await invokeHarness({
+    harness,
+    message,
+    history: safeHistory,
+    state,
+  });
 
   state.router9.logs.unshift({
     timestamp: new Date().toISOString(),
     level: "info",
-    message: `Routed request for ${harnessId} to ${model} via ${state.router9.baseUrl}`,
+    message: `Routed request for ${harnessId} to ${adapterResult.meta.model} via ${state.router9.baseUrl}`,
   });
 
   if (state.router9.logs.length > 30) {
@@ -191,19 +190,123 @@ app.post("/api/chat", async (req, res) => {
   }
 
   await writeSystemState(state);
+
+  const assistantMessage: ChatMessage = {
+    id: crypto.randomUUID(),
+    role: "assistant",
+    content: adapterResult.content,
+    createdAt: new Date().toISOString(),
+  };
+
   return res.json({
     message: assistantMessage,
-    meta: {
-      model,
-      provider: "9router",
-      fallbackUsed: false,
-      elapsedMs: Math.floor(350 + Math.random() * 1200),
-      tokenUsage: {
-        input: Math.max(8, Math.floor(message.length / 3)),
-        output: 120,
-      },
-    },
+    meta: adapterResult.meta,
   });
+});
+
+app.post("/api/chat/stop", (req, res) => {
+  const { requestId } = req.body as { requestId?: string };
+  if (!requestId) {
+    return res.status(400).json({ error: "requestId is required" });
+  }
+
+  const controller = activeStreams.get(requestId);
+  if (controller) {
+    controller.abort();
+    activeStreams.delete(requestId);
+  }
+
+  return res.json({ ok: true });
+});
+
+app.post("/api/chat/stream", async (req, res) => {
+  const { harnessId, message, history, requestId } = req.body as {
+    harnessId: string;
+    message: string;
+    history?: ChatMessage[];
+    requestId?: string;
+  };
+
+  if (!requestId) {
+    return res.status(400).json({ error: "requestId is required" });
+  }
+
+  const state = await readSystemState();
+  const safeHistory = history ?? [];
+  const harnesses = await readHarnessRegistry();
+  const harness = harnesses.find((entry) => entry.id === harnessId);
+
+  if (!state.onboardingComplete) {
+    return res.status(412).json({ error: "Complete 9router setup before starting chats." });
+  }
+
+  if (!harness) {
+    return res.status(404).json({ error: `Unknown harness: ${harnessId}` });
+  }
+
+  const controller = new AbortController();
+  activeStreams.set(requestId, controller);
+
+  req.on("close", () => {
+    controller.abort();
+    activeStreams.delete(requestId);
+  });
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  try {
+    let latestMeta:
+      | {
+          model: string;
+          provider: string;
+          fallbackUsed: boolean;
+          elapsedMs: number;
+          tokenUsage: { input: number; output: number };
+        }
+      | undefined;
+
+    for await (const chunk of streamHarness({
+      harness,
+      message,
+      history: safeHistory,
+      state,
+      signal: controller.signal,
+    })) {
+      if (controller.signal.aborted) {
+        break;
+      }
+
+      if (chunk.type === "meta") {
+        latestMeta = chunk.meta;
+      }
+
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+
+      if (chunk.type === "done") {
+        break;
+      }
+    }
+
+    state.router9.logs.unshift({
+      timestamp: new Date().toISOString(),
+      level: "info",
+      message: `Streaming route completed for ${harnessId} on ${latestMeta?.model ?? state.router9.defaultModel}`,
+    });
+    if (state.router9.logs.length > 30) {
+      state.router9.logs = state.router9.logs.slice(0, 30);
+    }
+    await writeSystemState(state);
+
+    res.write("data: {\"type\":\"done\"}\n\n");
+    res.end();
+  } catch (error) {
+    res.write(`data: ${JSON.stringify({ type: "error", message: String(error) })}\n\n`);
+    res.end();
+  } finally {
+    activeStreams.delete(requestId);
+  }
 });
 
 app.listen(port, () => {

@@ -9,8 +9,11 @@ NEXUS OS is a local-first mission control dashboard for running multiple AI harn
 - First-run onboarding that forces users into `9router` setup first
 - 9router settings panel (API key, base URL, default model, fallback order)
 - Workspace manager (create/switch/delete + file tree + metadata)
-- Unified chat scaffold endpoint that routes through a 9router abstraction stub
+- Harness adapter layer with OpenAI-compatible and generic harness endpoint support
+- Streaming chat with token-by-token updates
+- Stop + Resend controls in unified chat status bar
 - Persistent local runtime state (`data/system-state.local.json`) initialized from template
+- Pinokio launcher files (`install.js`, `start.js`, `reset.js`, `update.js`, `pinokio.js`, `pinokio.json`)
 
 ## Repo Layout
 
@@ -45,15 +48,29 @@ npm run dev
 - Save config
 - Select an agent and begin chats
 
+## Run With Pinokio
+
+The repository includes native Pinokio launcher scripts at the project root.
+
+- `install.js`: installs root and app dependencies
+- `start.js`: runs backend + frontend and publishes web URL to Pinokio
+- `update.js`: pulls latest changes and refreshes dependencies
+- `reset.js`: clears dependencies/build output and local runtime state
+- `pinokio.js` + `pinokio.json`: Pinokio menu and metadata
+
+In Pinokio:
+
+1. Open this repo as an app.
+2. Click `Install`.
+3. Click `Start`.
+4. Open `Open NEXUS OS`.
+
 ## Important Security Note
 
 User API keys are stored only in `data/system-state.local.json` (gitignored). Do not commit secrets.
 
 ## Next Implementation Steps
 
-- Replace chat scaffold endpoint with real harness adapters
-- Add streaming token output and stop/resend controls
 - Add Whisper (STT) and Piper (TTS) integration services
 - Add cookbook module for local model installs
 - Add task resume/replay with retry policy controls
-- Add Pinokio package scripts for one-click local deployment
