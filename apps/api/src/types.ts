@@ -4,6 +4,16 @@ export type HarnessConfig = {
   endpoint: string;
   models: string[];
   defaultModel: string;
+  adapter?: {
+    protocol?: "openai" | "generic" | "hybrid";
+    streamProtocol?: "openai-sse" | "custom-sse" | "none";
+    authMode?: "bearer" | "x-api-key" | "both" | "none";
+    healthPath?: string;
+    openAiPath?: string;
+    genericPaths?: string[];
+    streamPath?: string;
+    customHeaders?: Record<string, string>;
+  };
 };
 
 export type ToolConfig = {

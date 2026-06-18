@@ -8,6 +8,8 @@ type AdapterRequest = {
   signal?: AbortSignal;
 };
 
+type AdapterConfig = NonNullable<HarnessConfig["adapter"]>;
+
 export type AdapterMeta = {
   model: string;
   provider: string;
@@ -40,7 +42,7 @@ const REQUEST_TIMEOUT_MS = 35000;
 export async function invokeHarness(input: AdapterRequest): Promise<AdapterResult> {
   const startedAt = Date.now();
   const { harness, message, history, state, signal } = input;
-  const models = uniqueModels([state.router9.defaultModel, ...state.router9.fallbackOrder]);
+  const models = resolveModelOrder(harness, state);
 
   for (let index = 0; index < models.length; index += 1) {
     const model = models[index];
@@ -75,7 +77,7 @@ export async function invokeHarness(input: AdapterRequest): Promise<AdapterResul
   const fallback = [
     `Harness ${harness.name} is currently unreachable.`,
     "",
-    "All adapter endpoints failed; this local fallback keeps the workflow moving.",
+    "All configured adapter paths failed. Local fallback response returned.",
     `Prompt echo: ${message}`,
   ].join("\n");
 
@@ -97,12 +99,12 @@ export async function invokeHarness(input: AdapterRequest): Promise<AdapterResul
 export async function* streamHarness(input: AdapterRequest): AsyncGenerator<StreamChunk> {
   const { harness, message, history, state, signal } = input;
   const startedAt = Date.now();
-  const models = uniqueModels([state.router9.defaultModel, ...state.router9.fallbackOrder]);
+  const models = resolveModelOrder(harness, state);
 
   for (let index = 0; index < models.length; index += 1) {
     const model = models[index];
-    const streamResult = await tryOpenAiStream({
-      endpoint: harness.endpoint,
+    const stream = await tryHarnessStream({
+      harness,
       model,
       message,
       history,
@@ -110,29 +112,28 @@ export async function* streamHarness(input: AdapterRequest): AsyncGenerator<Stre
       signal,
     });
 
-    if (!streamResult) {
+    if (!stream) {
       continue;
     }
 
     let output = "";
-    const provider = "9router";
-
     yield {
       type: "meta",
       meta: {
         model,
-        provider,
+        provider: "9router",
         fallbackUsed: index > 0,
         elapsedMs: 0,
         tokenUsage: { input: estimateTokens(message), output: 0 },
       },
     };
 
-    for await (const token of streamResult) {
+    for await (const token of stream) {
       if (signal?.aborted) {
         yield { type: "done" };
         return;
       }
+
       output += token;
       yield { type: "delta", text: token };
     }
@@ -141,7 +142,7 @@ export async function* streamHarness(input: AdapterRequest): AsyncGenerator<Stre
       type: "meta",
       meta: {
         model,
-        provider,
+        provider: "9router",
         fallbackUsed: index > 0,
         elapsedMs: Date.now() - startedAt,
         tokenUsage: { input: estimateTokens(message), output: estimateTokens(output) },
@@ -153,14 +154,14 @@ export async function* streamHarness(input: AdapterRequest): AsyncGenerator<Stre
 
   const single = await invokeHarness(input);
   yield { type: "meta", meta: single.meta };
+  const parts = single.content.split(/(\s+)/);
 
-  const words = single.content.split(/(\s+)/);
-  for (const token of words) {
+  for (const part of parts) {
     if (signal?.aborted) {
       yield { type: "done" };
       return;
     }
-    yield { type: "delta", text: token };
+    yield { type: "delta", text: part };
     await sleep(24);
   }
 
@@ -176,37 +177,65 @@ async function tryHarnessEndpoints(input: {
   signal?: AbortSignal;
 }): Promise<AttemptResult | null> {
   const { harness, model, message, history, state, signal } = input;
+  const config = getAdapterConfig(harness);
 
-  const custom = await requestCustomJson(harness.endpoint, model, message, history, state, signal);
-  if (custom) {
-    return custom;
+  if (config.protocol !== "openai") {
+    const generic = await requestGenericJson(harness, model, message, history, state, signal);
+    if (generic) {
+      return generic;
+    }
   }
 
-  const openAi = await requestOpenAiJson(harness.endpoint, model, message, history, state, signal);
-  if (openAi) {
-    return openAi;
+  if (config.protocol !== "generic") {
+    const openAi = await requestOpenAiJson(harness, model, message, history, state, signal);
+    if (openAi) {
+      return openAi;
+    }
   }
 
   return null;
 }
 
-async function requestCustomJson(
-  endpoint: string,
+async function tryHarnessStream(input: {
+  harness: HarnessConfig;
+  model: string;
+  message: string;
+  history: ChatMessage[];
+  state: SystemState;
+  signal?: AbortSignal;
+}): Promise<AsyncGenerator<string> | null> {
+  const { harness, model, message, history, state, signal } = input;
+  const config = getAdapterConfig(harness);
+
+  if (config.streamProtocol === "none") {
+    return null;
+  }
+
+  if (config.streamProtocol === "custom-sse") {
+    return requestGenericStream(harness, model, message, history, state, signal);
+  }
+
+  return requestOpenAiStream(harness, model, message, history, state, signal);
+}
+
+async function requestGenericJson(
+  harness: HarnessConfig,
   model: string,
   message: string,
   history: ChatMessage[],
   state: SystemState,
   signal?: AbortSignal,
 ): Promise<AttemptResult | null> {
-  const paths = ["/api/chat", "/chat"];
+  const config = getAdapterConfig(harness);
+  const paths = config.genericPaths.length > 0 ? config.genericPaths : ["/api/chat", "/chat"];
 
   for (const path of paths) {
     try {
       const response = await fetchWithTimeout(
-        `${endpoint}${path}`,
+        `${harness.endpoint}${path}`,
         {
           method: "POST",
-          headers: buildHeaders(state),
+          headers: buildHeaders(harness, state),
           body: JSON.stringify({
             model,
             message,
@@ -233,7 +262,7 @@ async function requestCustomJson(
 
       return { content, provider: "9router" };
     } catch {
-      // Try next endpoint shape
+      // Try next configured path.
     }
   }
 
@@ -241,19 +270,21 @@ async function requestCustomJson(
 }
 
 async function requestOpenAiJson(
-  endpoint: string,
+  harness: HarnessConfig,
   model: string,
   message: string,
   history: ChatMessage[],
   state: SystemState,
   signal?: AbortSignal,
 ): Promise<AttemptResult | null> {
+  const config = getAdapterConfig(harness);
+
   try {
     const response = await fetchWithTimeout(
-      `${endpoint}/v1/chat/completions`,
+      `${harness.endpoint}${config.openAiPath}`,
       {
         method: "POST",
-        headers: buildHeaders(state),
+        headers: buildHeaders(harness, state),
         body: JSON.stringify({
           model,
           stream: false,
@@ -280,22 +311,22 @@ async function requestOpenAiJson(
   }
 }
 
-async function tryOpenAiStream(input: {
-  endpoint: string;
-  model: string;
-  message: string;
-  history: ChatMessage[];
-  state: SystemState;
-  signal?: AbortSignal;
-}): Promise<AsyncGenerator<string> | null> {
-  const { endpoint, model, message, history, state, signal } = input;
+async function requestOpenAiStream(
+  harness: HarnessConfig,
+  model: string,
+  message: string,
+  history: ChatMessage[],
+  state: SystemState,
+  signal?: AbortSignal,
+): Promise<AsyncGenerator<string> | null> {
+  const config = getAdapterConfig(harness);
 
   try {
     const response = await fetchWithTimeout(
-      `${endpoint}/v1/chat/completions`,
+      `${harness.endpoint}${config.openAiPath}`,
       {
         method: "POST",
-        headers: buildHeaders(state),
+        headers: buildHeaders(harness, state),
         body: JSON.stringify({
           model,
           stream: true,
@@ -316,6 +347,46 @@ async function tryOpenAiStream(input: {
   }
 }
 
+async function requestGenericStream(
+  harness: HarnessConfig,
+  model: string,
+  message: string,
+  history: ChatMessage[],
+  state: SystemState,
+  signal?: AbortSignal,
+): Promise<AsyncGenerator<string> | null> {
+  const config = getAdapterConfig(harness);
+
+  try {
+    const response = await fetchWithTimeout(
+      `${harness.endpoint}${config.streamPath}`,
+      {
+        method: "POST",
+        headers: buildHeaders(harness, state),
+        body: JSON.stringify({
+          model,
+          message,
+          history,
+          router: {
+            baseUrl: state.router9.baseUrl,
+            fallbackOrder: state.router9.fallbackOrder,
+          },
+        }),
+        signal,
+      },
+      REQUEST_TIMEOUT_MS,
+    );
+
+    if (!response.ok || !response.body) {
+      return null;
+    }
+
+    return consumeGenericSse(response.body);
+  } catch {
+    return null;
+  }
+}
+
 async function* consumeOpenAiStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -330,13 +401,13 @@ async function* consumeOpenAiStream(stream: ReadableStream<Uint8Array>): AsyncGe
     buffer += decoder.decode(value, { stream: true });
 
     while (true) {
-      const lineBreak = buffer.indexOf("\n");
-      if (lineBreak === -1) {
+      const breakAt = buffer.indexOf("\n");
+      if (breakAt === -1) {
         break;
       }
 
-      const line = buffer.slice(0, lineBreak).trim();
-      buffer = buffer.slice(lineBreak + 1);
+      const line = buffer.slice(0, breakAt).trim();
+      buffer = buffer.slice(breakAt + 1);
 
       if (!line.startsWith("data:")) {
         continue;
@@ -353,32 +424,116 @@ async function* consumeOpenAiStream(stream: ReadableStream<Uint8Array>): AsyncGe
             delta?: { content?: string };
           }>;
         };
-
         const token = parsed.choices?.[0]?.delta?.content;
         if (token) {
           yield token;
         }
       } catch {
-        // Skip malformed chunks
+        // Ignore malformed chunks.
       }
     }
   }
 }
 
-function buildHeaders(state: SystemState): Record<string, string> {
+async function* consumeGenericSse(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+
+    while (true) {
+      const split = buffer.indexOf("\n\n");
+      if (split === -1) {
+        break;
+      }
+
+      const frame = buffer.slice(0, split);
+      buffer = buffer.slice(split + 2);
+
+      const data = frame
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .join("\n");
+
+      if (!data || data === "[DONE]") {
+        continue;
+      }
+
+      try {
+        const parsed = JSON.parse(data) as Record<string, unknown>;
+        const token =
+          (parsed.delta as string | undefined) ??
+          (parsed.token as string | undefined) ??
+          (parsed.text as string | undefined) ??
+          (parsed.content as string | undefined) ??
+          "";
+
+        if (token) {
+          yield token;
+        }
+      } catch {
+        yield data;
+      }
+    }
+  }
+}
+
+function getAdapterConfig(harness: HarnessConfig): Required<AdapterConfig> {
   return {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${state.router9.apiKey}`,
-    "X-9Router-Api-Key": state.router9.apiKey,
-    "X-9Router-Base-Url": state.router9.baseUrl,
+    protocol: harness.adapter?.protocol ?? "hybrid",
+    streamProtocol: harness.adapter?.streamProtocol ?? "openai-sse",
+    authMode: harness.adapter?.authMode ?? "both",
+    healthPath: harness.adapter?.healthPath ?? "/health",
+    openAiPath: harness.adapter?.openAiPath ?? "/v1/chat/completions",
+    genericPaths: harness.adapter?.genericPaths ?? ["/api/chat", "/chat"],
+    streamPath: harness.adapter?.streamPath ?? "/api/chat/stream",
+    customHeaders: harness.adapter?.customHeaders ?? {},
   };
 }
 
-function buildOpenAiMessages(message: string, history: ChatMessage[]) {
-  if (history.length > 0) {
-    return history.map((entry) => ({ role: entry.role, content: entry.content }));
+function buildHeaders(harness: HarnessConfig, state: SystemState): Record<string, string> {
+  const config = getAdapterConfig(harness);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-9Router-Base-Url": state.router9.baseUrl,
+    ...config.customHeaders,
+  };
+
+  if (config.authMode === "bearer" || config.authMode === "both") {
+    headers.Authorization = `Bearer ${state.router9.apiKey}`;
   }
-  return [{ role: "user", content: message }];
+
+  if (config.authMode === "x-api-key" || config.authMode === "both") {
+    headers["X-API-Key"] = state.router9.apiKey;
+    headers["X-9Router-Api-Key"] = state.router9.apiKey;
+  }
+
+  return headers;
+}
+
+function resolveModelOrder(harness: HarnessConfig, state: SystemState): string[] {
+  const preferred = uniqueModels([harness.defaultModel, ...harness.models]);
+  const router = uniqueModels([state.router9.defaultModel, ...state.router9.fallbackOrder]);
+
+  const overlap = router.filter((model) => preferred.includes(model));
+  if (overlap.length > 0) {
+    return overlap;
+  }
+
+  return uniqueModels([...router, ...preferred]);
+}
+
+function buildOpenAiMessages(message: string, history: ChatMessage[]) {
+  const entries = history.length > 0 ? history : [{ id: "user", role: "user", content: message, createdAt: "" }];
+  return entries.map((entry) => ({ role: entry.role, content: entry.content }));
 }
 
 function extractText(payload: Record<string, unknown>): string {

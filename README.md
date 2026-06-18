@@ -10,6 +10,7 @@ NEXUS OS is a local-first mission control dashboard for running multiple AI harn
 - 9router settings panel (API key, base URL, default model, fallback order)
 - Workspace manager (create/switch/delete + file tree + metadata)
 - Harness adapter layer with OpenAI-compatible and generic harness endpoint support
+- Per-harness adapter compatibility config (protocol/auth/path/stream strategy)
 - Streaming chat with token-by-token updates
 - Stop + Resend controls in unified chat status bar
 - Persistent local runtime state (`data/system-state.local.json`) initialized from template
@@ -64,6 +65,20 @@ In Pinokio:
 2. Click `Install`.
 3. Click `Start`.
 4. Open `Open NEXUS OS`.
+
+## Harness Compatibility Tuning
+
+Each harness supports adapter overrides in `config/harnesses.json` under `adapter`:
+
+- `protocol`: `openai | generic | hybrid`
+- `streamProtocol`: `openai-sse | custom-sse | none`
+- `authMode`: `bearer | x-api-key | both | none`
+- `healthPath`: health probe path
+- `openAiPath`: OpenAI-compatible chat path
+- `genericPaths`: generic JSON chat paths
+- `streamPath`: generic SSE stream path
+
+This allows integrating harnesses with different API shapes without changing frontend code.
 
 ## Important Security Note
 

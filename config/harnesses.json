@@ -5,35 +5,74 @@
       "name": "Hermes",
       "endpoint": "http://localhost:8001",
       "models": ["deepseek-v3", "qwen-2.5-72b", "claude-3.5-sonnet"],
-      "defaultModel": "deepseek-v3"
+      "defaultModel": "deepseek-v3",
+      "adapter": {
+        "protocol": "hybrid",
+        "streamProtocol": "openai-sse",
+        "authMode": "both",
+        "healthPath": "/health",
+        "openAiPath": "/v1/chat/completions",
+        "genericPaths": ["/api/chat", "/chat"]
+      }
     },
     {
       "id": "openclaw",
       "name": "OpenClaw",
       "endpoint": "http://localhost:8002",
       "models": ["qwen-2.5-72b", "llama-3.3-70b"],
-      "defaultModel": "qwen-2.5-72b"
+      "defaultModel": "qwen-2.5-72b",
+      "adapter": {
+        "protocol": "generic",
+        "streamProtocol": "custom-sse",
+        "authMode": "x-api-key",
+        "healthPath": "/health",
+        "genericPaths": ["/api/chat", "/chat"],
+        "streamPath": "/api/chat/stream"
+      }
     },
     {
       "id": "free-claude-code",
       "name": "Free Claude Code",
       "endpoint": "http://localhost:8003",
       "models": ["claude-3.5-sonnet", "claude-3.7-sonnet"],
-      "defaultModel": "claude-3.5-sonnet"
+      "defaultModel": "claude-3.5-sonnet",
+      "adapter": {
+        "protocol": "openai",
+        "streamProtocol": "openai-sse",
+        "authMode": "bearer",
+        "healthPath": "/health",
+        "openAiPath": "/v1/chat/completions"
+      }
     },
     {
       "id": "free-code",
       "name": "Free-Code",
       "endpoint": "http://localhost:8004",
       "models": ["claude-3.7-sonnet", "qwen-coder-plus"],
-      "defaultModel": "claude-3.7-sonnet"
+      "defaultModel": "claude-3.7-sonnet",
+      "adapter": {
+        "protocol": "openai",
+        "streamProtocol": "openai-sse",
+        "authMode": "bearer",
+        "healthPath": "/health",
+        "openAiPath": "/v1/chat/completions"
+      }
     },
     {
       "id": "opencode",
       "name": "OpenCode",
       "endpoint": "http://localhost:8005",
       "models": ["qwen-coder-plus", "deepseek-v3"],
-      "defaultModel": "qwen-coder-plus"
+      "defaultModel": "qwen-coder-plus",
+      "adapter": {
+        "protocol": "hybrid",
+        "streamProtocol": "custom-sse",
+        "authMode": "both",
+        "healthPath": "/healthz",
+        "openAiPath": "/v1/chat/completions",
+        "genericPaths": ["/api/chat", "/chat"],
+        "streamPath": "/api/chat/stream"
+      }
     }
   ]
 }

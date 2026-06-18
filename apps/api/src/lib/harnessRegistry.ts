@@ -33,7 +33,8 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
 export async function resolveHarnessHealth(harnesses: HarnessConfig[]) {
   const checks = harnesses.map(async (harness) => {
     try {
-      const response = await fetchWithTimeout(`${harness.endpoint}/health`, 1200);
+      const healthPath = harness.adapter?.healthPath ?? "/health";
+      const response = await fetchWithTimeout(`${harness.endpoint}${healthPath}`, 1200);
       if (response.ok) {
         return {
           ...harness,
