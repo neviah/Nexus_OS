@@ -74,6 +74,18 @@ type ChatMeta = {
   };
 };
 
+type FailedTask = {
+  requestId: string;
+  harnessId: string;
+  workspaceId: string;
+  message: string;
+  startedAt: string;
+  updatedAt: string;
+  status: "running" | "failed" | "completed" | "aborted";
+  partialOutput: string;
+  error?: string;
+};
+
 type StreamEnvelope =
   | { type: "meta"; meta: ChatMeta }
   | { type: "delta"; text: string }
@@ -117,6 +129,9 @@ function App() {
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [lastUserPrompt, setLastUserPrompt] = useState<string>("");
   const [workspaceTree, setWorkspaceTree] = useState<WorkspaceTreeNode | null>(null);
+  const [failedTasks, setFailedTasks] = useState<FailedTask[]>([]);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [resumeBusyId, setResumeBusyId] = useState<string | null>(null);
   const [createWorkspaceName, setCreateWorkspaceName] = useState("");
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -142,8 +157,15 @@ function App() {
       : payload.selectedPane;
     setSelectedPane(preferredPane);
     await loadWorkspaceTree(payload.activeWorkspaceId);
+    await loadFailedTasks();
     setStatusMessage(payload.onboardingRequired ? "First run detected: Configure 9router to unlock harnesses." : "Ready");
   }, []);
+
+  async function loadFailedTasks() {
+    const response = await fetch("/api/chat/tasks/resumable");
+    const payload = (await response.json()) as { tasks: FailedTask[] };
+    setFailedTasks(payload.tasks);
+  }
 
   useEffect(() => {
     // Initial app hydration intentionally seeds UI state from backend bootstrap.
@@ -373,6 +395,54 @@ function App() {
     await loadBootstrap();
   }
 
+  async function onResumeTask(task: FailedTask) {
+    if (resumeBusyId) {
+      return;
+    }
+
+    setResumeBusyId(task.requestId);
+    setStatusMessage(`Resuming failed task ${task.requestId.slice(0, 8)}...`);
+
+    const response = await fetch(`/api/chat/tasks/${task.requestId}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to resume task");
+      setResumeBusyId(null);
+      return;
+    }
+
+    const payload = (await response.json()) as {
+      content: string;
+      meta: ChatMeta;
+      requestId: string;
+    };
+
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: task.message,
+      createdAt: task.startedAt,
+    };
+
+    const assistantMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: `${task.partialOutput}${payload.content}`,
+      createdAt: new Date().toISOString(),
+    };
+
+    setMessages([userMessage, assistantMessage]);
+    setChatMeta(payload.meta);
+    setSelectedPane({ type: "agent", id: task.harnessId });
+    setStatusMessage("Task resumed and merged into chat view.");
+    setResumeBusyId(null);
+    await loadFailedTasks();
+  }
+
   function renderTree(node: WorkspaceTreeNode): ReactElement {
     return (
       <li key={node.path} className={`tree-node ${node.type}`}>
@@ -562,6 +632,16 @@ function App() {
                   <span className="chip">fallback: {chatMeta?.fallbackUsed ? "yes" : "no"}</span>
                   <span className="chip">time: {chatMeta?.elapsedMs ?? 0} ms</span>
                   <span className="chip">tokens: {(chatMeta?.tokenUsage.input ?? 0) + (chatMeta?.tokenUsage.output ?? 0)}</span>
+                  <button
+                    type="button"
+                    className="ghost chip-button"
+                    onClick={() => {
+                      const card = document.getElementById("failed-tasks-card");
+                      card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                    }}
+                  >
+                    failed tasks: {failedTasks.length}
+                  </button>
                   <button type="button" className="ghost chip-button" onClick={() => void onStopStream()} disabled={!chatBusy}>
                     Stop
                   </button>
@@ -653,6 +733,48 @@ function App() {
           <section className="tree-panel">
             <h3>File Tree</h3>
             {workspaceTree ? <ul className="tree-root">{renderTree(workspaceTree)}</ul> : <p>Loading workspace tree...</p>}
+          </section>
+
+          <section id="failed-tasks-card" className="failed-tasks-panel">
+            <div className="failed-tasks-header">
+              <h3>Failed Tasks</h3>
+              <button type="button" className="ghost" onClick={() => void loadFailedTasks()}>
+                Refresh
+              </button>
+            </div>
+
+            {failedTasks.length === 0 ? <p>No resumable failures.</p> : null}
+
+            <ul className="failed-task-list">
+              {failedTasks.slice(0, 5).map((task) => (
+                <li key={task.requestId}>
+                  <div>
+                    <strong>{task.harnessId}</strong>
+                    <small>{new Date(task.updatedAt).toLocaleString()}</small>
+                    <small>{task.error ?? "stream interrupted"}</small>
+                  </div>
+                  <div className="failed-task-actions">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setExpandedTaskId((current) => (current === task.requestId ? null : task.requestId))}
+                    >
+                      {expandedTaskId === task.requestId ? "Hide" : "View"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void onResumeTask(task)}
+                      disabled={resumeBusyId === task.requestId}
+                    >
+                      {resumeBusyId === task.requestId ? "Resuming..." : "Resume"}
+                    </button>
+                  </div>
+                  {expandedTaskId === task.requestId ? (
+                    <pre className="failed-task-preview">{task.partialOutput || "No partial output"}</pre>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
           </section>
         </aside>
       </section>

@@ -500,6 +500,57 @@ textarea {
   margin-top: 6px;
 }
 
+.failed-tasks-panel {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.failed-tasks-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.failed-task-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.failed-task-list li {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(18, 29, 35, 0.75);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.failed-task-list small {
+  display: block;
+  color: var(--ink-3);
+}
+
+.failed-task-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.failed-task-preview {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(9, 15, 20, 0.9);
+  color: var(--ink-2);
+  padding: 8px;
+  white-space: pre-wrap;
+  max-height: 180px;
+  overflow: auto;
+}
+
 @media (max-width: 1280px) {
   .pane-grid {
     grid-template-columns: 1fr;
