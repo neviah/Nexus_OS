@@ -1,0 +1,39 @@
+{
+  "harnesses": [
+    {
+      "id": "hermes",
+      "name": "Hermes",
+      "endpoint": "http://localhost:8001",
+      "models": ["deepseek-v3", "qwen-2.5-72b", "claude-3.5-sonnet"],
+      "defaultModel": "deepseek-v3"
+    },
+    {
+      "id": "openclaw",
+      "name": "OpenClaw",
+      "endpoint": "http://localhost:8002",
+      "models": ["qwen-2.5-72b", "llama-3.3-70b"],
+      "defaultModel": "qwen-2.5-72b"
+    },
+    {
+      "id": "free-claude-code",
+      "name": "Free Claude Code",
+      "endpoint": "http://localhost:8003",
+      "models": ["claude-3.5-sonnet", "claude-3.7-sonnet"],
+      "defaultModel": "claude-3.5-sonnet"
+    },
+    {
+      "id": "free-code",
+      "name": "Free-Code",
+      "endpoint": "http://localhost:8004",
+      "models": ["claude-3.7-sonnet", "qwen-coder-plus"],
+      "defaultModel": "claude-3.7-sonnet"
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "endpoint": "http://localhost:8005",
+      "models": ["qwen-coder-plus", "deepseek-v3"],
+      "defaultModel": "qwen-coder-plus"
+    }
+  ]
+}

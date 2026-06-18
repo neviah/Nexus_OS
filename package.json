@@ -1,0 +1,15 @@
+{
+  "name": "nexus-os",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NEXUS OS - mission control dashboard for multi-harness agents",
+  "scripts": {
+    "dev": "concurrently \"npm --prefix apps/api run dev\" \"npm --prefix apps/web run dev\"",
+    "build": "npm --prefix apps/api run build && npm --prefix apps/web run build",
+    "lint": "npm --prefix apps/api run lint && npm --prefix apps/web run lint",
+    "start": "npm --prefix apps/api run start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

@@ -1,0 +1,232 @@
+﻿________________
+
+
+AGENTIC OS — DESIGN DOCUMENT (v1.0)
+A Unified Multi‑Harness Agent Operating System
+________________
+
+
+1. Vision & Goals
+1.1 Purpose
+Create a unified, extensible Agentic Operating System that can run multiple AI harnesses (Hermes, OpenClaw, Free Claude Code, Free‑Code, OpenCode, etc.) inside a single interface, with:
+* A consistent UI across all harnesses
+* A shared workspace
+* A tool ecosystem (starting with 9router)
+* Voice support (TTS/STT)
+* Future orchestration capabilities
+* Pinokio‑friendly architecture
+* Provider fallback via 9router
+This is not a launcher — it’s a real OS layer for agents.
+1.2 Core Principles
+* Unified UX: All harnesses feel like apps inside the same OS.
+* Modular: Add/remove harnesses and tools without breaking anything.
+* Local‑first: Everything runs locally unless explicitly configured otherwise.
+* Extensible: New tools (video gen, image gen, embeddings, browser automation) can be added easily.
+* Stable: 9router ensures model fallback and reliability.
+* Future‑proof: Architecture supports future multi‑agent orchestration.
+________________
+
+
+2. High‑Level Architecture
+┌──────────────────────────────────────────────┐
+│                 AgentOS UI                   │
+│  (React + Tailwind, 3‑pane layout)           │
+│                                              │
+│  Left Pane: Agents + Tools                   │
+│  Middle Pane: Unified Chat UI                │
+│  Right Pane: Workspace + File Tree           │
+└───────────────────────┬──────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────────────────┐
+│               AgentOS Backend                │
+│  - Harness Registry                          │
+│  - Workspace Manager                         │
+│  - 9router Integration Layer                 │
+│  - TTS/STT Engine                            │
+│  - Task Resume Engine                        │
+│  - Logs + Telemetry                          │
+└───────────────────────┬──────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────────────────┐
+│              External Harnesses              │
+│  Hermes / OpenClaw / Free Claude Code        │
+│  Free‑Code / OpenCode / Trading Agent        │
+└──────────────────────────────────────────────┘
+
+
+________________
+
+
+3. UI Design Specification
+3.1 Layout Overview
+A clean, modern 3‑pane layout, using React + Tailwind:
+┌──────────────────┬───────────────────────────────┬──────────────────┐
+│     Left Pane     │         Middle Pane           │    Right Pane     │
+│  Agents + Tools   │     Unified Chat UI           │ Workspace + Files │
+└──────────────────┴───────────────────────────────┴──────────────────┘
+
+
+________________
+
+
+3.2 Left Pane — Agents & Tools
+Sections
+A. Agents (Harnesses)
+* Hermes
+* OpenClaw
+* Free Claude Code (https://github.com/Alishahryar1/free-claude-codend discord like OpenClaw (voice supported) )
+* Free‑Code (freecodexyz/free-code: The free build of Claude Code. All telemetry removed, security-prompt guardrails stripped, all experimental features enabled. )
+* OpenCode (anomalyco/https://github.com/anomalyco/opencodeopencode: The open source coding agent. )
+Each item shows:
+* Name
+* Status (online/offline)
+* Model currently in use
+* Provider (via 9router)
+* Small colored dot for health
+B. Tools (Collapsible Section)
+* 9router (first tool)
+* Image Generator (Future tool)
+* Video Generator (Future tool)
+* (Future tools added easily)
+Behavior
+* Clicking an agent loads its chat UI in the middle pane.
+* Clicking a tool loads its tool UI in the middle pane.
+* Tools and agents share the same workspace context.
+________________
+
+
+3.3 Middle Pane — Unified Harness UI
+Core Components
+A. Chat Window
+* User messages
+* Agent messages
+* Markdown rendering
+* Code blocks
+* Tool call inspector
+* Streaming responses
+* Voice playback (if TTS enabled)
+B. Status Bar
+Shows:
+* Model name
+* Provider (via 9router)
+* Fallback indicator
+* “Thinking…” animation
+* Time elapsed
+* Token usage
+* Stop button
+* resend
+C. Input Area
+* Text input
+* Microphone button (push‑to‑talk)
+* File upload
+* Send button
+Uniformity
+Every harness uses the same UI, regardless of its internal API.
+This is the heart of your OS.
+________________
+
+
+3.4 Right Pane — Workspace + File Tree
+A. Workspace Selector
+Dropdown:
+* Create new workspace
+* Switch workspace
+* Delete workspace
+B. File Tree
+* Shows files in the selected workspace
+* No diff view (for now)
+* No file editing (for now)
+C. Workspace Metadata
+* Path
+* Size
+* Last modified
+* Active harnesses using it
+________________
+
+
+4. Backend Architecture
+4.1 Harness Registry
+A JSON or YAML config:
+harnesses:
+  - id: hermes
+    name: Hermes
+    endpoint: http://localhost:8001
+    models: [deepseek-v3, qwen-2.5-72b, claude-3.5-sonnet]
+  - id: openclaw
+    name: OpenClaw
+    endpoint: http://localhost:8002
+    models: [...]
+
+
+The UI loads this dynamically.
+________________
+
+
+4.2 9router Integration Layer
+This is critical.
+Responsibilities
+* Route all model requests
+* Detect provider failure
+* Retry with fallback
+* Log provider health
+* Expose status to UI
+* Provide model availability list
+UI Exposure
+In the Tools section:
+* Provider list
+* Model list
+* Fallback order
+* Routing logs
+* Error logs
+* Health indicators
+Harness Behavior
+Harnesses never talk to providers directly.
+They talk to AgentOS Backend → 9router → Providers.
+________________
+
+
+4.3 Workspace Manager
+* Creates workspace folders
+* Manages file tree
+* Provides file metadata
+* Ensures all harnesses share the same workspace
+________________
+
+
+4.4 TTS/STT Engine
+STT
+* Whisper (local)
+* Push‑to‑talk
+* Streaming mode (future)
+TTS
+* Piper (local)
+* Voice profiles per harness
+________________
+
+
+4.5 Task Resume Engine
+If a provider dies mid‑response:
+* 9router retries
+* AgentOS replays last message
+* Harness resumes task
+This is essential for long coding tasks.
+________________
+
+
+5. Pinokio Integration
+Pinokio is perfect for this project.
+Your AgentOS:
+* installs harnesses
+* installs 9router
+* installs Whisper/Piper
+* runs everything locally
+* exposes a unified UI
+Pinokio apps are allowed to orchestrate other tools.
+You’re not redistributing code — you’re installing dependencies.
+This is 100% safe for GitHub.
+________________
+
+
+The name for this Agentic OS, is: NEXUS OS

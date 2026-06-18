@@ -1,0 +1,45 @@
+{
+  "onboardingComplete": false,
+  "activeWorkspaceId": "default",
+  "selectedPane": {
+    "type": "tool",
+    "id": "9router"
+  },
+  "router9": {
+    "apiKey": "",
+    "baseUrl": "https://api.9router.io/v1",
+    "defaultModel": "deepseek-v3",
+    "fallbackOrder": [
+      "deepseek-v3",
+      "qwen-2.5-72b",
+      "claude-3.5-sonnet"
+    ],
+    "providers": [
+      {
+        "id": "openrouter",
+        "name": "OpenRouter",
+        "health": "healthy",
+        "latencyMs": 412
+      },
+      {
+        "id": "together",
+        "name": "Together",
+        "health": "healthy",
+        "latencyMs": 528
+      },
+      {
+        "id": "fireworks",
+        "name": "Fireworks",
+        "health": "degraded",
+        "latencyMs": 1220
+      }
+    ],
+    "logs": [
+      {
+        "timestamp": "2026-06-18T00:00:00.000Z",
+        "level": "info",
+        "message": "System initialized. Awaiting 9router API key setup."
+      }
+    ]
+  }
+}
