@@ -90,6 +90,12 @@ Run profile/schema conformance tests:
 npm --prefix apps/api run test:conformance
 ```
 
+Run 9router transport contract tests:
+
+```bash
+npm --prefix apps/api run test:contract
+```
+
 Run live endpoint conformance probe:
 
 ```bash
@@ -97,6 +103,15 @@ npm --prefix apps/api run conformance
 ```
 
 The live probe checks adapter config quality and attempts health endpoint verification for each harness.
+
+## Startup Gating
+
+NEXUS OS now gates agent usage on startup readiness:
+
+- 9router must be configured
+- At least one harness must pass live health checks
+
+Use the right-pane `Run Startup Check` button (or `GET /api/startup/check`) to verify readiness and clear blockers.
 
 ## Important Security Note
 

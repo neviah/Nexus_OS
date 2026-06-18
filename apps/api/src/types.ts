@@ -108,3 +108,12 @@ export type TaskRecord = {
     };
   };
 };
+
+export type StartupReadiness = {
+  ready: boolean;
+  blockers: string[];
+  onboardingComplete: boolean;
+  liveHarnesses: number;
+  totalHarnesses: number;
+  checkedAt: string;
+};

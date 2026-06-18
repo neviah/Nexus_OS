@@ -16,6 +16,11 @@
 - `GET /api/harnesses/conformance`
   - Runs configuration and live endpoint conformance checks per harness profile.
 
+## Startup Readiness
+
+- `GET /api/startup/check`
+  - Runs live startup checks and returns startup blockers + per-harness conformance summary.
+
 ## 9router
 
 - `GET /api/tools/9router/status`

@@ -1,4 +1,5 @@
 import type { ChatMessage, HarnessConfig, SystemState } from "../types.js";
+import { buildRouterBody, buildRouterHeaders, createRouterContext } from "./routerContract.js";
 
 type AdapterRequest = {
   harness: HarnessConfig;
@@ -227,6 +228,7 @@ async function requestGenericJson(
   signal?: AbortSignal,
 ): Promise<AttemptResult | null> {
   const config = getAdapterConfig(harness);
+  const context = createRouterContext(state, model);
   const paths = config.genericPaths.length > 0 ? config.genericPaths : ["/api/chat", "/chat"];
 
   for (const path of paths) {
@@ -235,15 +237,12 @@ async function requestGenericJson(
         `${harness.endpoint}${path}`,
         {
           method: "POST",
-          headers: buildHeaders(harness, state),
+          headers: buildRouterHeaders(harness, context),
           body: JSON.stringify({
             model,
             message,
             history,
-            router: {
-              baseUrl: state.router9.baseUrl,
-              fallbackOrder: state.router9.fallbackOrder,
-            },
+            router: buildRouterBody(context),
           }),
           signal,
         },
@@ -278,17 +277,19 @@ async function requestOpenAiJson(
   signal?: AbortSignal,
 ): Promise<AttemptResult | null> {
   const config = getAdapterConfig(harness);
+  const context = createRouterContext(state, model);
 
   try {
     const response = await fetchWithTimeout(
       `${harness.endpoint}${config.openAiPath}`,
       {
         method: "POST",
-        headers: buildHeaders(harness, state),
+        headers: buildRouterHeaders(harness, context),
         body: JSON.stringify({
           model,
           stream: false,
           messages: buildOpenAiMessages(message, history),
+          router: buildRouterBody(context),
         }),
         signal,
       },
@@ -320,17 +321,19 @@ async function requestOpenAiStream(
   signal?: AbortSignal,
 ): Promise<AsyncGenerator<string> | null> {
   const config = getAdapterConfig(harness);
+  const context = createRouterContext(state, model);
 
   try {
     const response = await fetchWithTimeout(
       `${harness.endpoint}${config.openAiPath}`,
       {
         method: "POST",
-        headers: buildHeaders(harness, state),
+        headers: buildRouterHeaders(harness, context),
         body: JSON.stringify({
           model,
           stream: true,
           messages: buildOpenAiMessages(message, history),
+          router: buildRouterBody(context),
         }),
         signal,
       },
@@ -356,21 +359,19 @@ async function requestGenericStream(
   signal?: AbortSignal,
 ): Promise<AsyncGenerator<string> | null> {
   const config = getAdapterConfig(harness);
+  const context = createRouterContext(state, model);
 
   try {
     const response = await fetchWithTimeout(
       `${harness.endpoint}${config.streamPath}`,
       {
         method: "POST",
-        headers: buildHeaders(harness, state),
+        headers: buildRouterHeaders(harness, context),
         body: JSON.stringify({
           model,
           message,
           history,
-          router: {
-            baseUrl: state.router9.baseUrl,
-            fallbackOrder: state.router9.fallbackOrder,
-          },
+          router: buildRouterBody(context),
         }),
         signal,
       },
@@ -497,26 +498,6 @@ function getAdapterConfig(harness: HarnessConfig): Required<AdapterConfig> {
     streamPath: harness.adapter?.streamPath ?? "/api/chat/stream",
     customHeaders: harness.adapter?.customHeaders ?? {},
   };
-}
-
-function buildHeaders(harness: HarnessConfig, state: SystemState): Record<string, string> {
-  const config = getAdapterConfig(harness);
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-9Router-Base-Url": state.router9.baseUrl,
-    ...config.customHeaders,
-  };
-
-  if (config.authMode === "bearer" || config.authMode === "both") {
-    headers.Authorization = `Bearer ${state.router9.apiKey}`;
-  }
-
-  if (config.authMode === "x-api-key" || config.authMode === "both") {
-    headers["X-API-Key"] = state.router9.apiKey;
-    headers["X-9Router-Api-Key"] = state.router9.apiKey;
-  }
-
-  return headers;
 }
 
 function resolveModelOrder(harness: HarnessConfig, state: SystemState): string[] {

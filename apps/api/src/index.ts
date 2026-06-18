@@ -9,7 +9,7 @@ import {
 import { readHarnessRegistry, resolveHarnessHealth } from "./lib/harnessRegistry.js";
 import { readSystemState, writeSystemState } from "./lib/stateStore.js";
 import { getRouterSummary } from "./lib/routerStatus.js";
-import type { ChatMessage } from "./types.js";
+import type { ChatMessage, StartupReadiness } from "./types.js";
 import { invokeHarness, streamHarness } from "./lib/harnessAdapter.js";
 import type { AdapterResult } from "./lib/harnessAdapter.js";
 import { runHarnessConformance } from "./lib/conformance.js";
@@ -26,6 +26,27 @@ const app = express();
 const port = Number(process.env.PORT ?? 8080);
 const activeStreams = new Map<string, AbortController>();
 
+function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: number, totalHarnesses: number): StartupReadiness {
+  const blockers: string[] = [];
+
+  if (!onboardingComplete) {
+    blockers.push("9router is not configured.");
+  }
+
+  if (liveHarnesses === 0) {
+    blockers.push("No live harnesses detected. Start at least one harness service.");
+  }
+
+  return {
+    ready: blockers.length === 0,
+    blockers,
+    onboardingComplete,
+    liveHarnesses,
+    totalHarnesses,
+    checkedAt: new Date().toISOString(),
+  };
+}
+
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
@@ -40,6 +61,8 @@ app.get("/api/bootstrap", async (_req, res) => {
   const workspaces = await listWorkspaces({
     [state.activeWorkspaceId]: harnessStatus.filter((h) => h.status === "online").map((h) => h.id),
   });
+  const liveHarnesses = harnessStatus.filter((entry) => entry.status === "online").length;
+  const startup = buildStartupReadiness(state.onboardingComplete, liveHarnesses, harnessStatus.length);
 
   res.json({
     appName: "NEXUS OS",
@@ -47,6 +70,7 @@ app.get("/api/bootstrap", async (_req, res) => {
     selectedPane: state.selectedPane,
     activeWorkspaceId: state.activeWorkspaceId,
     harnesses: harnessStatus,
+    startup,
     tools: [
       {
         id: "9router",
@@ -71,6 +95,19 @@ app.get("/api/harnesses/conformance", async (_req, res) => {
   const harnesses = await readHarnessRegistry();
   const results = await runHarnessConformance(harnesses);
   res.json({ results });
+});
+
+app.get("/api/startup/check", async (_req, res) => {
+  const state = await readSystemState();
+  const harnesses = await readHarnessRegistry();
+  const conformance = await runHarnessConformance(harnesses);
+
+  const liveHarnesses = conformance.filter((item) =>
+    item.checks.some((check) => check.name === "live-health-check" && check.passed)
+  ).length;
+
+  const startup = buildStartupReadiness(state.onboardingComplete, liveHarnesses, harnesses.length);
+  res.json({ startup, conformance });
 });
 
 app.get("/api/tools/9router/status", async (_req, res) => {

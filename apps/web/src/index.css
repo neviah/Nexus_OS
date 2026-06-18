@@ -435,6 +435,19 @@ textarea {
   gap: 8px;
 }
 
+.startup-panel {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  background: rgba(18, 29, 35, 0.75);
+  display: grid;
+  gap: 6px;
+}
+
+.startup-panel small {
+  color: var(--ink-3);
+}
+
 .workspace-switcher {
   display: flex;
   flex-direction: column;

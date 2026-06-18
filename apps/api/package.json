@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "lint": "echo \"No lint configured for api\"",
     "test:conformance": "tsx --test src/tests/conformanceProfiles.test.ts",
+    "test:contract": "tsx --test src/tests/routerContract.test.ts",
     "conformance": "tsx src/tests/runConformance.ts"
   },
   "dependencies": {

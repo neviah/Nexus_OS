@@ -92,12 +92,22 @@ type StreamEnvelope =
   | { type: "done" }
   | { type: "error"; message: string };
 
+type StartupReadiness = {
+  ready: boolean;
+  blockers: string[];
+  onboardingComplete: boolean;
+  liveHarnesses: number;
+  totalHarnesses: number;
+  checkedAt: string;
+};
+
 type BootstrapPayload = {
   appName: string;
   onboardingRequired: boolean;
   selectedPane: PaneSelection;
   activeWorkspaceId: string;
   harnesses: Harness[];
+  startup: StartupReadiness;
   tools: Tool[];
   router9: RouterSummary;
   workspaces: Workspace[];
@@ -135,6 +145,7 @@ function App() {
   const [createWorkspaceName, setCreateWorkspaceName] = useState("");
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toolsOpen, setToolsOpen] = useState(true);
+  const [startupChecking, setStartupChecking] = useState(false);
 
   const activeHarness = useMemo(
     () => boot?.harnesses.find((harness) => harness.id === selectedPane.id) ?? null,
@@ -177,6 +188,26 @@ function App() {
     const response = await fetch(`/api/workspaces/${workspaceId}/tree`);
     const payload = (await response.json()) as { tree: WorkspaceTreeNode };
     setWorkspaceTree(payload.tree);
+  }
+
+  async function onRunStartupCheck() {
+    setStartupChecking(true);
+    setStatusMessage("Running startup check...");
+    const response = await fetch("/api/startup/check");
+    const payload = (await response.json()) as { startup: StartupReadiness };
+
+    setBoot((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        startup: payload.startup,
+      };
+    });
+
+    setStatusMessage(payload.startup.ready ? "Startup checks passed" : "Startup checks found blockers");
+    setStartupChecking(false);
   }
 
   async function onSaveRouterConfig(event: FormEvent) {
@@ -453,6 +484,8 @@ function App() {
   }
 
   const onboardingRequired = boot?.onboardingRequired ?? true;
+  const startupReady = boot?.startup.ready ?? false;
+  const startupBlockers = boot?.startup.blockers ?? [];
 
   return (
     <main className="app-shell">
@@ -473,9 +506,15 @@ function App() {
         </section>
       ) : null}
 
+      {!onboardingRequired && !startupReady ? (
+        <section className="first-run-banner">
+          <strong>Startup blockers:</strong> {startupBlockers.join(" ")}
+        </section>
+      ) : null}
+
       <section className="pane-grid">
         <aside className="pane pane-left">
-          <div className="pane-title-row">
+          <div className="pane-title-row"> || !startupReady
             <h2>Agents</h2>
           </div>
 
@@ -691,6 +730,16 @@ function App() {
 
         <aside className="pane pane-right">
           <h2>Workspace</h2>
+
+          <section className="startup-panel">
+            <h3>Startup Readiness</h3>
+            <small>
+              live harnesses: {boot?.startup.liveHarnesses ?? 0}/{boot?.startup.totalHarnesses ?? 0}
+            </small>
+            <button type="button" className="ghost" onClick={() => void onRunStartupCheck()} disabled={startupChecking}>
+              {startupChecking ? "Checking..." : "Run Startup Check"}
+            </button>
+          </section>
 
           <label className="workspace-switcher">
             Active Workspace
