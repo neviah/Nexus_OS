@@ -470,15 +470,19 @@ textarea {
 .chat-log {
   flex: 1;
   overflow: auto;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   padding-right: 6px;
 }
 
 .message {
-  border-radius: 10px;
-  padding: 10px;
+  border-radius: 14px;
+  padding: 10px 12px;
   background: rgba(17, 27, 33, 0.74);
+  border: 1px solid rgba(47, 71, 79, 0.38);
+  max-width: min(78%, 820px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
 }
 
 .message header {
@@ -490,11 +494,16 @@ textarea {
 }
 
 .message.user {
-  background: rgba(90, 208, 139, 0.08);
+  background: linear-gradient(180deg, rgba(58, 150, 255, 0.2), rgba(45, 112, 196, 0.2));
+  border-color: rgba(72, 151, 246, 0.45);
+  align-self: flex-end;
+  border-bottom-right-radius: 6px;
 }
 
 .message.assistant {
-  background: rgba(96, 213, 255, 0.07);
+  background: rgba(23, 38, 48, 0.86);
+  align-self: flex-start;
+  border-bottom-left-radius: 6px;
 }
 
 .message p {

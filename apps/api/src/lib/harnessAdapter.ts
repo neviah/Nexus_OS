@@ -85,8 +85,8 @@ export async function invokeHarness(input: AdapterRequest): Promise<AdapterResul
   return {
     content: fallback,
     meta: {
-      model: state.router9.defaultModel,
-      provider: "9router",
+      model: models[0] ?? "auto",
+      provider: "nexus-router",
       fallbackUsed: true,
       elapsedMs: Date.now() - startedAt,
       tokenUsage: {
@@ -122,7 +122,7 @@ export async function* streamHarness(input: AdapterRequest): AsyncGenerator<Stre
       type: "meta",
       meta: {
         model,
-        provider: "9router",
+        provider: "nexus-router",
         fallbackUsed: index > 0,
         elapsedMs: 0,
         tokenUsage: { input: estimateTokens(message), output: 0 },
@@ -143,7 +143,7 @@ export async function* streamHarness(input: AdapterRequest): AsyncGenerator<Stre
       type: "meta",
       meta: {
         model,
-        provider: "9router",
+        provider: "nexus-router",
         fallbackUsed: index > 0,
         elapsedMs: Date.now() - startedAt,
         tokenUsage: { input: estimateTokens(message), output: estimateTokens(output) },
@@ -259,7 +259,7 @@ async function requestGenericJson(
         continue;
       }
 
-      return { content, provider: "9router" };
+      return { content, provider: "nexus-router" };
     } catch {
       // Try next configured path.
     }
@@ -306,7 +306,7 @@ async function requestOpenAiJson(
       return null;
     }
 
-    return { content, provider: "9router" };
+    return { content, provider: "nexus-router" };
   } catch {
     return null;
   }
@@ -501,6 +501,16 @@ function getAdapterConfig(harness: HarnessConfig): Required<AdapterConfig> {
 }
 
 function resolveModelOrder(harness: HarnessConfig, state: SystemState): string[] {
+  const assigned = state.nexusRouter?.harnessAssignments?.[harness.id] ?? [];
+  if (assigned.length > 0) {
+    return uniqueModels(assigned.map((entry) => entry.model));
+  }
+
+  const fallbackChainModels = state.nexusRouter?.fallbackChain?.map((entry) => entry.model) ?? [];
+  if (fallbackChainModels.length > 0) {
+    return uniqueModels(fallbackChainModels);
+  }
+
   const preferred = uniqueModels([harness.defaultModel, ...harness.models]);
   const router = uniqueModels([state.router9.defaultModel, ...state.router9.fallbackOrder]);
 
