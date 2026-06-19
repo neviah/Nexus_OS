@@ -41,6 +41,10 @@ module.exports = {
           icon: "fa-solid fa-terminal",
           text: "Terminal",
           href: "start.js",
+        }, {
+          icon: "fa-solid fa-rotate",
+          text: "Update",
+          href: "update.js",
         }]
       }
 
@@ -49,6 +53,10 @@ module.exports = {
         icon: "fa-solid fa-terminal",
         text: "Terminal",
         href: "start.js",
+      }, {
+        icon: "fa-solid fa-rotate",
+        text: "Update",
+        href: "update.js",
       }]
     }
 
