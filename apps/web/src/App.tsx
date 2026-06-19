@@ -308,8 +308,8 @@ function App() {
 
   const messages = activeThread?.messages ?? [];
   const chatMeta = activeThread?.meta ?? null;
-  const lastUserPrompt = useMemo(
-    () => [...messages].reverse().find((message) => message.role === "user")?.content ?? "",
+  const lastAssistantMessageId = useMemo(
+    () => [...messages].reverse().find((message) => message.role === "assistant")?.id,
     [messages],
   );
 
@@ -882,11 +882,13 @@ function App() {
     setStatusMessage("Streaming stopped");
   }
 
-  async function onResend() {
-    if (!lastUserPrompt || chatBusy) {
-      return;
+  async function onCopyMessage(content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+      setStatusMessage("Message copied.");
+    } catch {
+      setStatusMessage("Copy failed.");
     }
-    await onSendMessage(lastUserPrompt);
   }
 
   async function onCreateWorkspace(event: FormEvent) {
@@ -1536,14 +1538,9 @@ function App() {
                   <header className="chat-status">
                     <div>
                       <strong>{activeHarness?.name ?? "Harness"}</strong>
-                      <small>
-                        model: {chatMeta?.model ?? "auto"} | provider: {chatMeta?.provider ?? "nexus-router"}
-                      </small>
                     </div>
                     <div className="status-chip-row">
                       <span className="chip">fallback: {chatMeta?.fallbackUsed ? "yes" : "no"}</span>
-                      <span className="chip">time: {chatMeta?.elapsedMs ?? 0} ms</span>
-                      <span className="chip">tokens: {(chatMeta?.tokenUsage.input ?? 0) + (chatMeta?.tokenUsage.output ?? 0)}</span>
                       <button
                         type="button"
                         className="ghost chip-button"
@@ -1554,12 +1551,6 @@ function App() {
                         }}
                       >
                         failed tasks: {failedTasks.length}
-                      </button>
-                      <button type="button" className="ghost chip-button" onClick={() => void onStopStream()} disabled={!chatBusy}>
-                        Stop
-                      </button>
-                      <button type="button" className="ghost chip-button" onClick={() => void onResend()} disabled={chatBusy || !lastUserPrompt}>
-                        Resend
                       </button>
                     </div>
                   </header>
@@ -1575,6 +1566,38 @@ function App() {
                       <article key={message.id} className={`message ${message.role}`}>
                         <header>{message.role}</header>
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                        {message.role === "assistant" && message.id === lastAssistantMessageId && chatMeta ? (
+                          <small className="message-meta">
+                            {chatMeta.provider} | {chatMeta.model} | {chatMeta.elapsedMs} ms | tokens {(chatMeta.tokenUsage.input ?? 0) + (chatMeta.tokenUsage.output ?? 0)}
+                          </small>
+                        ) : null}
+                        {message.role === "user" ? (
+                          <div className="message-actions">
+                            <button
+                              type="button"
+                              className="ghost icon-btn"
+                              onClick={() => void onSendMessage(message.content)}
+                              disabled={chatBusy}
+                              title="Retry this prompt"
+                              aria-label="Retry this prompt"
+                            >
+                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                                <path d="M12 5a7 7 0 1 1-6.95 7.88h2.04A5 5 0 1 0 12 7h-2.2l2.7 2.7-1.4 1.4L6 6l5.1-5.1 1.4 1.4L9.8 5H12z" fill="currentColor" />
+                              </svg>
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost icon-btn"
+                              onClick={() => void onCopyMessage(message.content)}
+                              title="Copy message"
+                              aria-label="Copy message"
+                            >
+                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                                <path d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16h-9V7h9v14z" fill="currentColor" />
+                              </svg>
+                            </button>
+                          </div>
+                        ) : null}
                       </article>
                     ))}
                   </section>
@@ -1593,9 +1616,18 @@ function App() {
                       <button type="button" className="ghost" disabled>
                         Upload
                       </button>
-                      <button type="button" onClick={() => void onSendMessage()} disabled={!composer.trim() || chatBusy}>
-                        {chatBusy ? "Thinking..." : "Send"}
-                      </button>
+                      {chatBusy ? (
+                        <button type="button" className="stop-btn" onClick={() => void onStopStream()}>
+                          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                            <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" />
+                          </svg>
+                          Stop
+                        </button>
+                      ) : (
+                        <button type="button" onClick={() => void onSendMessage()} disabled={!composer.trim()}>
+                          Send
+                        </button>
+                      )}
                     </div>
                   </footer>
                     </>

@@ -374,6 +374,36 @@ button:disabled {
   color: var(--ink-3);
 }
 
+.message-meta {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: var(--ink-3);
+}
+
+.message-actions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 122, 24, 0.28);
+}
+
 .chat-main {
   display: flex;
   flex-direction: column;
