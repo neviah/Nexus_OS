@@ -75,6 +75,14 @@ type ChatMeta = {
   };
 };
 
+type HarnessChatThread = {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  meta: ChatMeta | null;
+  updatedAt: string;
+};
+
 type FailedTask = {
   requestId: string;
   harnessId: string;
@@ -173,10 +181,9 @@ function App() {
   const [selectedPane, setSelectedPane] = useState<PaneSelection>({ type: "tool", id: "nexus-router" });
   const [composer, setComposer] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [chatMeta, setChatMeta] = useState<ChatMeta | null>(null);
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
-  const [lastUserPrompt, setLastUserPrompt] = useState<string>("");
+  const [chatThreadsByHarness, setChatThreadsByHarness] = useState<Record<string, HarnessChatThread[]>>({});
+  const [activeThreadByHarness, setActiveThreadByHarness] = useState<Record<string, string>>({});
   const [workspaceTree, setWorkspaceTree] = useState<WorkspaceTreeNode | null>(null);
   const [failedTasks, setFailedTasks] = useState<FailedTask[]>([]);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
@@ -207,6 +214,103 @@ function App() {
     () => boot?.harnesses.find((harness) => harness.id === selectedPane.id) ?? null,
     [boot, selectedPane.id],
   );
+
+  function createThread(title = "New chat"): HarnessChatThread {
+    return {
+      id: crypto.randomUUID(),
+      title,
+      messages: [],
+      meta: null,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  function upsertThread(
+    harnessId: string,
+    threadId: string,
+    updater: (thread: HarnessChatThread) => HarnessChatThread,
+  ) {
+    setChatThreadsByHarness((current) => {
+      const threads = current[harnessId] ?? [];
+      return {
+        ...current,
+        [harnessId]: threads.map((thread) => (thread.id === threadId ? updater(thread) : thread)),
+      };
+    });
+  }
+
+  function ensureHarnessThread(harnessId: string): string {
+    const existing = chatThreadsByHarness[harnessId] ?? [];
+    const activeId = activeThreadByHarness[harnessId];
+    if (existing.length > 0) {
+      const resolved = activeId && existing.some((thread) => thread.id === activeId) ? activeId : existing[0].id;
+      if (!activeId || activeId !== resolved) {
+        setActiveThreadByHarness((current) => ({ ...current, [harnessId]: resolved }));
+      }
+      return resolved;
+    }
+
+    const thread = createThread();
+    setChatThreadsByHarness((current) => ({ ...current, [harnessId]: [thread] }));
+    setActiveThreadByHarness((current) => ({ ...current, [harnessId]: thread.id }));
+    return thread.id;
+  }
+
+  const activeThread = useMemo(() => {
+    if (selectedPane.type !== "agent") {
+      return null;
+    }
+    const harnessId = selectedPane.id;
+    const threads = chatThreadsByHarness[harnessId] ?? [];
+    if (threads.length === 0) {
+      return null;
+    }
+    const activeId = activeThreadByHarness[harnessId] ?? threads[0].id;
+    return threads.find((thread) => thread.id === activeId) ?? threads[0];
+  }, [selectedPane, chatThreadsByHarness, activeThreadByHarness]);
+
+  const messages = activeThread?.messages ?? [];
+  const chatMeta = activeThread?.meta ?? null;
+  const lastUserPrompt = useMemo(
+    () => [...messages].reverse().find((message) => message.role === "user")?.content ?? "",
+    [messages],
+  );
+
+  const harnessDisplayModel = useMemo(() => {
+    const modelByHarness: Record<string, string> = {};
+    for (const [harnessId, threads] of Object.entries(chatThreadsByHarness)) {
+      const newest = [...threads]
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+        .find((thread) => Boolean(thread.meta?.model));
+      if (newest?.meta?.model) {
+        modelByHarness[harnessId] = newest.meta.model;
+      }
+    }
+    return modelByHarness;
+  }, [chatThreadsByHarness]);
+
+  useEffect(() => {
+    try {
+      const savedThreads = localStorage.getItem("nexus.chat.threads.v1");
+      const savedActive = localStorage.getItem("nexus.chat.active.v1");
+      if (savedThreads) {
+        setChatThreadsByHarness(JSON.parse(savedThreads) as Record<string, HarnessChatThread[]>);
+      }
+      if (savedActive) {
+        setActiveThreadByHarness(JSON.parse(savedActive) as Record<string, string>);
+      }
+    } catch {
+      // Ignore corrupted local cache.
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("nexus.chat.threads.v1", JSON.stringify(chatThreadsByHarness));
+  }, [chatThreadsByHarness]);
+
+  useEffect(() => {
+    localStorage.setItem("nexus.chat.active.v1", JSON.stringify(activeThreadByHarness));
+  }, [activeThreadByHarness]);
 
   const fallbackChoiceOptions = useMemo(
     () => nxFallbackRows
@@ -433,6 +537,12 @@ function App() {
     void loadBootstrap();
   }, [loadBootstrap]);
 
+  useEffect(() => {
+    if (selectedPane.type === "agent") {
+      ensureHarnessThread(selectedPane.id);
+    }
+  }, [selectedPane]);
+
   async function loadWorkspaceTree(workspaceId: string) {
     const response = await fetch(`/api/workspaces/${workspaceId}/tree`);
     const payload = (await response.json()) as { tree: WorkspaceTreeNode };
@@ -466,6 +576,10 @@ function App() {
       return;
     }
 
+    const harnessId = activeHarness.id;
+    const threadId = ensureHarnessThread(harnessId);
+    const threadMessages = (chatThreadsByHarness[harnessId] ?? []).find((thread) => thread.id === threadId)?.messages ?? [];
+
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -480,12 +594,16 @@ function App() {
       createdAt: new Date().toISOString(),
     };
 
-    const nextHistory = [...messages, userMessage];
-    setMessages([...nextHistory, assistantPlaceholder]);
-    setLastUserPrompt(textToSend);
+    const nextHistory = [...threadMessages, userMessage];
+    upsertThread(harnessId, threadId, (thread) => ({
+      ...thread,
+      title: thread.messages.length === 0 ? textToSend.slice(0, 42) : thread.title,
+      messages: [...nextHistory, assistantPlaceholder],
+      updatedAt: new Date().toISOString(),
+      meta: null,
+    }));
     setComposer("");
     setChatBusy(true);
-    setChatMeta(null);
     setStatusMessage(`Routing ${activeHarness.name} via Nexus Router...`);
     const requestId = crypto.randomUUID();
     setActiveRequestId(requestId);
@@ -554,18 +672,24 @@ function App() {
         }
 
         if (envelope.type === "meta") {
-          setChatMeta(envelope.meta);
+          upsertThread(harnessId, threadId, (thread) => ({
+            ...thread,
+            meta: envelope.meta,
+            updatedAt: new Date().toISOString(),
+          }));
           continue;
         }
 
         if (envelope.type === "delta") {
-          setMessages((current) =>
-            current.map((entry) =>
+          upsertThread(harnessId, threadId, (thread) => ({
+            ...thread,
+            messages: thread.messages.map((entry) =>
               entry.id === assistantPlaceholder.id
                 ? { ...entry, content: `${entry.content}${envelope.text}` }
                 : entry,
             ),
-          );
+            updatedAt: new Date().toISOString(),
+          }));
           continue;
         }
 
@@ -682,8 +806,18 @@ function App() {
       createdAt: new Date().toISOString(),
     };
 
-    setMessages([userMessage, assistantMessage]);
-    setChatMeta(payload.meta);
+    const resumedThread: HarnessChatThread = {
+      id: crypto.randomUUID(),
+      title: task.message.slice(0, 42),
+      messages: [userMessage, assistantMessage],
+      meta: payload.meta,
+      updatedAt: new Date().toISOString(),
+    };
+    setChatThreadsByHarness((current) => ({
+      ...current,
+      [task.harnessId]: [resumedThread, ...(current[task.harnessId] ?? [])],
+    }));
+    setActiveThreadByHarness((current) => ({ ...current, [task.harnessId]: resumedThread.id }));
     setSelectedPane({ type: "agent", id: task.harnessId });
     setStatusMessage("Task resumed and merged into chat view.");
     setResumeBusyId(null);
@@ -713,6 +847,8 @@ function App() {
   const startupReady = boot?.startup.ready ?? false;
   const startupBlockers = boot?.startup.blockers ?? [];
   const diagnosticsAlertCount = failedTasks.length + (startupReady ? 0 : Math.max(1, startupBlockers.length));
+  const harnessThreads = selectedPane.type === "agent" ? (chatThreadsByHarness[selectedPane.id] ?? []) : [];
+  const activeHarnessThreadId = selectedPane.type === "agent" ? activeThreadByHarness[selectedPane.id] ?? harnessThreads[0]?.id : undefined;
 
   return (
     <main className="app-shell">
@@ -754,13 +890,13 @@ function App() {
                     className={`nav-item ${isActive ? "active" : ""}`}
                     onClick={() => {
                       setSelectedPane({ type: "agent", id: harness.id });
-                      setMessages([]);
+                      ensureHarnessThread(harness.id);
                     }}
                   >
                     <span className={`health ${harness.health}`} />
                     <span className="meta-block">
                       <strong>{harness.name}</strong>
-                      <small>{harness.status} | {harness.defaultModel}</small>
+                      <small>{harness.status} | {harnessDisplayModel[harness.id] ?? harness.defaultModel}</small>
                     </span>
                   </button>
                 </li>
@@ -1033,71 +1169,114 @@ function App() {
 
           {selectedPane.type === "agent" ? (
             <div className="chat-view">
-              <header className="chat-status">
-                <div>
-                  <strong>{activeHarness?.name ?? "Harness"}</strong>
-                  <small>
-                    model: {chatMeta?.model ?? "auto"} | provider: {chatMeta?.provider ?? "nexus-router"}
-                  </small>
-                </div>
-                <div className="status-chip-row">
-                  <span className="chip">fallback: {chatMeta?.fallbackUsed ? "yes" : "no"}</span>
-                  <span className="chip">time: {chatMeta?.elapsedMs ?? 0} ms</span>
-                  <span className="chip">tokens: {(chatMeta?.tokenUsage.input ?? 0) + (chatMeta?.tokenUsage.output ?? 0)}</span>
-                  <button
-                    type="button"
-                    className="ghost chip-button"
-                    onClick={() => {
-                      setRightTab("diagnostics");
-                      const card = document.getElementById("failed-tasks-card");
-                      setTimeout(() => card?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 60);
-                    }}
-                  >
-                    failed tasks: {failedTasks.length}
-                  </button>
-                  <button type="button" className="ghost chip-button" onClick={() => void onStopStream()} disabled={!chatBusy}>
-                    Stop
-                  </button>
-                  <button type="button" className="ghost chip-button" onClick={() => void onResend()} disabled={chatBusy || !lastUserPrompt}>
-                    Resend
-                  </button>
-                </div>
-              </header>
+              <div className="chat-layout">
+                <aside className="chat-thread-pane">
+                  <div className="chat-thread-header">
+                    <h3>Chats</h3>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => {
+                        if (!activeHarness) return;
+                        const thread = createThread();
+                        setChatThreadsByHarness((current) => ({
+                          ...current,
+                          [activeHarness.id]: [thread, ...(current[activeHarness.id] ?? [])],
+                        }));
+                        setActiveThreadByHarness((current) => ({ ...current, [activeHarness.id]: thread.id }));
+                        setComposer("");
+                      }}
+                    >
+                      New Chat
+                    </button>
+                  </div>
+                  <ul className="chat-thread-list">
+                    {harnessThreads.map((thread) => (
+                      <li key={thread.id}>
+                        <button
+                          type="button"
+                          className={`chat-thread-item ${activeHarnessThreadId === thread.id ? "active" : ""}`}
+                          onClick={() => {
+                            if (!activeHarness) return;
+                            setActiveThreadByHarness((current) => ({ ...current, [activeHarness.id]: thread.id }));
+                          }}
+                        >
+                          <strong>{thread.title || "New chat"}</strong>
+                          <small>{new Date(thread.updatedAt).toLocaleString()}</small>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </aside>
 
-              <section className="chat-log" aria-live="polite">
-                {messages.length === 0 ? (
-                  <article className="message assistant">
-                    <p>Send a prompt to start your unified harness session.</p>
-                  </article>
-                ) : null}
+                <div className="chat-main">
+                  <header className="chat-status">
+                    <div>
+                      <strong>{activeHarness?.name ?? "Harness"}</strong>
+                      <small>
+                        model: {chatMeta?.model ?? "auto"} | provider: {chatMeta?.provider ?? "nexus-router"}
+                      </small>
+                    </div>
+                    <div className="status-chip-row">
+                      <span className="chip">fallback: {chatMeta?.fallbackUsed ? "yes" : "no"}</span>
+                      <span className="chip">time: {chatMeta?.elapsedMs ?? 0} ms</span>
+                      <span className="chip">tokens: {(chatMeta?.tokenUsage.input ?? 0) + (chatMeta?.tokenUsage.output ?? 0)}</span>
+                      <button
+                        type="button"
+                        className="ghost chip-button"
+                        onClick={() => {
+                          setRightTab("diagnostics");
+                          const card = document.getElementById("failed-tasks-card");
+                          setTimeout(() => card?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 60);
+                        }}
+                      >
+                        failed tasks: {failedTasks.length}
+                      </button>
+                      <button type="button" className="ghost chip-button" onClick={() => void onStopStream()} disabled={!chatBusy}>
+                        Stop
+                      </button>
+                      <button type="button" className="ghost chip-button" onClick={() => void onResend()} disabled={chatBusy || !lastUserPrompt}>
+                        Resend
+                      </button>
+                    </div>
+                  </header>
 
-                {messages.map((message) => (
-                  <article key={message.id} className={`message ${message.role}`}>
-                    <header>{message.role}</header>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                  </article>
-                ))}
-              </section>
+                  <section className="chat-log" aria-live="polite">
+                    {messages.length === 0 ? (
+                      <article className="message assistant">
+                        <p>Send a prompt to start your unified harness session.</p>
+                      </article>
+                    ) : null}
 
-              <footer className="chat-composer">
-                <textarea
-                  value={composer}
-                  onChange={(event) => setComposer(event.target.value)}
-                  placeholder="Ask your selected harness..."
-                  rows={4}
-                />
-                <div className="composer-actions">
-                  <button type="button" className="ghost" disabled>
-                    Mic (STT)
-                  </button>
-                  <button type="button" className="ghost" disabled>
-                    Upload
-                  </button>
-                  <button type="button" onClick={() => void onSendMessage()} disabled={!composer.trim() || chatBusy}>
-                    {chatBusy ? "Thinking..." : "Send"}
-                  </button>
+                    {messages.map((message) => (
+                      <article key={message.id} className={`message ${message.role}`}>
+                        <header>{message.role}</header>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                      </article>
+                    ))}
+                  </section>
+
+                  <footer className="chat-composer">
+                    <textarea
+                      value={composer}
+                      onChange={(event) => setComposer(event.target.value)}
+                      placeholder="Ask your selected harness..."
+                      rows={4}
+                    />
+                    <div className="composer-actions">
+                      <button type="button" className="ghost" disabled>
+                        Mic (STT)
+                      </button>
+                      <button type="button" className="ghost" disabled>
+                        Upload
+                      </button>
+                      <button type="button" onClick={() => void onSendMessage()} disabled={!composer.trim() || chatBusy}>
+                        {chatBusy ? "Thinking..." : "Send"}
+                      </button>
+                    </div>
+                  </footer>
                 </div>
-              </footer>
+              </div>
             </div>
           ) : null}
         </section>
