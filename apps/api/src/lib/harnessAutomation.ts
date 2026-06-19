@@ -1,4 +1,10 @@
-import type { HarnessAutomationStore, HarnessRunRecord, HarnessSchedule, SystemState } from "../types.js";
+import type {
+  HarnessAutomationStore,
+  HarnessRunRecord,
+  HarnessSchedule,
+  SystemState,
+  UpdateHarnessScheduleInput,
+} from "../types.js";
 
 const DEFAULT_INTERVAL_MINUTES = 30;
 
@@ -85,6 +91,46 @@ export function deleteHarnessSchedule(state: SystemState, workspaceId: string, h
     store.schedulesByWorkspace[workspaceId][harnessId] = next;
   }
   return changed;
+}
+
+export function updateHarnessSchedule(
+  state: SystemState,
+  input: {
+    workspaceId: string;
+    harnessId: string;
+    scheduleId: string;
+    patch: UpdateHarnessScheduleInput;
+  },
+): HarnessSchedule | null {
+  const store = ensureHarnessAutomationStore(state);
+  const list = ensureWorkspaceHarnessList(store.schedulesByWorkspace, input.workspaceId, input.harnessId);
+  const index = list.findIndex((entry) => entry.id === input.scheduleId);
+  if (index === -1) {
+    return null;
+  }
+
+  const existing = list[index];
+  const nowIso = new Date().toISOString();
+  const nextInterval = input.patch.intervalMinutes !== undefined
+    ? clampInt(input.patch.intervalMinutes, 1, 24 * 60)
+    : existing.intervalMinutes;
+
+  const updated: HarnessSchedule = {
+    ...existing,
+    title: input.patch.title !== undefined ? input.patch.title.trim() || "Scheduled run" : existing.title,
+    prompt: input.patch.prompt !== undefined ? input.patch.prompt.trim() : existing.prompt,
+    intervalMinutes: nextInterval,
+    enabled: input.patch.enabled ?? existing.enabled,
+    updatedAt: nowIso,
+  };
+
+  // If re-enabled after being disabled, schedule the next run from now.
+  if (!existing.enabled && updated.enabled) {
+    updated.nextRunAt = addMinutesIso(nowIso, updated.intervalMinutes);
+  }
+
+  list[index] = updated;
+  return updated;
 }
 
 export function listHarnessRuns(state: SystemState, workspaceId: string, harnessId: string): HarnessRunRecord[] {

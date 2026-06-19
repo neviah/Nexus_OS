@@ -39,12 +39,20 @@ import {
   listHarnessRuns,
   listHarnessSchedules,
   markScheduleRun,
+  updateHarnessSchedule,
   upsertHarnessSchedule,
 } from "./lib/harnessAutomation.js";
+import {
+  deleteHarnessThread,
+  ensureHarnessChatStore,
+  listHarnessThreads,
+  upsertHarnessThread,
+} from "./lib/harnessChats.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
 const activeStreams = new Map<string, AbortController>();
+const activeScheduleRuns = new Set<string>();
 
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
@@ -88,10 +96,15 @@ async function runScheduledHarnessTask(input: {
   prompt: string;
   trigger: "manual" | "scheduled";
   scheduleId?: string;
-}): Promise<void> {
+  attempt?: number;
+  maxAttempts?: number;
+}): Promise<{ ok: boolean }> {
   const state = await readSystemState();
   const harnesses = await readHarnessRegistry();
   const harness = harnesses.find((entry) => entry.id === input.harnessId);
+  const startedAt = Date.now();
+  const attempt = input.attempt ?? 1;
+  const maxAttempts = input.maxAttempts ?? 1;
   if (!harness) {
     appendHarnessRun(state, {
       id: crypto.randomUUID(),
@@ -102,10 +115,13 @@ async function runScheduledHarnessTask(input: {
       prompt: input.prompt,
       status: "failed",
       error: `Unknown harness ${input.harnessId}`,
+      attempt,
+      maxAttempts,
+      durationMs: Date.now() - startedAt,
       createdAt: new Date().toISOString(),
     });
     await writeSystemState(state);
-    return;
+    return { ok: false };
   }
 
   try {
@@ -127,8 +143,13 @@ async function runScheduledHarnessTask(input: {
       output: result.content,
       model: result.meta.model,
       provider: result.meta.provider,
+      attempt,
+      maxAttempts,
+      durationMs: Date.now() - startedAt,
       createdAt: new Date().toISOString(),
     });
+    await writeSystemState(state);
+    return { ok: true };
   } catch (error) {
     appendHarnessRun(state, {
       id: crypto.randomUUID(),
@@ -139,11 +160,14 @@ async function runScheduledHarnessTask(input: {
       prompt: input.prompt,
       status: "failed",
       error: String(error),
+      attempt,
+      maxAttempts,
+      durationMs: Date.now() - startedAt,
       createdAt: new Date().toISOString(),
     });
+    await writeSystemState(state);
+    return { ok: false };
   }
-
-  await writeSystemState(state);
 }
 
 app.use(cors());
@@ -415,6 +439,61 @@ app.post("/api/router/chat", async (req, res) => {
   }
 });
 
+app.get("/api/harnesses/:harnessId/chats", async (req, res) => {
+  const { harnessId } = req.params;
+  const state = await readSystemState();
+  const workspaceId = String(req.query.workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const threads = listHarnessThreads(state, workspaceId, harnessId);
+  return res.json({ workspaceId, harnessId, threads });
+});
+
+app.put("/api/harnesses/:harnessId/chats/:threadId", async (req, res) => {
+  const { harnessId, threadId } = req.params;
+  const body = req.body as {
+    workspaceId?: string;
+    title?: string;
+    messages?: Array<{ id: string; role: "user" | "assistant" | "system"; content: string; createdAt: string }>;
+    meta?: {
+      model: string;
+      provider: string;
+      fallbackUsed: boolean;
+      elapsedMs: number;
+      tokenUsage: { input: number; output: number };
+    } | null;
+    createdAt?: string;
+    updatedAt?: string;
+  };
+
+  const state = await readSystemState();
+  const workspaceId = String(body.workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const thread = upsertHarnessThread(state, {
+    workspaceId,
+    harnessId,
+    thread: {
+      id: threadId,
+      title: body.title ?? "New chat",
+      messages: body.messages ?? [],
+      meta: body.meta ?? null,
+      createdAt: body.createdAt ?? new Date().toISOString(),
+      updatedAt: body.updatedAt ?? new Date().toISOString(),
+    },
+  });
+  await writeSystemState(state);
+  return res.json({ ok: true, thread });
+});
+
+app.delete("/api/harnesses/:harnessId/chats/:threadId", async (req, res) => {
+  const { harnessId, threadId } = req.params;
+  const state = await readSystemState();
+  const workspaceId = String(req.query.workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const removed = deleteHarnessThread(state, workspaceId, harnessId, threadId);
+  if (!removed) {
+    return res.status(404).json({ error: "thread not found" });
+  }
+  await writeSystemState(state);
+  return res.json({ ok: true });
+});
+
 app.get("/api/harnesses/:harnessId/schedules", async (req, res) => {
   const { harnessId } = req.params;
   const state = await readSystemState();
@@ -465,6 +544,38 @@ app.delete("/api/harnesses/:harnessId/schedules/:scheduleId", async (req, res) =
   return res.json({ ok: true });
 });
 
+app.patch("/api/harnesses/:harnessId/schedules/:scheduleId", async (req, res) => {
+  const { harnessId, scheduleId } = req.params;
+  const body = req.body as {
+    workspaceId?: string;
+    title?: string;
+    prompt?: string;
+    intervalMinutes?: number;
+    enabled?: boolean;
+  };
+
+  const state = await readSystemState();
+  const workspaceId = String(body.workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const schedule = updateHarnessSchedule(state, {
+    workspaceId,
+    harnessId,
+    scheduleId,
+    patch: {
+      title: body.title,
+      prompt: body.prompt,
+      intervalMinutes: body.intervalMinutes,
+      enabled: body.enabled,
+    },
+  });
+
+  if (!schedule) {
+    return res.status(404).json({ error: "schedule not found" });
+  }
+
+  await writeSystemState(state);
+  return res.json({ ok: true, schedule });
+});
+
 app.get("/api/harnesses/:harnessId/runs", async (req, res) => {
   const { harnessId } = req.params;
   const state = await readSystemState();
@@ -487,6 +598,8 @@ app.post("/api/harnesses/:harnessId/runs/manual", async (req, res) => {
     workspaceId,
     prompt: body.prompt,
     trigger: "manual",
+    attempt: 1,
+    maxAttempts: 1,
   });
 
   const refreshed = await readSystemState();
@@ -840,6 +953,7 @@ void (async () => {
   const state = await readSystemState();
   ensureRouterState(state);
   ensureHarnessAutomationStore(state);
+  ensureHarnessChatStore(state);
   await writeSystemState(state);
 
   setInterval(async () => {
@@ -863,13 +977,39 @@ void (async () => {
       await writeSystemState(runState);
 
       for (const schedule of due) {
-        await runScheduledHarnessTask({
-          harnessId: schedule.harnessId,
-          workspaceId: schedule.workspaceId,
-          prompt: schedule.prompt,
-          trigger: "scheduled",
-          scheduleId: schedule.id,
-        });
+        const lockKey = `${schedule.workspaceId}::${schedule.harnessId}::${schedule.id}`;
+        if (activeScheduleRuns.has(lockKey)) {
+          continue;
+        }
+
+        activeScheduleRuns.add(lockKey);
+        try {
+          const latestState = await readSystemState();
+          const maxAttempts = Math.max(1, Math.min(5, latestState.nexusRouter?.retryPolicy.maxAttempts ?? 2));
+          const backoffMs = Math.max(200, Math.min(10_000, latestState.nexusRouter?.retryPolicy.backoffMs ?? 1_000));
+
+          for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const result = await runScheduledHarnessTask({
+              harnessId: schedule.harnessId,
+              workspaceId: schedule.workspaceId,
+              prompt: schedule.prompt,
+              trigger: "scheduled",
+              scheduleId: schedule.id,
+              attempt,
+              maxAttempts,
+            });
+
+            if (result.ok) {
+              break;
+            }
+
+            if (attempt < maxAttempts) {
+              await new Promise((resolve) => setTimeout(resolve, backoffMs * attempt));
+            }
+          }
+        } finally {
+          activeScheduleRuns.delete(lockKey);
+        }
       }
     } catch (error) {
       console.error("[scheduler] tick failed", error);

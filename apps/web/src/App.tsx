@@ -80,6 +80,7 @@ type HarnessChatThread = {
   title: string;
   messages: ChatMessage[];
   meta: ChatMeta | null;
+  createdAt: string;
   updatedAt: string;
 };
 
@@ -221,6 +222,7 @@ function App() {
   const [scheduleDraftByHarness, setScheduleDraftByHarness] = useState<Record<string, { title: string; prompt: string; intervalMinutes: number }>>({});
   const [scheduleBusyHarnessId, setScheduleBusyHarnessId] = useState<string | null>(null);
   const [manualRunBusyHarnessId, setManualRunBusyHarnessId] = useState<string | null>(null);
+  const [editingScheduleIdByHarness, setEditingScheduleIdByHarness] = useState<Record<string, string | null>>({});
   const [workspaceTree, setWorkspaceTree] = useState<WorkspaceTreeNode | null>(null);
   const [failedTasks, setFailedTasks] = useState<FailedTask[]>([]);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
@@ -253,12 +255,14 @@ function App() {
   );
 
   function createThread(title = "New chat"): HarnessChatThread {
+    const nowIso = new Date().toISOString();
     return {
       id: crypto.randomUUID(),
       title,
       messages: [],
       meta: null,
-      updatedAt: new Date().toISOString(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
     };
   }
 
@@ -290,6 +294,7 @@ function App() {
     const thread = createThread();
     setChatThreadsByHarness((current) => ({ ...current, [harnessId]: [thread] }));
     setActiveThreadByHarness((current) => ({ ...current, [harnessId]: thread.id }));
+    void saveHarnessThread(harnessId, thread);
     return thread.id;
   }
 
@@ -326,28 +331,49 @@ function App() {
     return modelByHarness;
   }, [chatThreadsByHarness]);
 
-  useEffect(() => {
-    try {
-      const savedThreads = localStorage.getItem("nexus.chat.threads.v1");
-      const savedActive = localStorage.getItem("nexus.chat.active.v1");
-      if (savedThreads) {
-        setChatThreadsByHarness(JSON.parse(savedThreads) as Record<string, HarnessChatThread[]>);
-      }
-      if (savedActive) {
-        setActiveThreadByHarness(JSON.parse(savedActive) as Record<string, string>);
-      }
-    } catch {
-      // Ignore corrupted local cache.
+  async function loadHarnessThreads(harnessId: string, workspaceId?: string) {
+    const activeWorkspaceId = workspaceId ?? boot?.activeWorkspaceId ?? "default";
+    const response = await fetch(`/api/harnesses/${encodeURIComponent(harnessId)}/chats?workspaceId=${encodeURIComponent(activeWorkspaceId)}`);
+    if (!response.ok) {
+      return;
     }
-  }, []);
+    const payload = (await response.json()) as { threads: HarnessChatThread[] };
+    const threads = (payload.threads ?? []).map((thread) => ({
+      ...thread,
+      createdAt: thread.createdAt ?? thread.updatedAt ?? new Date().toISOString(),
+    }));
+    setChatThreadsByHarness((current) => ({ ...current, [harnessId]: threads }));
+    if (threads.length > 0) {
+      setActiveThreadByHarness((current) => ({
+        ...current,
+        [harnessId]: current[harnessId] && threads.some((thread) => thread.id === current[harnessId])
+          ? current[harnessId]
+          : threads[0].id,
+      }));
+      return;
+    }
 
-  useEffect(() => {
-    localStorage.setItem("nexus.chat.threads.v1", JSON.stringify(chatThreadsByHarness));
-  }, [chatThreadsByHarness]);
+    const thread = createThread();
+    await saveHarnessThread(harnessId, thread, activeWorkspaceId);
+    setChatThreadsByHarness((current) => ({ ...current, [harnessId]: [thread] }));
+    setActiveThreadByHarness((current) => ({ ...current, [harnessId]: thread.id }));
+  }
 
-  useEffect(() => {
-    localStorage.setItem("nexus.chat.active.v1", JSON.stringify(activeThreadByHarness));
-  }, [activeThreadByHarness]);
+  async function saveHarnessThread(harnessId: string, thread: HarnessChatThread, workspaceId?: string): Promise<void> {
+    const activeWorkspaceId = workspaceId ?? boot?.activeWorkspaceId ?? "default";
+    await fetch(`/api/harnesses/${encodeURIComponent(harnessId)}/chats/${encodeURIComponent(thread.id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: activeWorkspaceId,
+        title: thread.title,
+        messages: thread.messages,
+        meta: thread.meta,
+        createdAt: thread.createdAt,
+        updatedAt: thread.updatedAt,
+      }),
+    });
+  }
 
   const fallbackChoiceOptions = useMemo(
     () => nxFallbackRows
@@ -576,7 +602,7 @@ function App() {
 
   useEffect(() => {
     if (selectedPane.type === "agent") {
-      ensureHarnessThread(selectedPane.id);
+      void loadHarnessThreads(selectedPane.id);
       void loadHarnessSchedules(selectedPane.id);
       void loadHarnessRuns(selectedPane.id);
     }
@@ -592,6 +618,10 @@ function App() {
       prompt: "",
       intervalMinutes: 30,
     };
+  }
+
+  function getEditingScheduleId(harnessId: string): string | null {
+    return editingScheduleIdByHarness[harnessId] ?? null;
   }
 
   async function loadHarnessSchedules(harnessId: string, workspaceId?: string) {
@@ -616,23 +646,35 @@ function App() {
 
   async function onCreateSchedule(harnessId: string) {
     const draft = getScheduleDraft(harnessId);
+    const editingId = getEditingScheduleId(harnessId);
     if (!draft.prompt.trim()) {
       setStatusMessage("Schedule prompt is required.");
       return;
     }
 
     setScheduleBusyHarnessId(harnessId);
-    const response = await fetch(`/api/harnesses/${encodeURIComponent(harnessId)}/schedules`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId: boot?.activeWorkspaceId ?? "default",
-        title: draft.title,
-        prompt: draft.prompt,
-        intervalMinutes: draft.intervalMinutes,
-        enabled: true,
-      }),
-    });
+    const response = editingId
+      ? await fetch(`/api/harnesses/${encodeURIComponent(harnessId)}/schedules/${encodeURIComponent(editingId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId ?? "default",
+          title: draft.title,
+          prompt: draft.prompt,
+          intervalMinutes: draft.intervalMinutes,
+        }),
+      })
+      : await fetch(`/api/harnesses/${encodeURIComponent(harnessId)}/schedules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId ?? "default",
+          title: draft.title,
+          prompt: draft.prompt,
+          intervalMinutes: draft.intervalMinutes,
+          enabled: true,
+        }),
+      });
 
     if (!response.ok) {
       const payload = (await response.json()) as { error?: string };
@@ -645,8 +687,32 @@ function App() {
       ...current,
       [harnessId]: { title: "", prompt: "", intervalMinutes: draft.intervalMinutes },
     }));
+    setEditingScheduleIdByHarness((current) => ({ ...current, [harnessId]: null }));
     await loadHarnessSchedules(harnessId);
-    setStatusMessage("Schedule saved.");
+    setStatusMessage(editingId ? "Schedule updated." : "Schedule saved.");
+    setScheduleBusyHarnessId(null);
+  }
+
+  async function onToggleSchedule(harnessId: string, scheduleId: string, enabled: boolean) {
+    setScheduleBusyHarnessId(harnessId);
+    const response = await fetch(`/api/harnesses/${encodeURIComponent(harnessId)}/schedules/${encodeURIComponent(scheduleId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: boot?.activeWorkspaceId ?? "default",
+        enabled,
+      }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to update schedule");
+      setScheduleBusyHarnessId(null);
+      return;
+    }
+
+    await loadHarnessSchedules(harnessId);
+    setStatusMessage(enabled ? "Schedule enabled." : "Schedule paused.");
     setScheduleBusyHarnessId(null);
   }
 
@@ -750,13 +816,16 @@ function App() {
     };
 
     const nextHistory = [...threadMessages, userMessage];
-    upsertThread(harnessId, threadId, (thread) => ({
-      ...thread,
-      title: thread.messages.length === 0 ? textToSend.slice(0, 42) : thread.title,
+    let threadSnapshot: HarnessChatThread = {
+      id: threadId,
+      title: threadMessages.length === 0 ? textToSend.slice(0, 42) : ((chatThreadsByHarness[harnessId] ?? []).find((t) => t.id === threadId)?.title ?? "New chat"),
       messages: [...nextHistory, assistantPlaceholder],
-      updatedAt: new Date().toISOString(),
       meta: null,
-    }));
+      createdAt: (chatThreadsByHarness[harnessId] ?? []).find((t) => t.id === threadId)?.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    upsertThread(harnessId, threadId, () => threadSnapshot);
+    await saveHarnessThread(harnessId, threadSnapshot);
     setComposer("");
     setChatBusy(true);
     setStatusMessage(`Routing ${activeHarness.name} via Nexus Router...`);
@@ -779,6 +848,7 @@ function App() {
       setStatusMessage(payload.error ?? "Chat request failed");
       setChatBusy(false);
       setActiveRequestId(null);
+      await saveHarnessThread(harnessId, threadSnapshot);
       return;
     }
 
@@ -787,6 +857,7 @@ function App() {
       setStatusMessage("Unable to stream response");
       setChatBusy(false);
       setActiveRequestId(null);
+      await saveHarnessThread(harnessId, threadSnapshot);
       return;
     }
 
@@ -827,24 +898,26 @@ function App() {
         }
 
         if (envelope.type === "meta") {
-          upsertThread(harnessId, threadId, (thread) => ({
-            ...thread,
+          threadSnapshot = {
+            ...threadSnapshot,
             meta: envelope.meta,
             updatedAt: new Date().toISOString(),
-          }));
+          };
+          upsertThread(harnessId, threadId, () => threadSnapshot);
           continue;
         }
 
         if (envelope.type === "delta") {
-          upsertThread(harnessId, threadId, (thread) => ({
-            ...thread,
-            messages: thread.messages.map((entry) =>
+          threadSnapshot = {
+            ...threadSnapshot,
+            messages: threadSnapshot.messages.map((entry) =>
               entry.id === assistantPlaceholder.id
                 ? { ...entry, content: `${entry.content}${envelope.text}` }
                 : entry,
             ),
             updatedAt: new Date().toISOString(),
-          }));
+          };
+          upsertThread(harnessId, threadId, () => threadSnapshot);
           continue;
         }
 
@@ -854,6 +927,7 @@ function App() {
         }
 
         if (envelope.type === "done") {
+          await saveHarnessThread(harnessId, threadSnapshot);
           setChatBusy(false);
           setActiveRequestId(null);
           setStatusMessage("Ready");
@@ -861,6 +935,7 @@ function App() {
       }
     }
 
+    await saveHarnessThread(harnessId, threadSnapshot);
     setChatBusy(false);
     setActiveRequestId(null);
     setStatusMessage("Ready");
@@ -915,6 +990,7 @@ function App() {
     await loadWorkspaceTree(workspaceId);
     if (selectedPane.type === "agent") {
       await Promise.all([
+        loadHarnessThreads(selectedPane.id, workspaceId),
         loadHarnessSchedules(selectedPane.id, workspaceId),
         loadHarnessRuns(selectedPane.id, workspaceId),
       ]);
@@ -974,6 +1050,7 @@ function App() {
       title: task.message.slice(0, 42),
       messages: [userMessage, assistantMessage],
       meta: payload.meta,
+      createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     setChatThreadsByHarness((current) => ({
@@ -981,6 +1058,7 @@ function App() {
       [task.harnessId]: [resumedThread, ...(current[task.harnessId] ?? [])],
     }));
     setActiveThreadByHarness((current) => ({ ...current, [task.harnessId]: resumedThread.id }));
+    await saveHarnessThread(task.harnessId, resumedThread, task.workspaceId);
     setSelectedPane({ type: "agent", id: task.harnessId });
     setStatusMessage("Task resumed and merged into chat view.");
     setResumeBusyId(null);
@@ -1059,7 +1137,6 @@ function App() {
                     className={`nav-item ${isActive ? "active" : ""}`}
                     onClick={() => {
                       setSelectedPane({ type: "agent", id: harness.id });
-                      ensureHarnessThread(harness.id);
                     }}
                   >
                     <span className={`health ${harness.health}`} />
@@ -1381,6 +1458,7 @@ function App() {
                             [activeHarness.id]: [thread, ...(current[activeHarness.id] ?? [])],
                           }));
                           setActiveThreadByHarness((current) => ({ ...current, [activeHarness.id]: thread.id }));
+                          void saveHarnessThread(activeHarness.id, thread);
                           setComposer("");
                         }}
                       >
@@ -1469,8 +1547,27 @@ function App() {
                         onClick={() => activeHarness && void onCreateSchedule(activeHarness.id)}
                         disabled={!activeHarness || scheduleBusyHarnessId === activeHarness.id}
                       >
-                        {scheduleBusyHarnessId === activeHarness?.id ? "Saving..." : "Save Schedule"}
+                        {scheduleBusyHarnessId === activeHarness?.id
+                          ? "Saving..."
+                          : getEditingScheduleId(activeHarness?.id ?? "")
+                            ? "Update Schedule"
+                            : "Save Schedule"}
                       </button>
+                      {activeHarness && getEditingScheduleId(activeHarness.id) ? (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => {
+                            setEditingScheduleIdByHarness((current) => ({ ...current, [activeHarness.id]: null }));
+                            setScheduleDraftByHarness((current) => ({
+                              ...current,
+                              [activeHarness.id]: { title: "", prompt: "", intervalMinutes: 30 },
+                            }));
+                          }}
+                        >
+                          Cancel Edit
+                        </button>
+                      ) : null}
 
                       <ul className="automation-list">
                         {activeHarnessSchedules.map((schedule) => (
@@ -1479,7 +1576,34 @@ function App() {
                             <small>next: {new Date(schedule.nextRunAt).toLocaleString()}</small>
                             <p>{schedule.prompt}</p>
                             <div className="automation-actions">
-                              <span>every {schedule.intervalMinutes}m</span>
+                              <span>{schedule.enabled ? "enabled" : "paused"} · every {schedule.intervalMinutes}m</span>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => {
+                                  if (!activeHarness) {
+                                    return;
+                                  }
+                                  setEditingScheduleIdByHarness((current) => ({ ...current, [activeHarness.id]: schedule.id }));
+                                  setScheduleDraftByHarness((current) => ({
+                                    ...current,
+                                    [activeHarness.id]: {
+                                      title: schedule.title,
+                                      prompt: schedule.prompt,
+                                      intervalMinutes: schedule.intervalMinutes,
+                                    },
+                                  }));
+                                }}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => activeHarness && void onToggleSchedule(activeHarness.id, schedule.id, !schedule.enabled)}
+                              >
+                                {schedule.enabled ? "Pause" : "Resume"}
+                              </button>
                               <button
                                 type="button"
                                 className="ghost"

@@ -56,5 +56,8 @@
   "harnessAutomation": {
     "schedulesByWorkspace": {},
     "runsByWorkspace": {}
+  },
+  "harnessChats": {
+    "threadsByWorkspace": {}
   }
 }

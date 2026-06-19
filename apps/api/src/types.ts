@@ -84,6 +84,7 @@ export type SystemState = {
     }>;
   };
   harnessAutomation?: HarnessAutomationStore;
+  harnessChats?: HarnessChatStore;
 };
 
 export type NexusRouterProvider = {
@@ -116,6 +117,30 @@ export type ChatMessage = {
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: string;
+};
+
+export type ChatMeta = {
+  model: string;
+  provider: string;
+  fallbackUsed: boolean;
+  elapsedMs: number;
+  tokenUsage: {
+    input: number;
+    output: number;
+  };
+};
+
+export type HarnessChatThreadRecord = {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  meta: ChatMeta | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HarnessChatStore = {
+  threadsByWorkspace: Record<string, Record<string, HarnessChatThreadRecord[]>>;
 };
 
 export type HarnessConformanceCheck = {
@@ -151,16 +176,7 @@ export type TaskRecord = {
   partialOutput: string;
   finalOutput?: string;
   error?: string;
-  meta?: {
-    model: string;
-    provider: string;
-    fallbackUsed: boolean;
-    elapsedMs: number;
-    tokenUsage: {
-      input: number;
-      output: number;
-    };
-  };
+  meta?: ChatMeta;
 };
 
 export type StartupReadiness = {
@@ -198,10 +214,20 @@ export type HarnessRunRecord = {
   error?: string;
   model?: string;
   provider?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  durationMs?: number;
   createdAt: string;
 };
 
 export type HarnessAutomationStore = {
   schedulesByWorkspace: Record<string, Record<string, HarnessSchedule[]>>;
   runsByWorkspace: Record<string, Record<string, HarnessRunRecord[]>>;
+};
+
+export type UpdateHarnessScheduleInput = {
+  title?: string;
+  prompt?: string;
+  intervalMinutes?: number;
+  enabled?: boolean;
 };
