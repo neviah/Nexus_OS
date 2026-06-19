@@ -121,14 +121,6 @@ type WorkspaceTreeNode = {
   children?: WorkspaceTreeNode[];
 };
 
-type RouterProbe = {
-  origin: string;
-  dashboardUrl: string;
-  reachable: boolean;
-  checks: Array<{ url: string; ok: boolean; status?: number; error?: string }>;
-  checkedAt: string;
-};
-
 // ── Nexus Router types ──────────────────────────────────────────────────────
 type NxProvider = {
   id: string;
@@ -152,31 +144,33 @@ type NxRetryPolicy = {
 
 type NxRouterConfig = {
   fallbackChain: NxFallbackTarget[];
+  harnessAssignments: Record<string, NxFallbackTarget[]>;
   retryPolicy: NxRetryPolicy;
   logs: Array<{ timestamp: string; level: string; message: string }>;
+};
+
+type NxFallbackRow = {
+  id: string;
+  providerId: string;
+  model: string;
 };
 
 const PRESET_PROVIDERS: Array<{ id: string; name: string; type: NxProvider["type"]; baseUrl: string; defaultModel: string }> = [
   { id: "openrouter", name: "OpenRouter", type: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "openai/gpt-4.1-mini" },
   { id: "openai", name: "OpenAI", type: "openai-compatible", baseUrl: "https://api.openai.com/v1", defaultModel: "gpt-4.1-mini" },
+  { id: "iflow", name: "iFlow AI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "iflow/default" },
+  { id: "qwencode", name: "Qwen Code (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "qwencode/default" },
+  { id: "gemini-cli", name: "Gemini CLI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "gemini-cli/default" },
+  { id: "kiro-ai", name: "Kiro AI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "kiro-ai/default" },
   { id: "anthropic-compat", name: "Anthropic (via OpenRouter)", type: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "anthropic/claude-sonnet-4-5" },
   { id: "together", name: "Together AI", type: "openai-compatible", baseUrl: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3-8b-chat-hf" },
   { id: "groq", name: "Groq", type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama3-8b-8192" },
   { id: "custom", name: "Custom / Local", type: "openai-compatible", baseUrl: "http://localhost:11434/v1", defaultModel: "llama3" },
 ];
 
-const initialRouterForm = {
-  apiKey: "",
-  baseUrl: "http://localhost:20128/v1",
-  defaultModel: "deepseek-v3",
-  fallbackOrder: "deepseek-v3, qwen-2.5-72b, claude-3.5-sonnet",
-};
-
 function App() {
   const [boot, setBoot] = useState<BootstrapPayload | null>(null);
-  const [selectedPane, setSelectedPane] = useState<PaneSelection>({ type: "tool", id: "9router" });
-  const [routerForm, setRouterForm] = useState(initialRouterForm);
-  const [routerSaving, setRouterSaving] = useState(false);
+  const [selectedPane, setSelectedPane] = useState<PaneSelection>({ type: "tool", id: "nexus-router" });
   const [composer, setComposer] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -193,18 +187,15 @@ function App() {
   const [startupChecking, setStartupChecking] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
-  const [routerFrameRefresh, setRouterFrameRefresh] = useState(0);
-  const [routerProbe, setRouterProbe] = useState<RouterProbe | null>(null);
-  const [routerProbeLoading, setRouterProbeLoading] = useState(false);
-  const [routerBrowserInput, setRouterBrowserInput] = useState("http://localhost:20128/dashboard");
-  const [routerBrowserUrl, setRouterBrowserUrl] = useState("http://localhost:20128/dashboard");
 
   // Nexus Router state
   const [nxProviders, setNxProviders] = useState<NxProvider[]>([]);
   const [nxProviderForm, setNxProviderForm] = useState({ preset: "openrouter", id: "openrouter", name: "OpenRouter", type: "openrouter" as NxProvider["type"], baseUrl: "https://openrouter.ai/api/v1", apiKey: "", defaultModel: "openai/gpt-4.1-mini", enabled: true });
   const [nxSaving, setNxSaving] = useState(false);
   const [nxSyncingId, setNxSyncingId] = useState<string | null>(null);
-  const [nxFallbackEditor, setNxFallbackEditor] = useState("");
+  const [nxFallbackRows, setNxFallbackRows] = useState<NxFallbackRow[]>([]);
+  const [nxModelOptionsByProvider, setNxModelOptionsByProvider] = useState<Record<string, string[]>>({});
+  const [nxHarnessAssignments, setNxHarnessAssignments] = useState<Record<string, string[]>>({});
   const [nxRetryEditor, setNxRetryEditor] = useState<NxRetryPolicy>({ maxAttempts: 3, backoffMs: 400, retryOnStatus: [429, 500, 502, 503, 504] });
   const [nxTestPrompt, setNxTestPrompt] = useState("Say hello briefly.");
   const [nxTestResult, setNxTestResult] = useState<{ content: string; model: string; providerId: string; elapsedMs: number; attempts: Array<{ providerId: string; model: string; status: string; details: string }> } | null>(null);
@@ -216,19 +207,41 @@ function App() {
     [boot, selectedPane.id],
   );
 
+  const fallbackChoiceOptions = useMemo(
+    () => nxFallbackRows
+      .filter((row) => row.providerId && row.model)
+      .map((row) => `${row.providerId}::${row.model}`),
+    [nxFallbackRows],
+  );
+
+  const fallbackChoiceSet = useMemo(() => new Set(fallbackChoiceOptions), [fallbackChoiceOptions]);
+
+  function createFallbackRow(target?: NxFallbackTarget): NxFallbackRow {
+    return {
+      id: crypto.randomUUID(),
+      providerId: target?.providerId ?? "",
+      model: target?.model ?? "",
+    };
+  }
+
+  function fallbackKey(target: NxFallbackTarget): string {
+    return `${target.providerId}::${target.model}`;
+  }
+
+  function parseFallbackKey(value: string): NxFallbackTarget | null {
+    const [providerId, ...rest] = value.split("::");
+    const model = rest.join("::").trim();
+    const trimmedProvider = providerId.trim();
+    if (!trimmedProvider || !model) {
+      return null;
+    }
+    return { providerId: trimmedProvider, model };
+  }
+
   const loadBootstrap = useCallback(async () => {
     const response = await fetch("/api/bootstrap");
     const payload = (await response.json()) as BootstrapPayload;
     setBoot(payload);
-    setRouterForm((current) => ({
-      ...current,
-      baseUrl: payload.router9.baseUrl || current.baseUrl,
-      defaultModel: payload.router9.defaultModel || current.defaultModel,
-      fallbackOrder: payload.router9.fallbackOrder.join(", "),
-    }));
-    const bootDashboard = getRouterDashboardUrl(payload.router9.baseUrl || initialRouterForm.baseUrl);
-    setRouterBrowserInput(bootDashboard);
-    setRouterBrowserUrl(bootDashboard);
 
     const preferredPane: PaneSelection = payload.onboardingRequired
       ? { type: "tool", id: "nexus-router" }
@@ -237,7 +250,6 @@ function App() {
     await loadWorkspaceTree(payload.activeWorkspaceId);
     await loadFailedTasks();
     await loadLastStartupCheck();
-    await loadRouterProbe();
     await loadNxRouter();
     setStatusMessage(payload.onboardingRequired ? "First run: Add a provider in Nexus Router to get started." : "Ready");
   }, []);
@@ -251,11 +263,23 @@ function App() {
       if (provRes.ok) {
         const data = (await provRes.json()) as { providers: NxProvider[] };
         setNxProviders(data.providers);
+        const modelMap: Record<string, string[]> = {};
+        for (const provider of data.providers) {
+          modelMap[provider.id] = provider.models ?? [];
+        }
+        setNxModelOptionsByProvider(modelMap);
       }
       if (cfgRes.ok) {
         const data = (await cfgRes.json()) as NxRouterConfig;
         setNxRetryEditor(data.retryPolicy);
-        setNxFallbackEditor(data.fallbackChain.map((t) => `${t.providerId}::${t.model}`).join("\n"));
+        setNxFallbackRows(data.fallbackChain.length > 0
+          ? data.fallbackChain.map((target) => createFallbackRow(target))
+          : [createFallbackRow()]);
+        const assignments: Record<string, string[]> = {};
+        for (const [harnessId, targets] of Object.entries(data.harnessAssignments ?? {})) {
+          assignments[harnessId] = targets.map(fallbackKey);
+        }
+        setNxHarnessAssignments(assignments);
         setNxConsoleLogs(data.logs);
       }
     } catch { /* silent */ }
@@ -287,6 +311,10 @@ function App() {
     try {
       const res = await fetch(`/api/router/models?providerId=${encodeURIComponent(providerId)}`);
       if (res.ok) {
+        const payload = (await res.json()) as { models?: string[] };
+        if (Array.isArray(payload.models)) {
+          setNxModelOptionsByProvider((current) => ({ ...current, [providerId]: payload.models ?? [] }));
+        }
         await loadNxRouter();
         setStatusMessage(`Models synced for ${providerId}.`);
       } else {
@@ -299,18 +327,25 @@ function App() {
   }
 
   async function nxSaveConfig() {
-    const fallbackChain = nxFallbackEditor
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => {
-        const [providerId, ...rest] = line.split("::");
-        return { providerId: providerId.trim(), model: rest.join("::").trim() };
-      });
+    const fallbackChain = nxFallbackRows
+      .map((row) => ({ providerId: row.providerId.trim(), model: row.model.trim() }))
+      .filter((row) => row.providerId && row.model);
+
+    const harnessAssignments: Record<string, NxFallbackTarget[]> = {};
+    for (const [harnessId, selected] of Object.entries(nxHarnessAssignments)) {
+      const parsed = selected
+        .filter((entry) => fallbackChoiceSet.has(entry))
+        .map(parseFallbackKey)
+        .filter((entry): entry is NxFallbackTarget => Boolean(entry));
+      if (parsed.length > 0) {
+        harnessAssignments[harnessId] = parsed;
+      }
+    }
+
     const res = await fetch("/api/router/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fallbackChain, retryPolicy: nxRetryEditor }),
+      body: JSON.stringify({ fallbackChain, harnessAssignments, retryPolicy: nxRetryEditor }),
     });
     if (res.ok) {
       await loadNxRouter();
@@ -340,23 +375,6 @@ function App() {
     }
   }
 
-  async function loadRouterProbe() {
-    setRouterProbeLoading(true);
-    try {
-      const response = await fetch("/api/tools/9router/probe");
-      if (!response.ok) {
-        setRouterProbe(null);
-        return;
-      }
-      const payload = (await response.json()) as RouterProbe;
-      setRouterProbe(payload);
-    } catch {
-      setRouterProbe(null);
-    } finally {
-      setRouterProbeLoading(false);
-    }
-  }
-
   async function loadLastStartupCheck() {
     const response = await fetch("/api/startup/check/last");
     const payload = (await response.json()) as { last: { readiness: StartupReadiness; timestamp: string } | null };
@@ -374,27 +392,6 @@ function App() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadBootstrap();
   }, [loadBootstrap]);
-
-  useEffect(() => {
-    if (selectedPane.type === "tool" && selectedPane.id === "9router") {
-      void loadRouterProbe();
-    }
-  }, [selectedPane]);
-
-  useEffect(() => {
-    if (!/api\.9router\.io/i.test(routerForm.baseUrl)) {
-      return;
-    }
-
-    // Auto-heal legacy/invalid host defaults to local 9router runtime.
-    setRouterForm((current) => ({
-      ...current,
-      baseUrl: "http://localhost:20128/v1",
-    }));
-    setRouterBrowserInput("http://localhost:20128/dashboard");
-    setRouterBrowserUrl("http://localhost:20128/dashboard");
-    setRouterFrameRefresh((current) => current + 1);
-  }, [routerForm.baseUrl]);
 
   async function loadWorkspaceTree(workspaceId: string) {
     const response = await fetch(`/api/workspaces/${workspaceId}/tree`);
@@ -423,40 +420,6 @@ function App() {
     await loadLastStartupCheck();
   }
 
-  async function onSaveRouterConfig(event: FormEvent) {
-    event.preventDefault();
-    setRouterSaving(true);
-    setStatusMessage("Saving 9router configuration...");
-
-    const fallbackOrder = routerForm.fallbackOrder
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-
-    const response = await fetch("/api/tools/9router/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        apiKey: routerForm.apiKey,
-        baseUrl: routerForm.baseUrl,
-        defaultModel: routerForm.defaultModel,
-        fallbackOrder,
-      }),
-    });
-
-    if (!response.ok) {
-      const payload = (await response.json()) as { error: string };
-      setStatusMessage(payload.error);
-      setRouterSaving(false);
-      return;
-    }
-
-    await loadBootstrap();
-    setSelectedPane({ type: "agent", id: "hermes" });
-    setStatusMessage("9router configured. Harness routing is live.");
-    setRouterSaving(false);
-  }
-
   async function onSendMessage(resendText?: string) {
     const textToSend = (resendText ?? composer).trim();
     if (!activeHarness || !textToSend || chatBusy) {
@@ -483,7 +446,7 @@ function App() {
     setComposer("");
     setChatBusy(true);
     setChatMeta(null);
-    setStatusMessage(`Routing ${activeHarness.name} via 9router...`);
+    setStatusMessage(`Routing ${activeHarness.name} via Nexus Router...`);
     const requestId = crypto.randomUUID();
     setActiveRequestId(requestId);
 
@@ -710,8 +673,6 @@ function App() {
   const startupReady = boot?.startup.ready ?? false;
   const startupBlockers = boot?.startup.blockers ?? [];
   const diagnosticsAlertCount = failedTasks.length + (startupReady ? 0 : Math.max(1, startupBlockers.length));
-  const routerRootUrl = routerProbe?.origin ?? getRouterOrigin(routerForm.baseUrl || boot?.router9.baseUrl || initialRouterForm.baseUrl);
-  const likelyWrongCloudHost = /api\.9router\.io/i.test(routerForm.baseUrl);
 
   return (
     <main className="app-shell">
@@ -720,7 +681,7 @@ function App() {
 
       {onboardingRequired ? (
         <section className="first-run-banner">
-          <strong>First launch checkpoint:</strong> Configure 9router endpoint to unlock all harness routing.
+          <strong>First launch checkpoint:</strong> Configure Nexus Router providers to unlock all harness routing.
         </section>
       ) : null}
 
@@ -776,7 +737,7 @@ function App() {
 
           {toolsOpen ? (
             <ul className="nav-list">
-              {boot?.tools.map((tool) => {
+              {boot?.tools.filter((tool) => tool.id !== "9router").map((tool) => {
                 const isActive = selectedPane.type === "tool" && selectedPane.id === tool.id;
                 return (
                   <li key={tool.id}>
@@ -825,8 +786,8 @@ function App() {
                     <input type="text" required value={nxProviderForm.name} onChange={(event) => setNxProviderForm((c) => ({ ...c, name: event.target.value }))} />
                   </label>
                   <label>
-                    API Key
-                    <input type="password" required value={nxProviderForm.apiKey} placeholder="sk-..." onChange={(event) => setNxProviderForm((c) => ({ ...c, apiKey: event.target.value }))} />
+                    API Key (optional)
+                    <input type="password" value={nxProviderForm.apiKey} placeholder="sk-..." onChange={(event) => setNxProviderForm((c) => ({ ...c, apiKey: event.target.value }))} />
                   </label>
                   <label>
                     Base URL
@@ -876,15 +837,103 @@ function App() {
 
               {/* ── Fallback Chain ── */}
               <section className="nxr-section">
-                <h3>Fallback Chain</h3>
-                <p className="nxr-hint">One target per line: <code>providerId::modelName</code></p>
-                <textarea
-                  className="nxr-fallback-editor"
-                  value={nxFallbackEditor}
-                  rows={5}
-                  onChange={(event) => setNxFallbackEditor(event.target.value)}
-                  placeholder={"openrouter::openai/gpt-4.1-mini\nopenrouter::anthropic/claude-haiku-4-5"}
-                />
+                <div className="nxr-section-header">
+                  <h3>Fallback Chain</h3>
+                  <button type="button" className="ghost" onClick={() => setNxFallbackRows((rows) => [...rows, createFallbackRow()])}>Add Row</button>
+                </div>
+                <p className="nxr-hint">Pick provider + model per row. Model dropdown uses synced active models.</p>
+                <div className="nxr-fallback-rows">
+                  {nxFallbackRows.map((row) => {
+                    const modelOptions = nxModelOptionsByProvider[row.providerId] ?? [];
+                    return (
+                      <div key={row.id} className="nxr-fallback-row">
+                        <select
+                          value={row.providerId}
+                          onChange={(event) => {
+                            const providerId = event.target.value;
+                            setNxFallbackRows((rows) => rows.map((entry) => entry.id === row.id ? { ...entry, providerId, model: "" } : entry));
+                            if (providerId && (nxModelOptionsByProvider[providerId]?.length ?? 0) === 0) {
+                              void nxSyncModels(providerId);
+                            }
+                          }}
+                        >
+                          <option value="">Select provider</option>
+                          {nxProviders.filter((provider) => provider.enabled).map((provider) => (
+                            <option key={provider.id} value={provider.id}>{provider.name}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={row.model}
+                          disabled={!row.providerId}
+                          onChange={(event) => setNxFallbackRows((rows) => rows.map((entry) => entry.id === row.id ? { ...entry, model: event.target.value } : entry))}
+                        >
+                          <option value="">{row.providerId ? "Select model" : "Select provider first"}</option>
+                          {modelOptions.map((model) => (
+                            <option key={model} value={model}>{model}</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => row.providerId ? void nxSyncModels(row.providerId) : undefined}
+                          disabled={!row.providerId || nxSyncingId === row.providerId}
+                        >
+                          {nxSyncingId === row.providerId ? "Syncing..." : "Refresh"}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => setNxFallbackRows((rows) => rows.filter((entry) => entry.id !== row.id))}
+                          disabled={nxFallbackRows.length <= 1}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <h3 className="nxr-subheading">Harness Model Assignment</h3>
+                <p className="nxr-hint">Assign one or more fallback targets per harness. Only fallback rows appear here.</p>
+                {fallbackChoiceOptions.length === 0 ? (
+                  <p className="nxr-hint">Add at least one fallback row before assigning harness models.</p>
+                ) : (
+                  <div className="nxr-harness-grid">
+                    {boot?.harnesses.map((harness) => {
+                      const selected = nxHarnessAssignments[harness.id] ?? [];
+                      return (
+                        <div key={harness.id} className="nxr-harness-card">
+                          <strong>{harness.name}</strong>
+                          <small>{harness.id}</small>
+                          <ul>
+                            {fallbackChoiceOptions.map((option) => (
+                              <li key={`${harness.id}-${option}`}>
+                                <label>
+                                  <input
+                                    type="checkbox"
+                                    checked={selected.includes(option)}
+                                    onChange={(event) => {
+                                      const checked = event.target.checked;
+                                      setNxHarnessAssignments((current) => {
+                                        const existing = current[harness.id] ?? [];
+                                        const next = checked
+                                          ? Array.from(new Set([...existing, option]))
+                                          : existing.filter((entry) => entry !== option);
+                                        return { ...current, [harness.id]: next };
+                                      });
+                                    }}
+                                  />
+                                  <span>{option}</span>
+                                </label>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
                 <div className="nxr-retry">
                   <label>
                     Max Attempts
@@ -933,148 +982,7 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && selectedPane.id === "9router" ? (
-            <div className="tool-view">
-              <h2>9router Dashboard</h2>
-              <p className="subtitle">Connect providers directly in 9router. NexusOS uses it as the shared fallback router.</p>
-
-              <form className="router-form router-toolbar" onSubmit={(event) => void onSaveRouterConfig(event)}>
-                <label>
-                  9router API Key (optional)
-                  <input
-                    type="password"
-                    value={routerForm.apiKey}
-                    placeholder="Paste dashboard key if requireApiKey is enabled"
-                    onChange={(event) => setRouterForm((current) => ({ ...current, apiKey: event.target.value }))}
-                  />
-                </label>
-
-                <label>
-                  Base URL
-                  <input
-                    required
-                    type="text"
-                    value={routerForm.baseUrl}
-                    onChange={(event) => setRouterForm((current) => ({ ...current, baseUrl: event.target.value }))}
-                  />
-                </label>
-
-                <button type="submit" disabled={routerSaving}>
-                  {routerSaving ? "Saving..." : "Save"}
-                </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => {
-                    window.open(routerBrowserUrl, "_blank", "noopener,noreferrer");
-                  }}
-                >
-                  Open Tab
-                </button>
-                <button type="button" className="ghost" onClick={() => setRouterFrameRefresh((current) => current + 1)}>
-                  Reload
-                </button>
-                <button type="button" className="ghost" onClick={() => void loadRouterProbe()} disabled={routerProbeLoading}>
-                  {routerProbeLoading ? "Checking..." : "Probe"}
-                </button>
-              </form>
-
-              <div className="router-browser-controls">
-                <input
-                  type="text"
-                  value={routerBrowserInput}
-                  onChange={(event) => setRouterBrowserInput(event.target.value)}
-                  placeholder="http://localhost:20128/dashboard"
-                />
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => {
-                    const normalized = normalizeBrowserUrl(routerBrowserInput, routerRootUrl);
-                    setRouterBrowserInput(normalized);
-                    setRouterBrowserUrl(normalized);
-                    setRouterFrameRefresh((current) => current + 1);
-                  }}
-                >
-                  Go
-                </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => {
-                    setRouterForm((current) => ({ ...current, baseUrl: "http://localhost:20128/v1" }));
-                    setRouterBrowserInput("http://localhost:20128/dashboard");
-                    setRouterBrowserUrl("http://localhost:20128/dashboard");
-                    setRouterFrameRefresh((current) => current + 1);
-                  }}
-                >
-                  Use Local
-                </button>
-              </div>
-
-              <p className="router-hint">
-                Local default endpoint is http://localhost:20128/v1. Use the embedded dashboard below to connect free or API-key providers.
-              </p>
-              {likelyWrongCloudHost ? (
-                <p className="router-warning">
-                  api.9router.io does not appear to be a valid dashboard host. For local 9router use http://localhost:20128/v1 and dashboard http://localhost:20128/dashboard.
-                  <button
-                    type="button"
-                    className="ghost router-warning-action"
-                    onClick={() => {
-                      setRouterForm((current) => ({ ...current, baseUrl: "http://localhost:20128/v1" }));
-                      setRouterBrowserInput("http://localhost:20128/dashboard");
-                      setRouterBrowserUrl("http://localhost:20128/dashboard");
-                      setRouterFrameRefresh((current) => current + 1);
-                    }}
-                  >
-                    Apply Local Defaults
-                  </button>
-                </p>
-              ) : null}
-
-              {routerProbe && !routerProbe.reachable ? (
-                <section className="router-unavailable">
-                  <h3>9router dashboard not reachable</h3>
-                  <p>
-                    Checked: {routerProbe.checks.map((entry) => `${entry.url} (${entry.status ?? entry.error ?? "failed"})`).join(" | ")}
-                  </p>
-                  <div className="router-unavailable-actions">
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => {
-                        window.open(routerBrowserUrl, "_blank", "noopener,noreferrer");
-                      }}
-                    >
-                      Open /dashboard
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => {
-                        window.open(routerRootUrl, "_blank", "noopener,noreferrer");
-                      }}
-                    >
-                      Open Root
-                    </button>
-                  </div>
-                </section>
-              ) : (
-                <div className="router-embed-wrap">
-                  <iframe
-                    key={`${routerFrameRefresh}-${routerBrowserUrl}`}
-                    className="router-embed"
-                    src={routerBrowserUrl}
-                    title="9router Dashboard"
-                    loading="lazy"
-                  />
-                </div>
-              )}
-            </div>
-          ) : null}
-
-          {selectedPane.type === "tool" && selectedPane.id !== "9router" && selectedPane.id !== "nexus-router" ? (
+          {selectedPane.type === "tool" && selectedPane.id !== "nexus-router" ? (
             <div className="placeholder-view">
               <h2>{boot?.tools.find((tool) => tool.id === selectedPane.id)?.name ?? "Tool"}</h2>
               <p>Tool plugin slot ready. Hook this panel to a future backend module.</p>
@@ -1087,7 +995,7 @@ function App() {
                 <div>
                   <strong>{activeHarness?.name ?? "Harness"}</strong>
                   <small>
-                    model: {chatMeta?.model ?? boot?.router9.defaultModel} | provider: {chatMeta?.provider ?? "9router"}
+                    model: {chatMeta?.model ?? "auto"} | provider: {chatMeta?.provider ?? "nexus-router"}
                   </small>
                 </div>
                 <div className="status-chip-row">
@@ -1290,38 +1198,6 @@ function App() {
       </section>
     </main>
   );
-}
-
-function getRouterDashboardUrl(baseUrl: string): string {
-  try {
-    const parsed = new URL(baseUrl);
-    return `${parsed.origin}/dashboard`;
-  } catch {
-    return "http://localhost:20128/dashboard";
-  }
-}
-
-function getRouterOrigin(baseUrl: string): string {
-  try {
-    const parsed = new URL(baseUrl);
-    return parsed.origin;
-  } catch {
-    return "http://localhost:20128";
-  }
-}
-
-function normalizeBrowserUrl(input: string, fallbackOrigin: string): string {
-  const raw = input.trim();
-  if (!raw) {
-    return `${fallbackOrigin}/dashboard`;
-  }
-
-  if (/^https?:\/\//i.test(raw)) {
-    return raw;
-  }
-
-  const normalizedPath = raw.startsWith("/") ? raw : `/${raw}`;
-  return `${fallbackOrigin}${normalizedPath}`;
 }
 
 function formatBytes(bytes: number): string {

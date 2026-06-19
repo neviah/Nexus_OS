@@ -9,7 +9,7 @@ import {
 import { readHarnessRegistry, resolveHarnessHealth } from "./lib/harnessRegistry.js";
 import { readSystemState, writeSystemState } from "./lib/stateStore.js";
 import { getRouterSummary } from "./lib/routerStatus.js";
-import type { ChatMessage, StartupReadiness } from "./types.js";
+import type { ChatMessage, StartupReadiness, SystemState } from "./types.js";
 import { invokeHarness, streamHarness } from "./lib/harnessAdapter.js";
 import type { AdapterResult } from "./lib/harnessAdapter.js";
 import { runHarnessConformance } from "./lib/conformance.js";
@@ -49,7 +49,7 @@ function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: numbe
   const blockers: string[] = [];
 
   if (!onboardingComplete) {
-    blockers.push("9router is not configured.");
+    blockers.push("Nexus Router is not configured.");
   }
 
   if (liveHarnesses === 0) {
@@ -64,6 +64,11 @@ function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: numbe
     totalHarnesses,
     checkedAt: new Date().toISOString(),
   };
+}
+
+function isNexusRouterConfigured(state: SystemState): boolean {
+  const router = ensureRouterState(state);
+  return router.providers.some((provider) => provider.enabled);
 }
 
 app.use(cors());
@@ -81,12 +86,16 @@ app.get("/api/bootstrap", async (_req, res) => {
     [state.activeWorkspaceId]: harnessStatus.filter((h) => h.status === "online").map((h) => h.id),
   });
   const liveHarnesses = harnessStatus.filter((entry) => entry.status === "online").length;
-  const startup = buildStartupReadiness(state.onboardingComplete, liveHarnesses, harnessStatus.length);
+  const routerConfigured = isNexusRouterConfigured(state);
+  const startup = buildStartupReadiness(routerConfigured, liveHarnesses, harnessStatus.length);
+  const selectedPane = state.selectedPane.id === "9router"
+    ? { type: "tool" as const, id: "nexus-router" }
+    : state.selectedPane;
 
   res.json({
     appName: "NEXUS OS",
-    onboardingRequired: !state.onboardingComplete,
-    selectedPane: state.selectedPane,
+    onboardingRequired: !routerConfigured,
+    selectedPane,
     activeWorkspaceId: state.activeWorkspaceId,
     harnesses: harnessStatus,
     startup,
@@ -95,11 +104,6 @@ app.get("/api/bootstrap", async (_req, res) => {
         id: "nexus-router",
         name: "Nexus Router",
         status: (state.nexusRouter?.providers ?? []).some((p) => p.enabled) ? "online" : "setup-required",
-      },
-      {
-        id: "9router",
-        name: "9router (ext)",
-        status: state.onboardingComplete ? "online" : "setup-required",
       },
       { id: "image-generator", name: "Image Generator", status: "offline" },
       { id: "video-generator", name: "Video Generator", status: "offline" },
@@ -130,7 +134,7 @@ app.get("/api/startup/check", async (_req, res) => {
     item.checks.some((check) => (check.name === "live-health-check" || check.name.startsWith("live-probe-")) && check.passed)
   ).length;
 
-  const startup = buildStartupReadiness(state.onboardingComplete, liveHarnesses, harnesses.length);
+  const startup = buildStartupReadiness(isNexusRouterConfigured(state), liveHarnesses, harnesses.length);
   await persistStartupCheck(startup);
   res.json({ startup, conformance });
 });
@@ -229,8 +233,8 @@ app.post("/api/router/providers", async (req, res) => {
     defaultModel?: string;
   };
 
-  if (!body.id || !body.name || !body.type || !body.baseUrl || !body.apiKey) {
-    return res.status(400).json({ error: "id, name, type, baseUrl, and apiKey are required" });
+  if (!body.id || !body.name || !body.type || !body.baseUrl) {
+    return res.status(400).json({ error: "id, name, type, and baseUrl are required" });
   }
 
   const state = await readSystemState();
@@ -243,6 +247,10 @@ app.post("/api/router/providers", async (req, res) => {
     enabled: body.enabled,
     defaultModel: body.defaultModel,
   });
+  state.onboardingComplete = isNexusRouterConfigured(state);
+  if (state.onboardingComplete && state.selectedPane.id === "9router") {
+    state.selectedPane = { type: "tool", id: "nexus-router" };
+  }
   await writeSystemState(state);
   return res.json({ ok: true, provider });
 });
@@ -268,6 +276,7 @@ app.get("/api/router/config", async (_req, res) => {
   const router = ensureRouterState(state);
   res.json({
     fallbackChain: router.fallbackChain,
+    harnessAssignments: router.harnessAssignments,
     retryPolicy: router.retryPolicy,
     logs: router.logs.slice(0, 30),
   });
@@ -276,6 +285,7 @@ app.get("/api/router/config", async (_req, res) => {
 app.post("/api/router/config", async (req, res) => {
   const body = req.body as {
     fallbackChain?: Array<{ providerId: string; model: string }>;
+    harnessAssignments?: Record<string, Array<{ providerId: string; model: string }>>;
     retryPolicy?: {
       maxAttempts?: number;
       backoffMs?: number;
@@ -286,8 +296,10 @@ app.post("/api/router/config", async (req, res) => {
   const state = await readSystemState();
   const updated = updateRouterConfig(state, {
     fallbackChain: body.fallbackChain,
+    harnessAssignments: body.harnessAssignments,
     retryPolicy: body.retryPolicy,
   });
+  state.onboardingComplete = isNexusRouterConfigured(state);
   await writeSystemState(state);
   res.json({ ok: true, ...updated });
 });
@@ -296,6 +308,7 @@ app.post("/api/router/chat", async (req, res) => {
   const body = req.body as {
     providerId?: string;
     model?: string;
+    harnessId?: string;
     fallbackChain?: Array<{ providerId: string; model: string }>;
     messages?: Array<{ role: "user" | "assistant" | "system"; content: string }>;
     temperature?: number;
@@ -310,6 +323,7 @@ app.post("/api/router/chat", async (req, res) => {
     const result = await routeChatWithFallback(state, {
       providerId: body.providerId,
       model: body.model,
+      harnessId: body.harnessId,
       fallbackChain: body.fallbackChain,
       messages: body.messages,
       temperature: body.temperature,
@@ -393,9 +407,9 @@ app.post("/api/chat", async (req, res) => {
   const harness = harnesses.find((entry) => entry.id === harnessId);
   const taskId = requestId ?? crypto.randomUUID();
 
-  if (!state.onboardingComplete) {
+  if (!isNexusRouterConfigured(state)) {
     return res.status(412).json({
-      error: "Complete 9router setup before starting chats.",
+      error: "Complete Nexus Router setup before starting chats.",
     });
   }
 
@@ -536,8 +550,8 @@ app.post("/api/chat/stream", async (req, res) => {
   const harnesses = await readHarnessRegistry();
   const harness = harnesses.find((entry) => entry.id === harnessId);
 
-  if (!state.onboardingComplete) {
-    return res.status(412).json({ error: "Complete 9router setup before starting chats." });
+  if (!isNexusRouterConfigured(state)) {
+    return res.status(412).json({ error: "Complete Nexus Router setup before starting chats." });
   }
 
   if (!harness) {

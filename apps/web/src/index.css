@@ -814,11 +814,71 @@ textarea {
   gap: 2px;
 }
 
-.nxr-fallback-editor {
-  width: 100%;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.83rem;
-  resize: vertical;
+.nxr-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.nxr-fallback-rows {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.nxr-fallback-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(220px, 2fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.nxr-subheading {
+  margin: 10px 0 4px;
+  font-size: 0.9rem;
+}
+
+.nxr-harness-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.nxr-harness-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  background: rgba(18, 29, 35, 0.5);
+  display: grid;
+  gap: 4px;
+}
+
+.nxr-harness-card small {
+  color: var(--ink-3);
+  font-size: 0.77rem;
+}
+
+.nxr-harness-card ul {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.nxr-harness-card label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+
+.nxr-harness-card input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
 }
 
 .nxr-retry {
@@ -937,6 +997,10 @@ textarea {
 
   .router-toolbar {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .nxr-fallback-row {
+    grid-template-columns: 1fr;
   }
 
   .router-browser-controls {

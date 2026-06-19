@@ -71,6 +71,7 @@ export type SystemState = {
       providerId: string;
       model: string;
     }>;
+    harnessAssignments: NexusRouterHarnessAssignments;
     retryPolicy: {
       maxAttempts: number;
       backoffMs: number;
@@ -100,6 +101,8 @@ export type NexusRouterFallbackTarget = {
   providerId: string;
   model: string;
 };
+
+export type NexusRouterHarnessAssignments = Record<string, NexusRouterFallbackTarget[]>;
 
 export type NexusRouterRetryPolicy = {
   maxAttempts: number;

@@ -3,7 +3,7 @@
   "activeWorkspaceId": "default",
   "selectedPane": {
     "type": "tool",
-    "id": "9router"
+    "id": "nexus-router"
   },
   "router9": {
     "apiKey": "",
@@ -45,6 +45,7 @@
   "nexusRouter": {
     "providers": [],
     "fallbackChain": [],
+    "harnessAssignments": {},
     "retryPolicy": {
       "maxAttempts": 3,
       "backoffMs": 400,

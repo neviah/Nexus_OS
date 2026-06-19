@@ -1,6 +1,7 @@
 import type {
   ChatMessage,
   NexusRouterFallbackTarget,
+  NexusRouterHarnessAssignments,
   NexusRouterProvider,
   NexusRouterRetryPolicy,
   SystemState,
@@ -67,6 +68,7 @@ export function ensureRouterState(state: SystemState): NonNullable<SystemState["
     state.nexusRouter = {
       providers: [],
       fallbackChain: [],
+      harnessAssignments: {},
       retryPolicy: { ...DEFAULT_RETRY_POLICY },
       logs: [],
     };
@@ -86,6 +88,7 @@ export function ensureRouterState(state: SystemState): NonNullable<SystemState["
   state.nexusRouter.fallbackChain = Array.isArray(state.nexusRouter.fallbackChain)
     ? state.nexusRouter.fallbackChain
     : [];
+  state.nexusRouter.harnessAssignments = normalizeHarnessAssignments(state.nexusRouter.harnessAssignments);
   state.nexusRouter.logs = Array.isArray(state.nexusRouter.logs)
     ? state.nexusRouter.logs
     : [];
@@ -95,6 +98,34 @@ export function ensureRouterState(state: SystemState): NonNullable<SystemState["
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeTargets(targets: NexusRouterFallbackTarget[]): NexusRouterFallbackTarget[] {
+  return targets
+    .map((entry) => ({
+      providerId: String(entry.providerId ?? "").trim(),
+      model: String(entry.model ?? "").trim(),
+    }))
+    .filter((entry) => Boolean(entry.providerId && entry.model));
+}
+
+function normalizeHarnessAssignments(assignments: unknown): NexusRouterHarnessAssignments {
+  if (!assignments || typeof assignments !== "object") {
+    return {};
+  }
+
+  const normalized: NexusRouterHarnessAssignments = {};
+  for (const [harnessId, targets] of Object.entries(assignments as Record<string, unknown>)) {
+    if (!Array.isArray(targets)) {
+      continue;
+    }
+    const parsed = normalizeTargets(targets as NexusRouterFallbackTarget[]);
+    if (parsed.length > 0) {
+      normalized[harnessId] = parsed;
+    }
+  }
+
+  return normalized;
 }
 
 export function getRouterProviders(state: SystemState): RouterProviderPublic[] {
@@ -110,7 +141,7 @@ export function upsertRouterProvider(state: SystemState, input: {
   name: string;
   type: "openai-compatible" | "openrouter";
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
   enabled?: boolean;
   defaultModel?: string;
 }): RouterProviderPublic {
@@ -121,7 +152,7 @@ export function upsertRouterProvider(state: SystemState, input: {
     name: input.name,
     type: input.type,
     baseUrl: normalizeBaseUrl(input.baseUrl),
-    apiKey: input.apiKey,
+    apiKey: input.apiKey ?? (existingIndex >= 0 ? router.providers[existingIndex].apiKey : ""),
     enabled: input.enabled ?? true,
     defaultModel: input.defaultModel,
     models: existingIndex >= 0 ? router.providers[existingIndex].models : [],
@@ -144,12 +175,17 @@ export function upsertRouterProvider(state: SystemState, input: {
 
 export function updateRouterConfig(state: SystemState, input: {
   fallbackChain?: NexusRouterFallbackTarget[];
+  harnessAssignments?: NexusRouterHarnessAssignments;
   retryPolicy?: Partial<NexusRouterRetryPolicy>;
-}): { fallbackChain: NexusRouterFallbackTarget[]; retryPolicy: NexusRouterRetryPolicy } {
+}): { fallbackChain: NexusRouterFallbackTarget[]; harnessAssignments: NexusRouterHarnessAssignments; retryPolicy: NexusRouterRetryPolicy } {
   const router = ensureRouterState(state);
 
   if (input.fallbackChain) {
-    router.fallbackChain = input.fallbackChain;
+    router.fallbackChain = normalizeTargets(input.fallbackChain);
+  }
+
+  if (input.harnessAssignments) {
+    router.harnessAssignments = normalizeHarnessAssignments(input.harnessAssignments);
   }
 
   if (input.retryPolicy) {
@@ -164,6 +200,7 @@ export function updateRouterConfig(state: SystemState, input: {
 
   return {
     fallbackChain: router.fallbackChain,
+    harnessAssignments: router.harnessAssignments,
     retryPolicy: router.retryPolicy,
   };
 }
@@ -175,14 +212,10 @@ export async function syncProviderModels(state: SystemState, providerId: string)
     throw new Error(`Unknown provider: ${providerId}`);
   }
 
-  if (!provider.apiKey) {
-    throw new Error(`Provider ${providerId} is missing an API key`);
-  }
-
   const response = await fetch(buildModelsUrl(provider), {
     method: "GET",
     headers: {
-      Authorization: `Bearer ${provider.apiKey}`,
+      ...(provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {}),
       "Content-Type": "application/json",
     },
   });
@@ -207,7 +240,7 @@ export async function syncProviderModels(state: SystemState, providerId: string)
 
 function resolveTargets(
   router: NonNullable<SystemState["nexusRouter"]>,
-  input: { providerId?: string; model?: string; fallbackChain?: NexusRouterFallbackTarget[] },
+  input: { providerId?: string; model?: string; fallbackChain?: NexusRouterFallbackTarget[]; harnessId?: string },
 ): NexusRouterFallbackTarget[] {
   const activeProviders = router.providers.filter((entry) => entry.enabled);
 
@@ -223,6 +256,10 @@ function resolveTargets(
     return activeProviders.map((provider) => ({ providerId: provider.id, model: input.model as string }));
   }
 
+  if (input.harnessId && router.harnessAssignments[input.harnessId]?.length) {
+    return router.harnessAssignments[input.harnessId];
+  }
+
   return input.fallbackChain ?? router.fallbackChain;
 }
 
@@ -232,6 +269,7 @@ export async function routeChatWithFallback(
     providerId?: string;
     model?: string;
     fallbackChain?: NexusRouterFallbackTarget[];
+    harnessId?: string;
     messages: Array<Pick<ChatMessage, "role" | "content">>;
     temperature?: number;
   },
