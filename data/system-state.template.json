@@ -7,7 +7,7 @@
   },
   "router9": {
     "apiKey": "",
-    "baseUrl": "https://api.9router.io/v1",
+    "baseUrl": "http://localhost:20128/v1",
     "defaultModel": "deepseek-v3",
     "fallbackOrder": [
       "deepseek-v3",
@@ -38,7 +38,7 @@
       {
         "timestamp": "2026-06-18T00:00:00.000Z",
         "level": "info",
-        "message": "System initialized. Awaiting 9router API key setup."
+        "message": "System initialized. Awaiting 9router endpoint setup."
       }
     ]
   }

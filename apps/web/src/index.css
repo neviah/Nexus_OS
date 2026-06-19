@@ -316,6 +316,13 @@ button:disabled {
   justify-self: start;
 }
 
+.router-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-3);
+}
+
 input,
 textarea,
 select {

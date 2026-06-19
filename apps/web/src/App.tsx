@@ -123,7 +123,7 @@ type WorkspaceTreeNode = {
 
 const initialRouterForm = {
   apiKey: "",
-  baseUrl: "https://api.9router.io/v1",
+  baseUrl: "http://localhost:20128/v1",
   defaultModel: "deepseek-v3",
   fallbackOrder: "deepseek-v3, qwen-2.5-72b, claude-3.5-sonnet",
 };
@@ -172,7 +172,7 @@ function App() {
     await loadWorkspaceTree(payload.activeWorkspaceId);
     await loadFailedTasks();
     await loadLastStartupCheck();
-    setStatusMessage(payload.onboardingRequired ? "First run detected: Configure 9router to unlock harnesses." : "Ready");
+    setStatusMessage(payload.onboardingRequired ? "First run detected: Configure 9router endpoint to unlock harnesses." : "Ready");
   }, []);
 
   async function loadLastStartupCheck() {
@@ -522,7 +522,7 @@ function App() {
 
       {onboardingRequired ? (
         <section className="first-run-banner">
-          <strong>First launch checkpoint:</strong> Configure 9router API key to unlock all harness routing.
+          <strong>First launch checkpoint:</strong> Configure 9router endpoint to unlock all harness routing.
         </section>
       ) : null}
 
@@ -603,12 +603,11 @@ function App() {
 
               <form className="router-form" onSubmit={(event) => void onSaveRouterConfig(event)}>
                 <label>
-                  9router API Key
+                  9router API Key (optional)
                   <input
-                    required
                     type="password"
                     value={routerForm.apiKey}
-                    placeholder="Enter API key"
+                    placeholder="Paste dashboard key if requireApiKey is enabled"
                     onChange={(event) => setRouterForm((current) => ({ ...current, apiKey: event.target.value }))}
                   />
                 </label>
@@ -616,11 +615,16 @@ function App() {
                 <label>
                   Base URL
                   <input
+                    required
                     type="text"
                     value={routerForm.baseUrl}
                     onChange={(event) => setRouterForm((current) => ({ ...current, baseUrl: event.target.value }))}
                   />
                 </label>
+
+                <p className="router-hint">
+                  Local 9router default: http://localhost:20128/v1. Connect free providers in the 9router dashboard first.
+                </p>
 
                 <label>
                   Default Model

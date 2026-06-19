@@ -11,9 +11,9 @@ export function maskApiKey(apiKey: string): string {
 }
 
 export function getRouterSummary(state: SystemState) {
-  const hasKey = Boolean(state.router9.apiKey);
+  const configured = state.onboardingComplete;
   return {
-    configured: hasKey,
+    configured,
     baseUrl: state.router9.baseUrl,
     defaultModel: state.router9.defaultModel,
     fallbackOrder: state.router9.fallbackOrder,

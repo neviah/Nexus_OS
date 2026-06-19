@@ -21,6 +21,7 @@ import {
   listResumableTasks,
   updateTaskStatus,
 } from "./lib/taskResumeEngine.js";
+import { getLastStartupCheck, persistStartupCheck } from "./lib/startupCheckStore.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -75,7 +76,7 @@ app.get("/api/bootstrap", async (_req, res) => {
       {
         id: "9router",
         name: "9router",
-        status: state.router9.apiKey ? "online" : "setup-required",
+        status: state.onboardingComplete ? "online" : "setup-required",
       },
       { id: "image-generator", name: "Image Generator", status: "offline" },
       { id: "video-generator", name: "Video Generator", status: "offline" },
@@ -100,14 +101,20 @@ app.get("/api/harnesses/conformance", async (_req, res) => {
 app.get("/api/startup/check", async (_req, res) => {
   const state = await readSystemState();
   const harnesses = await readHarnessRegistry();
-  const conformance = await runHarnessConformance(harnesses);
+  const conformance = await runHarnessConformance(harnesses, state);
 
   const liveHarnesses = conformance.filter((item) =>
-    item.checks.some((check) => check.name === "live-health-check" && check.passed)
+    item.checks.some((check) => (check.name === "live-health-check" || check.name.startsWith("live-probe-")) && check.passed)
   ).length;
 
   const startup = buildStartupReadiness(state.onboardingComplete, liveHarnesses, harnesses.length);
+  await persistStartupCheck(startup);
   res.json({ startup, conformance });
+});
+
+app.get("/api/startup/check/last", async (_req, res) => {
+  const last = await getLastStartupCheck();
+  res.json({ last });
 });
 
 app.get("/api/tools/9router/status", async (_req, res) => {
@@ -123,13 +130,13 @@ app.post("/api/tools/9router/config", async (req, res) => {
     fallbackOrder?: string[];
   };
 
-  if (!apiKey || apiKey.trim().length < 8) {
-    return res.status(400).json({ error: "A valid 9router API key is required." });
+  if (!baseUrl || !/^https?:\/\//i.test(baseUrl.trim())) {
+    return res.status(400).json({ error: "A valid 9router base URL is required (http/https)." });
   }
 
   const state = await readSystemState();
-  state.router9.apiKey = apiKey.trim();
-  state.router9.baseUrl = baseUrl?.trim() || state.router9.baseUrl;
+  state.router9.apiKey = apiKey?.trim() || "";
+  state.router9.baseUrl = baseUrl.trim();
   state.router9.defaultModel = defaultModel?.trim() || state.router9.defaultModel;
   state.router9.fallbackOrder = Array.isArray(fallbackOrder) && fallbackOrder.length > 0
     ? fallbackOrder
@@ -139,7 +146,9 @@ app.post("/api/tools/9router/config", async (req, res) => {
   state.router9.logs.unshift({
     timestamp: new Date().toISOString(),
     level: "info",
-    message: "9router configured successfully. Provider routing is now enabled.",
+    message: state.router9.apiKey
+      ? "9router configured with API key. Provider routing is enabled."
+      : "9router configured in local mode (no API key). Provider routing is enabled.",
   });
 
   await writeSystemState(state);
