@@ -30,6 +30,7 @@ import {
   updateRouterConfig,
   upsertRouterProvider,
 } from "./lib/nexusRouter.js";
+import { ensureManagedHarnesses, getManagedHarnessRuntimeStatus } from "./lib/managedHarnessRuntime.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -117,6 +118,10 @@ app.get("/api/harnesses", async (_req, res) => {
   const harnesses = await readHarnessRegistry();
   const status = await resolveHarnessHealth(harnesses);
   res.json({ harnesses: status });
+});
+
+app.get("/api/harnesses/runtime", (_req, res) => {
+  res.json({ runtimes: getManagedHarnessRuntimeStatus() });
 });
 
 app.get("/api/harnesses/conformance", async (_req, res) => {
@@ -676,7 +681,14 @@ app.post("/api/chat/stream", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`NEXUS OS API running on http://localhost:${port}`);
-});
+void (async () => {
+  const harnesses = await readHarnessRegistry();
+  const runtimes = await ensureManagedHarnesses(harnesses);
+
+  app.listen(port, () => {
+    // eslint-disable-next-line no-console
+    console.log(`NEXUS OS API running on http://localhost:${port}`);
+    // eslint-disable-next-line no-console
+    console.log(`Managed harness runtimes: ${runtimes.map((entry) => `${entry.harnessId}:${entry.mode}`).join(", ")}`);
+  });
+})();
