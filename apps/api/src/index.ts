@@ -94,6 +94,21 @@ function isNexusRouterConfigured(state: SystemState): boolean {
   return router.providers.some((provider) => provider.enabled);
 }
 
+async function resolveWorkspaceContext(state: SystemState, workspaceId?: string): Promise<{ id: string; path: string }> {
+  const targetId = (workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const workspace = await getWorkspaceById(targetId);
+  if (workspace) {
+    return { id: workspace.id, path: workspace.path };
+  }
+
+  const fallback = await getWorkspaceById(state.activeWorkspaceId);
+  if (fallback) {
+    return { id: fallback.id, path: fallback.path };
+  }
+
+  return { id: targetId, path: "" };
+}
+
 async function runScheduledHarnessTask(input: {
   harnessId: string;
   workspaceId: string;
@@ -104,6 +119,7 @@ async function runScheduledHarnessTask(input: {
   maxAttempts?: number;
 }): Promise<{ ok: boolean }> {
   const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, input.workspaceId);
   const harnesses = await readHarnessRegistry();
   const harness = harnesses.find((entry) => entry.id === input.harnessId);
   const startedAt = Date.now();
@@ -134,6 +150,7 @@ async function runScheduledHarnessTask(input: {
       message: input.prompt,
       history: [],
       state,
+      workspace,
     });
 
     appendHarnessRun(state, {
@@ -725,6 +742,7 @@ app.post("/api/chat", async (req, res) => {
   };
 
   const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, state.activeWorkspaceId);
   const safeHistory = history ?? [];
   const harnesses = await readHarnessRegistry();
   const harness = harnesses.find((entry) => entry.id === harnessId);
@@ -743,7 +761,7 @@ app.post("/api/chat", async (req, res) => {
   await createTask({
     requestId: taskId,
     harnessId,
-    workspaceId: state.activeWorkspaceId,
+    workspaceId: workspace.id,
     mode: "sync",
     message,
     history: safeHistory,
@@ -757,6 +775,7 @@ app.post("/api/chat", async (req, res) => {
       message,
       history: safeHistory,
       state,
+      workspace,
     });
   } catch (error) {
     await updateTaskStatus(taskId, "failed", { error: String(error) });
@@ -836,11 +855,13 @@ app.post("/api/chat/tasks/:requestId/resume", async (req, res) => {
   }
 
   const replayPrompt = buildReplayPrompt(task);
+  const workspace = await resolveWorkspaceContext(state, task.workspaceId);
   const resumed = await invokeHarness({
     harness,
     message: replayPrompt,
     history: task.history,
     state,
+    workspace,
   });
 
   await updateTaskStatus(requestId, "completed", {
@@ -869,6 +890,7 @@ app.post("/api/chat/stream", async (req, res) => {
   }
 
   const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, state.activeWorkspaceId);
   const safeHistory = history ?? [];
   const harnesses = await readHarnessRegistry();
   const harness = harnesses.find((entry) => entry.id === harnessId);
@@ -887,7 +909,7 @@ app.post("/api/chat/stream", async (req, res) => {
   await createTask({
     requestId,
     harnessId,
-    workspaceId: state.activeWorkspaceId,
+    workspaceId: workspace.id,
     mode: "stream",
     message,
     history: safeHistory,
@@ -920,6 +942,7 @@ app.post("/api/chat/stream", async (req, res) => {
       message,
       history: safeHistory,
       state,
+      workspace,
       signal: controller.signal,
     })) {
       if (controller.signal.aborted) {
@@ -973,6 +996,7 @@ app.post("/api/chat/stream", async (req, res) => {
           message: replayPrompt,
           history: safeHistory,
           state,
+          workspace,
         });
 
         await appendTaskOutput(requestId, resumed.content);

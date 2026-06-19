@@ -6,6 +6,10 @@ type AdapterRequest = {
   message: string;
   history: ChatMessage[];
   state: SystemState;
+  workspace?: {
+    id: string;
+    path: string;
+  };
   signal?: AbortSignal;
 };
 
@@ -42,7 +46,7 @@ const REQUEST_TIMEOUT_MS = 35000;
 
 export async function invokeHarness(input: AdapterRequest): Promise<AdapterResult> {
   const startedAt = Date.now();
-  const { harness, message, history, state, signal } = input;
+  const { harness, message, history, state, workspace, signal } = input;
   const models = resolveModelOrder(harness, state);
 
   for (let index = 0; index < models.length; index += 1) {
@@ -52,6 +56,7 @@ export async function invokeHarness(input: AdapterRequest): Promise<AdapterResul
       message,
       history,
       state,
+      workspace,
       model,
       signal,
     });
@@ -98,7 +103,7 @@ export async function invokeHarness(input: AdapterRequest): Promise<AdapterResul
 }
 
 export async function* streamHarness(input: AdapterRequest): AsyncGenerator<StreamChunk> {
-  const { harness, message, history, state, signal } = input;
+  const { harness, message, history, state, workspace, signal } = input;
   const startedAt = Date.now();
   const models = resolveModelOrder(harness, state);
 
@@ -110,6 +115,7 @@ export async function* streamHarness(input: AdapterRequest): AsyncGenerator<Stre
       message,
       history,
       state,
+      workspace,
       signal,
     });
 
@@ -175,20 +181,21 @@ async function tryHarnessEndpoints(input: {
   message: string;
   history: ChatMessage[];
   state: SystemState;
+  workspace?: { id: string; path: string };
   signal?: AbortSignal;
 }): Promise<AttemptResult | null> {
-  const { harness, model, message, history, state, signal } = input;
+  const { harness, model, message, history, state, workspace, signal } = input;
   const config = getAdapterConfig(harness);
 
   if (config.protocol !== "openai") {
-    const generic = await requestGenericJson(harness, model, message, history, state, signal);
+    const generic = await requestGenericJson(harness, model, message, history, state, workspace, signal);
     if (generic) {
       return generic;
     }
   }
 
   if (config.protocol !== "generic") {
-    const openAi = await requestOpenAiJson(harness, model, message, history, state, signal);
+    const openAi = await requestOpenAiJson(harness, model, message, history, state, workspace, signal);
     if (openAi) {
       return openAi;
     }
@@ -203,9 +210,10 @@ async function tryHarnessStream(input: {
   message: string;
   history: ChatMessage[];
   state: SystemState;
+  workspace?: { id: string; path: string };
   signal?: AbortSignal;
 }): Promise<AsyncGenerator<string> | null> {
-  const { harness, model, message, history, state, signal } = input;
+  const { harness, model, message, history, state, workspace, signal } = input;
   const config = getAdapterConfig(harness);
 
   if (config.streamProtocol === "none") {
@@ -213,10 +221,10 @@ async function tryHarnessStream(input: {
   }
 
   if (config.streamProtocol === "custom-sse") {
-    return requestGenericStream(harness, model, message, history, state, signal);
+    return requestGenericStream(harness, model, message, history, state, workspace, signal);
   }
 
-  return requestOpenAiStream(harness, model, message, history, state, signal);
+  return requestOpenAiStream(harness, model, message, history, state, workspace, signal);
 }
 
 async function requestGenericJson(
@@ -225,10 +233,11 @@ async function requestGenericJson(
   message: string,
   history: ChatMessage[],
   state: SystemState,
+  workspace?: { id: string; path: string },
   signal?: AbortSignal,
 ): Promise<AttemptResult | null> {
   const config = getAdapterConfig(harness);
-  const context = createRouterContext(state, model);
+  const context = createRouterContext(state, model, workspace);
   const paths = config.genericPaths.length > 0 ? config.genericPaths : ["/api/chat", "/chat"];
 
   for (const path of paths) {
@@ -242,6 +251,7 @@ async function requestGenericJson(
             model,
             message,
             history,
+            workspace,
             router: buildRouterBody(context),
           }),
           signal,
@@ -274,10 +284,11 @@ async function requestOpenAiJson(
   message: string,
   history: ChatMessage[],
   state: SystemState,
+  workspace?: { id: string; path: string },
   signal?: AbortSignal,
 ): Promise<AttemptResult | null> {
   const config = getAdapterConfig(harness);
-  const context = createRouterContext(state, model);
+  const context = createRouterContext(state, model, workspace);
 
   try {
     const response = await fetchWithTimeout(
@@ -289,6 +300,7 @@ async function requestOpenAiJson(
           model,
           stream: false,
           messages: buildOpenAiMessages(message, history),
+          workspace,
           router: buildRouterBody(context),
         }),
         signal,
@@ -318,10 +330,11 @@ async function requestOpenAiStream(
   message: string,
   history: ChatMessage[],
   state: SystemState,
+  workspace?: { id: string; path: string },
   signal?: AbortSignal,
 ): Promise<AsyncGenerator<string> | null> {
   const config = getAdapterConfig(harness);
-  const context = createRouterContext(state, model);
+  const context = createRouterContext(state, model, workspace);
 
   try {
     const response = await fetchWithTimeout(
@@ -333,6 +346,7 @@ async function requestOpenAiStream(
           model,
           stream: true,
           messages: buildOpenAiMessages(message, history),
+          workspace,
           router: buildRouterBody(context),
         }),
         signal,
@@ -356,10 +370,11 @@ async function requestGenericStream(
   message: string,
   history: ChatMessage[],
   state: SystemState,
+  workspace?: { id: string; path: string },
   signal?: AbortSignal,
 ): Promise<AsyncGenerator<string> | null> {
   const config = getAdapterConfig(harness);
-  const context = createRouterContext(state, model);
+  const context = createRouterContext(state, model, workspace);
 
   try {
     const response = await fetchWithTimeout(
@@ -371,6 +386,7 @@ async function requestGenericStream(
           model,
           message,
           history,
+          workspace,
           router: buildRouterBody(context),
         }),
         signal,

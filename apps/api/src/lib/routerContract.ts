@@ -6,15 +6,24 @@ export type RouterContractContext = {
   baseUrl: string;
   fallbackOrder: string[];
   apiKey: string;
+  workspace?: {
+    id: string;
+    path: string;
+  };
 };
 
-export function createRouterContext(state: SystemState, model: string): RouterContractContext {
+export function createRouterContext(
+  state: SystemState,
+  model: string,
+  workspace?: { id: string; path: string },
+): RouterContractContext {
   return {
     requestId: crypto.randomUUID(),
     model,
     baseUrl: state.router9.baseUrl,
     fallbackOrder: state.router9.fallbackOrder,
     apiKey: state.router9.apiKey,
+    workspace,
   };
 }
 
@@ -30,6 +39,12 @@ export function buildRouterHeaders(
     "X-9Router-Base-Url": context.baseUrl,
     "X-9Router-Model": context.model,
     "X-9Router-Fallback-Order": context.fallbackOrder.join(","),
+    ...(context.workspace
+      ? {
+          "X-Nexus-Workspace-Id": context.workspace.id,
+          "X-Nexus-Workspace-Path": context.workspace.path,
+        }
+      : {}),
     ...(harness.adapter?.customHeaders ?? {}),
   };
 
@@ -50,11 +65,16 @@ export function buildRouterBody(context: RouterContractContext): {
   model: string;
   baseUrl: string;
   fallbackOrder: string[];
+  workspace?: {
+    id: string;
+    path: string;
+  };
 } {
   return {
     requestId: context.requestId,
     model: context.model,
     baseUrl: context.baseUrl,
     fallbackOrder: context.fallbackOrder,
+    workspace: context.workspace,
   };
 }
