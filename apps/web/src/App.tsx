@@ -148,6 +148,8 @@ function App() {
   const [toolsOpen, setToolsOpen] = useState(true);
   const [startupChecking, setStartupChecking] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
+  const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
+  const [routerFrameRefresh, setRouterFrameRefresh] = useState(0);
 
   const activeHarness = useMemo(
     () => boot?.harnesses.find((harness) => harness.id === selectedPane.id) ?? null,
@@ -506,19 +508,13 @@ function App() {
   const onboardingRequired = boot?.onboardingRequired ?? true;
   const startupReady = boot?.startup.ready ?? false;
   const startupBlockers = boot?.startup.blockers ?? [];
+  const diagnosticsAlertCount = failedTasks.length + (startupReady ? 0 : Math.max(1, startupBlockers.length));
+  const routerDashboardUrl = getRouterDashboardUrl(routerForm.baseUrl || boot?.router9.baseUrl || initialRouterForm.baseUrl);
 
   return (
     <main className="app-shell">
       <div className="orb orb-left" />
       <div className="orb orb-right" />
-
-      <header className="topbar">
-        <div className="topbar-brand">
-          <p className="kicker">Agentic Operating System</p>
-          <img className="dashboard-logo" src={dashboardLogo} alt="NEXUS OS" />
-        </div>
-        <div className="topbar-status">{statusMessage}</div>
-      </header>
 
       {onboardingRequired ? (
         <section className="first-run-banner">
@@ -534,6 +530,11 @@ function App() {
 
       <section className="pane-grid">
         <aside className="pane pane-left">
+          <section className="side-brand">
+            <img className="dashboard-logo" src={dashboardLogo} alt="NEXUS OS" />
+            <small className="side-status">{statusMessage}</small>
+          </section>
+
           <div className="pane-title-row">
             <h2>Agents</h2>
           </div>
@@ -598,10 +599,10 @@ function App() {
         <section className="pane pane-middle">
           {selectedPane.type === "tool" && selectedPane.id === "9router" ? (
             <div className="tool-view">
-              <h2>9router Integration Layer</h2>
-              <p className="subtitle">Configure provider routing once. Harnesses inherit this transport automatically.</p>
+              <h2>9router Dashboard</h2>
+              <p className="subtitle">Connect providers directly in 9router. NexusOS uses it as the shared fallback router.</p>
 
-              <form className="router-form" onSubmit={(event) => void onSaveRouterConfig(event)}>
+              <form className="router-form router-toolbar" onSubmit={(event) => void onSaveRouterConfig(event)}>
                 <label>
                   9router API Key (optional)
                   <input
@@ -622,55 +623,35 @@ function App() {
                   />
                 </label>
 
-                <p className="router-hint">
-                  Local 9router default: http://localhost:20128/v1. Connect free providers in the 9router dashboard first.
-                </p>
-
-                <label>
-                  Default Model
-                  <input
-                    type="text"
-                    value={routerForm.defaultModel}
-                    onChange={(event) => setRouterForm((current) => ({ ...current, defaultModel: event.target.value }))}
-                  />
-                </label>
-
-                <label>
-                  Fallback Order (comma-separated)
-                  <input
-                    type="text"
-                    value={routerForm.fallbackOrder}
-                    onChange={(event) => setRouterForm((current) => ({ ...current, fallbackOrder: event.target.value }))}
-                  />
-                </label>
-
                 <button type="submit" disabled={routerSaving}>
-                  {routerSaving ? "Saving..." : "Save 9router Settings"}
+                  {routerSaving ? "Saving..." : "Save"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    window.open(routerDashboardUrl, "_blank", "noopener,noreferrer");
+                  }}
+                >
+                  Open Tab
+                </button>
+                <button type="button" className="ghost" onClick={() => setRouterFrameRefresh((current) => current + 1)}>
+                  Reload
                 </button>
               </form>
 
-              <div className="router-panels">
-                <article>
-                  <h3>Providers</h3>
-                  <ul>
-                    {boot?.router9.providers.map((provider) => (
-                      <li key={provider.id}>
-                        <span className={`health ${provider.health}`} />
-                        {provider.name} ({provider.latencyMs} ms)
-                      </li>
-                    ))}
-                  </ul>
-                </article>
-                <article>
-                  <h3>Routing Logs</h3>
-                  <ul className="logs">
-                    {boot?.router9.logs.slice(0, 8).map((log) => (
-                      <li key={`${log.timestamp}-${log.message}`}>
-                        <strong>{log.level.toUpperCase()}</strong> {log.message}
-                      </li>
-                    ))}
-                  </ul>
-                </article>
+              <p className="router-hint">
+                Local default endpoint is http://localhost:20128/v1. Use the embedded dashboard below to connect free or API-key providers.
+              </p>
+
+              <div className="router-embed-wrap">
+                <iframe
+                  key={routerFrameRefresh}
+                  className="router-embed"
+                  src={routerDashboardUrl}
+                  title="9router Dashboard"
+                  loading="lazy"
+                />
               </div>
             </div>
           ) : null}
@@ -699,8 +680,9 @@ function App() {
                     type="button"
                     className="ghost chip-button"
                     onClick={() => {
+                      setRightTab("diagnostics");
                       const card = document.getElementById("failed-tasks-card");
-                      card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                      setTimeout(() => card?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 60);
                     }}
                   >
                     failed tasks: {failedTasks.length}
@@ -753,119 +735,152 @@ function App() {
         </section>
 
         <aside className="pane pane-right">
-          <h2>Workspace</h2>
-
-          <section className="startup-panel">
-            <h3>Startup Readiness</h3>
-            <small>
-              live harnesses: {boot?.startup.liveHarnesses ?? 0}/{boot?.startup.totalHarnesses ?? 0}
-            </small>
-            {lastStartupCheck ? (() => {
-              const { label, ageClass } = formatCheckAge(lastStartupCheck.timestamp);
-              return (
-                <small className="startup-history">
-                  <span className={ageClass}>last check: {label}</span>
-                  {lastStartupCheck.readiness.ready ? (
-                    <span className="badge-ok"> ✓ READY</span>
-                  ) : (
-                    <span className="badge-blocked"> ! BLOCKED</span>
-                  )}
-                </small>
-              );
-            })() : null}
-            <button type="button" className="ghost" onClick={() => void onRunStartupCheck()} disabled={startupChecking}>
-              {startupChecking ? "Checking..." : "Run Startup Check"}
-            </button>
-          </section>
-
-          <label className="workspace-switcher">
-            Active Workspace
-            <select
-              value={boot?.activeWorkspaceId ?? "default"}
-              onChange={(event) => void onSwitchWorkspace(event.target.value)}
+          <div className="pane-right-header">
+            <button
+              type="button"
+              className={`tab-btn ${rightTab === "workspace" ? "active" : ""}`}
+              onClick={() => setRightTab("workspace")}
             >
-              {boot?.workspaces.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-          </label>
+              Workspace
+            </button>
+            <button
+              type="button"
+              className={`tab-btn ${rightTab === "diagnostics" ? "active" : ""}`}
+              onClick={() => setRightTab("diagnostics")}
+            >
+              Diagnostics
+              {diagnosticsAlertCount > 0 ? <span className="tab-alert" aria-label="Diagnostics alerts">!</span> : null}
+            </button>
+          </div>
 
-          <form className="workspace-create" onSubmit={(event) => void onCreateWorkspace(event)}>
-            <input
-              type="text"
-              value={createWorkspaceName}
-              placeholder="new workspace name"
-              onChange={(event) => setCreateWorkspaceName(event.target.value)}
-            />
-            <button type="submit">Create</button>
-          </form>
+          {rightTab === "workspace" ? (
+            <>
+              <label className="workspace-switcher">
+                Active Workspace
+                <select
+                  value={boot?.activeWorkspaceId ?? "default"}
+                  onChange={(event) => void onSwitchWorkspace(event.target.value)}
+                >
+                  {boot?.workspaces.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>
+                      {workspace.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-          <ul className="workspace-list">
-            {boot?.workspaces.map((workspace) => (
-              <li key={workspace.id}>
-                <div>
-                  <strong>{workspace.name}</strong>
-                  <small>{formatBytes(workspace.sizeBytes)} | active agents: {workspace.activeHarnesses.length}</small>
-                </div>
-                <button type="button" className="ghost" onClick={() => void onDeleteWorkspace(workspace.id)}>
-                  Delete
+              <form className="workspace-create" onSubmit={(event) => void onCreateWorkspace(event)}>
+                <input
+                  type="text"
+                  value={createWorkspaceName}
+                  placeholder="new workspace name"
+                  onChange={(event) => setCreateWorkspaceName(event.target.value)}
+                />
+                <button type="submit">Create</button>
+              </form>
+
+              <ul className="workspace-list">
+                {boot?.workspaces.map((workspace) => (
+                  <li key={workspace.id}>
+                    <div>
+                      <strong>{workspace.name}</strong>
+                      <small>{formatBytes(workspace.sizeBytes)} | active agents: {workspace.activeHarnesses.length}</small>
+                    </div>
+                    <button type="button" className="ghost" onClick={() => void onDeleteWorkspace(workspace.id)}>
+                      Delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
+
+              <section className="tree-panel">
+                <h3>File Tree</h3>
+                {workspaceTree ? <ul className="tree-root">{renderTree(workspaceTree)}</ul> : <p>Loading workspace tree...</p>}
+              </section>
+            </>
+          ) : null}
+
+          {rightTab === "diagnostics" ? (
+            <>
+              <section className="startup-panel">
+                <h3>Startup Readiness</h3>
+                <small>
+                  live harnesses: {boot?.startup.liveHarnesses ?? 0}/{boot?.startup.totalHarnesses ?? 0}
+                </small>
+                {lastStartupCheck ? (() => {
+                  const { label, ageClass } = formatCheckAge(lastStartupCheck.timestamp);
+                  return (
+                    <small className="startup-history">
+                      <span className={ageClass}>last check: {label}</span>
+                      {lastStartupCheck.readiness.ready ? (
+                        <span className="badge-ok"> ✓ READY</span>
+                      ) : (
+                        <span className="badge-blocked"> ! BLOCKED</span>
+                      )}
+                    </small>
+                  );
+                })() : null}
+                <button type="button" className="ghost" onClick={() => void onRunStartupCheck()} disabled={startupChecking}>
+                  {startupChecking ? "Checking..." : "Run Startup Check"}
                 </button>
-              </li>
-            ))}
-          </ul>
+              </section>
 
-          <section className="tree-panel">
-            <h3>File Tree</h3>
-            {workspaceTree ? <ul className="tree-root">{renderTree(workspaceTree)}</ul> : <p>Loading workspace tree...</p>}
-          </section>
+              <section id="failed-tasks-card" className="failed-tasks-panel">
+                <div className="failed-tasks-header">
+                  <h3>Failed Tasks</h3>
+                  <button type="button" className="ghost" onClick={() => void loadFailedTasks()}>
+                    Refresh
+                  </button>
+                </div>
 
-          <section id="failed-tasks-card" className="failed-tasks-panel">
-            <div className="failed-tasks-header">
-              <h3>Failed Tasks</h3>
-              <button type="button" className="ghost" onClick={() => void loadFailedTasks()}>
-                Refresh
-              </button>
-            </div>
+                {failedTasks.length === 0 ? <p className="diagnostics-empty">No resumable failures.</p> : null}
 
-            {failedTasks.length === 0 ? <p>No resumable failures.</p> : null}
-
-            <ul className="failed-task-list">
-              {failedTasks.slice(0, 5).map((task) => (
-                <li key={task.requestId}>
-                  <div>
-                    <strong>{task.harnessId}</strong>
-                    <small>{new Date(task.updatedAt).toLocaleString()}</small>
-                    <small>{task.error ?? "stream interrupted"}</small>
-                  </div>
-                  <div className="failed-task-actions">
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => setExpandedTaskId((current) => (current === task.requestId ? null : task.requestId))}
-                    >
-                      {expandedTaskId === task.requestId ? "Hide" : "View"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void onResumeTask(task)}
-                      disabled={resumeBusyId === task.requestId}
-                    >
-                      {resumeBusyId === task.requestId ? "Resuming..." : "Resume"}
-                    </button>
-                  </div>
-                  {expandedTaskId === task.requestId ? (
-                    <pre className="failed-task-preview">{task.partialOutput || "No partial output"}</pre>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          </section>
+                <ul className="failed-task-list">
+                  {failedTasks.slice(0, 5).map((task) => (
+                    <li key={task.requestId}>
+                      <div>
+                        <strong>{task.harnessId}</strong>
+                        <small>{new Date(task.updatedAt).toLocaleString()}</small>
+                        <small>{task.error ?? "stream interrupted"}</small>
+                      </div>
+                      <div className="failed-task-actions">
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => setExpandedTaskId((current) => (current === task.requestId ? null : task.requestId))}
+                        >
+                          {expandedTaskId === task.requestId ? "Hide" : "View"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onResumeTask(task)}
+                          disabled={resumeBusyId === task.requestId}
+                        >
+                          {resumeBusyId === task.requestId ? "Resuming..." : "Resume"}
+                        </button>
+                      </div>
+                      {expandedTaskId === task.requestId ? (
+                        <pre className="failed-task-preview">{task.partialOutput || "No partial output"}</pre>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            </>
+          ) : null}
         </aside>
       </section>
     </main>
   );
+}
+
+function getRouterDashboardUrl(baseUrl: string): string {
+  try {
+    const parsed = new URL(baseUrl);
+    return `${parsed.origin}/dashboard`;
+  } catch {
+    return "http://localhost:20128/dashboard";
+  }
 }
 
 function formatBytes(bytes: number): string {
