@@ -160,6 +160,8 @@ function App() {
   const [routerFrameRefresh, setRouterFrameRefresh] = useState(0);
   const [routerProbe, setRouterProbe] = useState<RouterProbe | null>(null);
   const [routerProbeLoading, setRouterProbeLoading] = useState(false);
+  const [routerBrowserInput, setRouterBrowserInput] = useState("http://localhost:20128/dashboard");
+  const [routerBrowserUrl, setRouterBrowserUrl] = useState("http://localhost:20128/dashboard");
 
   const activeHarness = useMemo(
     () => boot?.harnesses.find((harness) => harness.id === selectedPane.id) ?? null,
@@ -176,6 +178,9 @@ function App() {
       defaultModel: payload.router9.defaultModel || current.defaultModel,
       fallbackOrder: payload.router9.fallbackOrder.join(", "),
     }));
+    const bootDashboard = getRouterDashboardUrl(payload.router9.baseUrl || initialRouterForm.baseUrl);
+    setRouterBrowserInput(bootDashboard);
+    setRouterBrowserUrl(bootDashboard);
 
     const preferredPane: PaneSelection = payload.onboardingRequired
       ? { type: "tool", id: "9router" }
@@ -543,9 +548,8 @@ function App() {
   const startupReady = boot?.startup.ready ?? false;
   const startupBlockers = boot?.startup.blockers ?? [];
   const diagnosticsAlertCount = failedTasks.length + (startupReady ? 0 : Math.max(1, startupBlockers.length));
-  const routerDashboardUrl = routerProbe?.dashboardUrl
-    ?? getRouterDashboardUrl(routerForm.baseUrl || boot?.router9.baseUrl || initialRouterForm.baseUrl);
   const routerRootUrl = routerProbe?.origin ?? getRouterOrigin(routerForm.baseUrl || boot?.router9.baseUrl || initialRouterForm.baseUrl);
+  const likelyWrongCloudHost = /api\.9router\.io/i.test(routerForm.baseUrl);
 
   return (
     <main className="app-shell">
@@ -666,7 +670,7 @@ function App() {
                   type="button"
                   className="ghost"
                   onClick={() => {
-                    window.open(routerDashboardUrl, "_blank", "noopener,noreferrer");
+                    window.open(routerBrowserUrl, "_blank", "noopener,noreferrer");
                   }}
                 >
                   Open Tab
@@ -679,9 +683,47 @@ function App() {
                 </button>
               </form>
 
+              <div className="router-browser-controls">
+                <input
+                  type="text"
+                  value={routerBrowserInput}
+                  onChange={(event) => setRouterBrowserInput(event.target.value)}
+                  placeholder="http://localhost:20128/dashboard"
+                />
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    const normalized = normalizeBrowserUrl(routerBrowserInput, routerRootUrl);
+                    setRouterBrowserInput(normalized);
+                    setRouterBrowserUrl(normalized);
+                    setRouterFrameRefresh((current) => current + 1);
+                  }}
+                >
+                  Go
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setRouterForm((current) => ({ ...current, baseUrl: "http://localhost:20128/v1" }));
+                    setRouterBrowserInput("http://localhost:20128/dashboard");
+                    setRouterBrowserUrl("http://localhost:20128/dashboard");
+                    setRouterFrameRefresh((current) => current + 1);
+                  }}
+                >
+                  Use Local
+                </button>
+              </div>
+
               <p className="router-hint">
                 Local default endpoint is http://localhost:20128/v1. Use the embedded dashboard below to connect free or API-key providers.
               </p>
+              {likelyWrongCloudHost ? (
+                <p className="router-warning">
+                  api.9router.io does not appear to be a valid dashboard host. For local 9router use http://localhost:20128/v1 and dashboard http://localhost:20128/dashboard.
+                </p>
+              ) : null}
 
               {routerProbe && !routerProbe.reachable ? (
                 <section className="router-unavailable">
@@ -694,7 +736,7 @@ function App() {
                       type="button"
                       className="ghost"
                       onClick={() => {
-                        window.open(routerDashboardUrl, "_blank", "noopener,noreferrer");
+                        window.open(routerBrowserUrl, "_blank", "noopener,noreferrer");
                       }}
                     >
                       Open /dashboard
@@ -713,9 +755,9 @@ function App() {
               ) : (
                 <div className="router-embed-wrap">
                   <iframe
-                    key={`${routerFrameRefresh}-${routerDashboardUrl}`}
+                    key={`${routerFrameRefresh}-${routerBrowserUrl}`}
                     className="router-embed"
-                    src={routerDashboardUrl}
+                    src={routerBrowserUrl}
                     title="9router Dashboard"
                     loading="lazy"
                   />
@@ -958,6 +1000,20 @@ function getRouterOrigin(baseUrl: string): string {
   } catch {
     return "http://localhost:20128";
   }
+}
+
+function normalizeBrowserUrl(input: string, fallbackOrigin: string): string {
+  const raw = input.trim();
+  if (!raw) {
+    return `${fallbackOrigin}/dashboard`;
+  }
+
+  if (/^https?:\/\//i.test(raw)) {
+    return raw;
+  }
+
+  const normalizedPath = raw.startsWith("/") ? raw : `/${raw}`;
+  return `${fallbackOrigin}${normalizedPath}`;
 }
 
 function formatBytes(bytes: number): string {

@@ -321,6 +321,18 @@ button:disabled {
   color: var(--ink-3);
 }
 
+.router-browser-controls {
+  display: grid;
+  grid-template-columns: 1fr 88px 100px;
+  gap: 8px;
+}
+
+.router-warning {
+  margin: 0;
+  font-size: 0.79rem;
+  color: var(--warn);
+}
+
 .router-embed-wrap {
   flex: 1;
   min-height: 420px;
@@ -712,6 +724,10 @@ textarea {
 
   .router-toolbar {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .router-browser-controls {
+    grid-template-columns: 1fr;
   }
 }
 
