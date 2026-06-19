@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactElement } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import dashboardLogo from "./assets/DashboardLogo_Nexus.png";
 
 type PaneSelection = {
   type: "agent" | "tool";
@@ -146,6 +147,7 @@ function App() {
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toolsOpen, setToolsOpen] = useState(true);
   const [startupChecking, setStartupChecking] = useState(false);
+  const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
 
   const activeHarness = useMemo(
     () => boot?.harnesses.find((harness) => harness.id === selectedPane.id) ?? null,
@@ -169,8 +171,15 @@ function App() {
     setSelectedPane(preferredPane);
     await loadWorkspaceTree(payload.activeWorkspaceId);
     await loadFailedTasks();
+    await loadLastStartupCheck();
     setStatusMessage(payload.onboardingRequired ? "First run detected: Configure 9router to unlock harnesses." : "Ready");
   }, []);
+
+  async function loadLastStartupCheck() {
+    const response = await fetch("/api/startup/check/last");
+    const payload = (await response.json()) as { last: { readiness: StartupReadiness; timestamp: string } | null };
+    setLastStartupCheck(payload.last);
+  }
 
   async function loadFailedTasks() {
     const response = await fetch("/api/chat/tasks/resumable");
@@ -208,6 +217,7 @@ function App() {
 
     setStatusMessage(payload.startup.ready ? "Startup checks passed" : "Startup checks found blockers");
     setStartupChecking(false);
+    await loadLastStartupCheck();
   }
 
   async function onSaveRouterConfig(event: FormEvent) {
@@ -474,6 +484,16 @@ function App() {
     await loadFailedTasks();
   }
 
+  function formatCheckAge(timestamp: string): { label: string; ageClass: string } {
+    const ageMs = Date.now() - new Date(timestamp).getTime();
+    const ageMins = Math.floor(ageMs / 60_000);
+    if (ageMins < 1) return { label: "just now", ageClass: "age-fresh" };
+    if (ageMins < 10) return { label: `${ageMins}m ago`, ageClass: "age-fresh" };
+    if (ageMins < 60) return { label: `${ageMins}m ago`, ageClass: "age-stale" };
+    const ageHrs = Math.floor(ageMins / 60);
+    return { label: `${ageHrs}h ago`, ageClass: "age-old" };
+  }
+
   function renderTree(node: WorkspaceTreeNode): ReactElement {
     return (
       <li key={node.path} className={`tree-node ${node.type}`}>
@@ -493,9 +513,9 @@ function App() {
       <div className="orb orb-right" />
 
       <header className="topbar">
-        <div>
+        <div className="topbar-brand">
           <p className="kicker">Agentic Operating System</p>
-          <h1>NEXUS OS</h1>
+          <img className="dashboard-logo" src={dashboardLogo} alt="NEXUS OS" />
         </div>
         <div className="topbar-status">{statusMessage}</div>
       </header>
@@ -514,7 +534,7 @@ function App() {
 
       <section className="pane-grid">
         <aside className="pane pane-left">
-          <div className="pane-title-row"> || !startupReady
+          <div className="pane-title-row">
             <h2>Agents</h2>
           </div>
 
@@ -736,6 +756,19 @@ function App() {
             <small>
               live harnesses: {boot?.startup.liveHarnesses ?? 0}/{boot?.startup.totalHarnesses ?? 0}
             </small>
+            {lastStartupCheck ? (() => {
+              const { label, ageClass } = formatCheckAge(lastStartupCheck.timestamp);
+              return (
+                <small className="startup-history">
+                  <span className={ageClass}>last check: {label}</span>
+                  {lastStartupCheck.readiness.ready ? (
+                    <span className="badge-ok"> ✓ READY</span>
+                  ) : (
+                    <span className="badge-blocked"> ! BLOCKED</span>
+                  )}
+                </small>
+              );
+            })() : null}
             <button type="button" className="ghost" onClick={() => void onRunStartupCheck()} disabled={startupChecking}>
               {startupChecking ? "Checking..." : "Run Startup Check"}
             </button>

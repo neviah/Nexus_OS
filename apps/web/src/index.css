@@ -81,6 +81,18 @@ body {
   margin-bottom: 16px;
 }
 
+.topbar-brand {
+  display: grid;
+  gap: 6px;
+}
+
+.dashboard-logo {
+  width: clamp(210px, 26vw, 460px);
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
 .kicker {
   margin: 0;
   letter-spacing: 0.2em;
@@ -446,6 +458,36 @@ textarea {
 
 .startup-panel small {
   color: var(--ink-3);
+}
+
+.startup-history {
+  display: block;
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+
+.badge-ok {
+  color: var(--ok);
+  font-weight: bold;
+  margin-left: 4px;
+}
+
+.badge-blocked {
+  color: var(--bad);
+  font-weight: bold;
+  margin-left: 4px;
+}
+
+.age-fresh {
+  color: var(--ok);
+}
+
+.age-stale {
+  color: var(--warn);
+}
+
+.age-old {
+  color: var(--bad);
 }
 
 .workspace-switcher {
