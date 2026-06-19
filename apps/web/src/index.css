@@ -19,6 +19,7 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  font-size: 0.87rem;
 }
 
 * {
@@ -140,6 +141,11 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  background: rgba(13, 23, 29, 0.32);
+}
+
+.pane-middle {
+  background: rgba(8, 16, 22, 0.68);
 }
 
 .pane-title-row {
@@ -828,10 +834,48 @@ textarea {
 }
 
 .nxr-fallback-row {
-  display: grid;
-  grid-template-columns: minmax(130px, 1fr) minmax(220px, 2fr) auto auto;
+  display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: nowrap;
+}
+
+.nxr-fallback-row select:first-child {
+  min-width: 150px;
+  flex: 1.1;
+}
+
+.nxr-fallback-row select:nth-child(2) {
+  min-width: 240px;
+  flex: 1.8;
+}
+
+.nxr-fallback-row .ghost {
+  flex-shrink: 0;
+}
+
+.nxr-row-status {
+  min-width: 90px;
+  text-align: right;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.nxr-row-status.ok {
+  color: var(--ok);
+}
+
+.nxr-row-status.warn {
+  color: var(--warn);
+}
+
+.nxr-row-status.bad {
+  color: var(--bad);
+}
+
+.nxr-row-status.idle {
+  color: var(--ink-3);
 }
 
 .nxr-subheading {
@@ -872,7 +916,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.8rem;
+  font-size: 0.76rem;
   color: var(--ink-2);
 }
 
@@ -1000,7 +1044,7 @@ textarea {
   }
 
   .nxr-fallback-row {
-    grid-template-columns: 1fr;
+    flex-wrap: wrap;
   }
 
   .router-browser-controls {

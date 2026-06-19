@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactElement } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -201,6 +201,7 @@ function App() {
   const [nxTestResult, setNxTestResult] = useState<{ content: string; model: string; providerId: string; elapsedMs: number; attempts: Array<{ providerId: string; model: string; status: string; details: string }> } | null>(null);
   const [nxTestBusy, setNxTestBusy] = useState(false);
   const [nxConsoleLogs, setNxConsoleLogs] = useState<Array<{ timestamp: string; level: string; message: string }>>([]);
+  const nxAutoSyncStarted = useRef(false);
 
   const activeHarness = useMemo(
     () => boot?.harnesses.find((harness) => harness.id === selectedPane.id) ?? null,
@@ -236,6 +237,32 @@ function App() {
       return null;
     }
     return { providerId: trimmedProvider, model };
+  }
+
+  function getFallbackRowHealth(row: NxFallbackRow): { label: string; tone: "ok" | "warn" | "bad" | "idle" } {
+    if (!row.providerId) {
+      return { label: "select provider", tone: "idle" };
+    }
+
+    const provider = nxProviders.find((entry) => entry.id === row.providerId);
+    if (!provider || !provider.enabled) {
+      return { label: "provider offline", tone: "bad" };
+    }
+
+    if (!row.model) {
+      return { label: "select model", tone: "idle" };
+    }
+
+    const providerModels = nxModelOptionsByProvider[row.providerId] ?? provider.models ?? [];
+    if (providerModels.length === 0) {
+      return { label: provider.lastSyncedAt ? "no synced models" : "syncing models", tone: "warn" };
+    }
+
+    if (!providerModels.includes(row.model)) {
+      return { label: "model unavailable", tone: "bad" };
+    }
+
+    return { label: "healthy", tone: "ok" };
   }
 
   const loadBootstrap = useCallback(async () => {
@@ -284,6 +311,19 @@ function App() {
       }
     } catch { /* silent */ }
   }
+
+  useEffect(() => {
+    if (nxAutoSyncStarted.current || nxProviders.length === 0) {
+      return;
+    }
+
+    nxAutoSyncStarted.current = true;
+    void Promise.all(
+      nxProviders
+        .filter((provider) => provider.enabled)
+        .map((provider) => nxSyncModels(provider.id)),
+    );
+  }, [nxProviders]);
 
   async function nxSaveProvider(event: FormEvent) {
     event.preventDefault();
@@ -845,6 +885,7 @@ function App() {
                 <div className="nxr-fallback-rows">
                   {nxFallbackRows.map((row) => {
                     const modelOptions = nxModelOptionsByProvider[row.providerId] ?? [];
+                    const health = getFallbackRowHealth(row);
                     return (
                       <div key={row.id} className="nxr-fallback-row">
                         <select
@@ -888,6 +929,7 @@ function App() {
                         >
                           Remove
                         </button>
+                        <span className={`nxr-row-status ${health.tone}`}>{health.label}</span>
                       </div>
                     );
                   })}
