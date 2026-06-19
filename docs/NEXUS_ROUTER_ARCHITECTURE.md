@@ -75,3 +75,7 @@ Stored at `data/system-state.local.json` (from template `data/system-state.templ
 - Add per-harness routing profiles.
 - Add UI for provider connect/test/model sync/fallback builder.
 - Add request replay policy and dead-letter queue for failed runs.
+
+## Related Docs
+
+- Wishlist and external repo fit analysis: `docs/WISHLIST_FEATURES.md`
