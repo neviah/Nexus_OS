@@ -1,4 +1,5 @@
-import type { HarnessConfig, HarnessConformanceCheck, HarnessConformanceResult } from "../types.js";
+import type { HarnessConfig, HarnessConformanceCheck, HarnessConformanceResult, SystemState } from "../types.js";
+import { probeHarnessProtocol } from "./harnessProbe.js";
 
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
@@ -10,11 +11,11 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
   }
 }
 
-export async function runHarnessConformance(harnesses: HarnessConfig[]): Promise<HarnessConformanceResult[]> {
-  return Promise.all(harnesses.map((harness) => runHarnessChecks(harness)));
+export async function runHarnessConformance(harnesses: HarnessConfig[], state?: SystemState): Promise<HarnessConformanceResult[]> {
+  return Promise.all(harnesses.map((harness) => runHarnessChecks(harness, state)));
 }
 
-async function runHarnessChecks(harness: HarnessConfig): Promise<HarnessConformanceResult> {
+async function runHarnessChecks(harness: HarnessConfig, state?: SystemState): Promise<HarnessConformanceResult> {
   const checks: HarnessConformanceCheck[] = [];
   const adapter = harness.adapter;
 
@@ -80,6 +81,18 @@ async function runHarnessChecks(harness: HarnessConfig): Promise<HarnessConforma
       passed: false,
       details: "unreachable",
     });
+  }
+
+  if (state) {
+    const protocolProbes = ["openai", "generic", "stream"] as const;
+    for (const proto of protocolProbes) {
+      const probe = await probeHarnessProtocol(harness, proto, state);
+      checks.push({
+        name: `live-probe-${proto}`,
+        passed: probe.success,
+        details: `${probe.elapsedMs}ms: ${probe.message}`,
+      });
+    }
   }
 
   const passed = checks.filter((entry) => entry.passed).length;
