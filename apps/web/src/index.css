@@ -300,9 +300,7 @@ button:disabled {
 }
 
 .chat-thread-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: grid;
   gap: 8px;
 }
 
@@ -312,6 +310,34 @@ button:disabled {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--ink-3);
+}
+
+.chat-thread-header small {
+  color: var(--ink-3);
+  font-size: 0.75rem;
+}
+
+.harness-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.harness-tab {
+  background: rgba(18, 29, 35, 0.52);
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.harness-tab.active {
+  border-color: rgba(255, 122, 24, 0.55);
+  background: rgba(255, 122, 24, 0.12);
+}
+
+.thread-create {
+  width: 100%;
 }
 
 .chat-thread-list {
@@ -353,6 +379,54 @@ button:disabled {
   flex-direction: column;
   gap: 10px;
   min-width: 0;
+}
+
+.automation-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.automation-panel label {
+  display: grid;
+  gap: 4px;
+  font-size: 0.82rem;
+  color: var(--ink-2);
+}
+
+.automation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  overflow: auto;
+}
+
+.automation-list li {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 8px;
+  background: rgba(18, 29, 35, 0.52);
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.automation-list li p {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.automation-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.72rem;
+  color: var(--ink-3);
+}
+
+.run-error {
+  color: var(--bad);
 }
 
 .subtitle {

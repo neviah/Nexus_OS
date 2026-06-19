@@ -83,6 +83,7 @@ export type SystemState = {
       message: string;
     }>;
   };
+  harnessAutomation?: HarnessAutomationStore;
 };
 
 export type NexusRouterProvider = {
@@ -169,4 +170,38 @@ export type StartupReadiness = {
   liveHarnesses: number;
   totalHarnesses: number;
   checkedAt: string;
+};
+
+export type HarnessSchedule = {
+  id: string;
+  harnessId: string;
+  workspaceId: string;
+  title: string;
+  prompt: string;
+  intervalMinutes: number;
+  enabled: boolean;
+  nextRunAt: string;
+  lastRunAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HarnessRunRecord = {
+  id: string;
+  harnessId: string;
+  workspaceId: string;
+  scheduleId?: string;
+  trigger: "manual" | "scheduled";
+  prompt: string;
+  status: "completed" | "failed";
+  output?: string;
+  error?: string;
+  model?: string;
+  provider?: string;
+  createdAt: string;
+};
+
+export type HarnessAutomationStore = {
+  schedulesByWorkspace: Record<string, Record<string, HarnessSchedule[]>>;
+  runsByWorkspace: Record<string, Record<string, HarnessRunRecord[]>>;
 };

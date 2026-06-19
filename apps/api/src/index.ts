@@ -31,6 +31,16 @@ import {
   upsertRouterProvider,
 } from "./lib/nexusRouter.js";
 import { ensureManagedHarnesses, getManagedHarnessRuntimeStatus } from "./lib/managedHarnessRuntime.js";
+import {
+  appendHarnessRun,
+  deleteHarnessSchedule,
+  ensureHarnessAutomationStore,
+  listDueSchedules,
+  listHarnessRuns,
+  listHarnessSchedules,
+  markScheduleRun,
+  upsertHarnessSchedule,
+} from "./lib/harnessAutomation.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -70,6 +80,70 @@ function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: numbe
 function isNexusRouterConfigured(state: SystemState): boolean {
   const router = ensureRouterState(state);
   return router.providers.some((provider) => provider.enabled);
+}
+
+async function runScheduledHarnessTask(input: {
+  harnessId: string;
+  workspaceId: string;
+  prompt: string;
+  trigger: "manual" | "scheduled";
+  scheduleId?: string;
+}): Promise<void> {
+  const state = await readSystemState();
+  const harnesses = await readHarnessRegistry();
+  const harness = harnesses.find((entry) => entry.id === input.harnessId);
+  if (!harness) {
+    appendHarnessRun(state, {
+      id: crypto.randomUUID(),
+      harnessId: input.harnessId,
+      workspaceId: input.workspaceId,
+      scheduleId: input.scheduleId,
+      trigger: input.trigger,
+      prompt: input.prompt,
+      status: "failed",
+      error: `Unknown harness ${input.harnessId}`,
+      createdAt: new Date().toISOString(),
+    });
+    await writeSystemState(state);
+    return;
+  }
+
+  try {
+    const result = await invokeHarness({
+      harness,
+      message: input.prompt,
+      history: [],
+      state,
+    });
+
+    appendHarnessRun(state, {
+      id: crypto.randomUUID(),
+      harnessId: input.harnessId,
+      workspaceId: input.workspaceId,
+      scheduleId: input.scheduleId,
+      trigger: input.trigger,
+      prompt: input.prompt,
+      status: "completed",
+      output: result.content,
+      model: result.meta.model,
+      provider: result.meta.provider,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    appendHarnessRun(state, {
+      id: crypto.randomUUID(),
+      harnessId: input.harnessId,
+      workspaceId: input.workspaceId,
+      scheduleId: input.scheduleId,
+      trigger: input.trigger,
+      prompt: input.prompt,
+      status: "failed",
+      error: String(error),
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  await writeSystemState(state);
 }
 
 app.use(cors());
@@ -339,6 +413,85 @@ app.post("/api/router/chat", async (req, res) => {
     await writeSystemState(state);
     return res.status(502).json({ error: String(error) });
   }
+});
+
+app.get("/api/harnesses/:harnessId/schedules", async (req, res) => {
+  const { harnessId } = req.params;
+  const state = await readSystemState();
+  const workspaceId = String(req.query.workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const schedules = listHarnessSchedules(state, workspaceId, harnessId);
+  res.json({ workspaceId, harnessId, schedules });
+});
+
+app.post("/api/harnesses/:harnessId/schedules", async (req, res) => {
+  const { harnessId } = req.params;
+  const body = req.body as {
+    workspaceId?: string;
+    id?: string;
+    title?: string;
+    prompt?: string;
+    intervalMinutes?: number;
+    enabled?: boolean;
+  };
+
+  if (!body.prompt || !body.prompt.trim()) {
+    return res.status(400).json({ error: "prompt is required" });
+  }
+
+  const state = await readSystemState();
+  const workspaceId = (body.workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const schedule = upsertHarnessSchedule(state, {
+    workspaceId,
+    harnessId,
+    id: body.id,
+    title: body.title,
+    prompt: body.prompt,
+    intervalMinutes: body.intervalMinutes,
+    enabled: body.enabled,
+  });
+  await writeSystemState(state);
+  return res.json({ ok: true, schedule });
+});
+
+app.delete("/api/harnesses/:harnessId/schedules/:scheduleId", async (req, res) => {
+  const { harnessId, scheduleId } = req.params;
+  const state = await readSystemState();
+  const workspaceId = String(req.query.workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const removed = deleteHarnessSchedule(state, workspaceId, harnessId, scheduleId);
+  if (!removed) {
+    return res.status(404).json({ error: "schedule not found" });
+  }
+  await writeSystemState(state);
+  return res.json({ ok: true });
+});
+
+app.get("/api/harnesses/:harnessId/runs", async (req, res) => {
+  const { harnessId } = req.params;
+  const state = await readSystemState();
+  const workspaceId = String(req.query.workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const runs = listHarnessRuns(state, workspaceId, harnessId);
+  res.json({ workspaceId, harnessId, runs });
+});
+
+app.post("/api/harnesses/:harnessId/runs/manual", async (req, res) => {
+  const { harnessId } = req.params;
+  const body = req.body as { workspaceId?: string; prompt?: string };
+  if (!body.prompt || !body.prompt.trim()) {
+    return res.status(400).json({ error: "prompt is required" });
+  }
+
+  const state = await readSystemState();
+  const workspaceId = (body.workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  await runScheduledHarnessTask({
+    harnessId,
+    workspaceId,
+    prompt: body.prompt,
+    trigger: "manual",
+  });
+
+  const refreshed = await readSystemState();
+  const runs = listHarnessRuns(refreshed, workspaceId, harnessId);
+  return res.json({ ok: true, run: runs[0] ?? null });
 });
 
 app.get("/api/workspaces", async (_req, res) => {
@@ -684,6 +837,44 @@ app.post("/api/chat/stream", async (req, res) => {
 void (async () => {
   const harnesses = await readHarnessRegistry();
   const runtimes = await ensureManagedHarnesses(harnesses);
+  const state = await readSystemState();
+  ensureRouterState(state);
+  ensureHarnessAutomationStore(state);
+  await writeSystemState(state);
+
+  setInterval(async () => {
+    try {
+      const nowIso = new Date().toISOString();
+      const runState = await readSystemState();
+      const due = listDueSchedules(runState, nowIso);
+      if (!due.length) {
+        return;
+      }
+
+      for (const schedule of due) {
+        const runAtIso = new Date().toISOString();
+        markScheduleRun(runState, {
+          workspaceId: schedule.workspaceId,
+          harnessId: schedule.harnessId,
+          scheduleId: schedule.id,
+          runAtIso,
+        });
+      }
+      await writeSystemState(runState);
+
+      for (const schedule of due) {
+        await runScheduledHarnessTask({
+          harnessId: schedule.harnessId,
+          workspaceId: schedule.workspaceId,
+          prompt: schedule.prompt,
+          trigger: "scheduled",
+          scheduleId: schedule.id,
+        });
+      }
+    } catch (error) {
+      console.error("[scheduler] tick failed", error);
+    }
+  }, 15_000);
 
   app.listen(port, () => {
     // eslint-disable-next-line no-console
