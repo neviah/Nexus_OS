@@ -131,7 +131,7 @@ h3 {
 .pane {
   border-radius: 10px;
   padding: 10px;
-  background: rgba(13, 23, 29, 0.58);
+  background: rgba(13, 23, 29, 0.36);
   min-height: 620px;
 }
 
@@ -182,14 +182,18 @@ h3 {
 .nav-item {
   width: 100%;
   text-align: left;
-  border-radius: 10px;
-  background: rgba(28, 42, 48, 0.34);
-  padding: 8px;
+  border-radius: 7px;
+  background: transparent;
+  padding: 6px;
   color: var(--ink-2);
   display: flex;
   gap: 10px;
   align-items: center;
   cursor: pointer;
+}
+
+.nav-item:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .nav-item:disabled {
@@ -198,7 +202,8 @@ h3 {
 }
 
 .nav-item.active {
-  background: rgba(255, 122, 24, 0.13);
+  background: rgba(255, 122, 24, 0.1);
+  box-shadow: inset 2px 0 0 var(--signal);
 }
 
 .meta-block {
@@ -331,6 +336,12 @@ button:disabled {
   margin: 0;
   font-size: 0.79rem;
   color: var(--warn);
+}
+
+.router-warning-action {
+  margin-left: 8px;
+  padding: 4px 8px;
+  font-size: 0.74rem;
 }
 
 .router-embed-wrap {
@@ -598,8 +609,8 @@ textarea {
 
 .workspace-list li {
   border-radius: 10px;
-  background: rgba(21, 33, 40, 0.48);
-  padding: 8px;
+  background: rgba(21, 33, 40, 0.24);
+  padding: 7px 8px;
   display: flex;
   justify-content: space-between;
   gap: 8px;
@@ -662,8 +673,8 @@ textarea {
 
 .failed-task-list li {
   border-radius: 10px;
-  background: rgba(18, 29, 35, 0.55);
-  padding: 8px;
+  background: rgba(18, 29, 35, 0.28);
+  padding: 7px;
   display: grid;
   gap: 8px;
 }

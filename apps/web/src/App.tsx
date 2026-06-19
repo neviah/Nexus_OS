@@ -234,6 +234,21 @@ function App() {
     }
   }, [selectedPane]);
 
+  useEffect(() => {
+    if (!/api\.9router\.io/i.test(routerForm.baseUrl)) {
+      return;
+    }
+
+    // Auto-heal legacy/invalid host defaults to local 9router runtime.
+    setRouterForm((current) => ({
+      ...current,
+      baseUrl: "http://localhost:20128/v1",
+    }));
+    setRouterBrowserInput("http://localhost:20128/dashboard");
+    setRouterBrowserUrl("http://localhost:20128/dashboard");
+    setRouterFrameRefresh((current) => current + 1);
+  }, [routerForm.baseUrl]);
+
   async function loadWorkspaceTree(workspaceId: string) {
     const response = await fetch(`/api/workspaces/${workspaceId}/tree`);
     const payload = (await response.json()) as { tree: WorkspaceTreeNode };
@@ -722,6 +737,18 @@ function App() {
               {likelyWrongCloudHost ? (
                 <p className="router-warning">
                   api.9router.io does not appear to be a valid dashboard host. For local 9router use http://localhost:20128/v1 and dashboard http://localhost:20128/dashboard.
+                  <button
+                    type="button"
+                    className="ghost router-warning-action"
+                    onClick={() => {
+                      setRouterForm((current) => ({ ...current, baseUrl: "http://localhost:20128/v1" }));
+                      setRouterBrowserInput("http://localhost:20128/dashboard");
+                      setRouterBrowserUrl("http://localhost:20128/dashboard");
+                      setRouterFrameRefresh((current) => current + 1);
+                    }}
+                  >
+                    Apply Local Defaults
+                  </button>
                 </p>
               ) : null}
 
