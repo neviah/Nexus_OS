@@ -161,6 +161,11 @@ type WorkspaceTreeNode = {
   children?: WorkspaceTreeNode[];
 };
 
+type WorkspaceFolderEntry = {
+  name: string;
+  path: string;
+};
+
 // ── Nexus Router types ──────────────────────────────────────────────────────
 type NxProvider = {
   id: string;
@@ -228,6 +233,13 @@ function App() {
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [resumeBusyId, setResumeBusyId] = useState<string | null>(null);
   const [createWorkspaceName, setCreateWorkspaceName] = useState("");
+  const [workspacePathDraft, setWorkspacePathDraft] = useState<string>("");
+  const [workspaceBrowserOpen, setWorkspaceBrowserOpen] = useState(false);
+  const [workspaceRoots, setWorkspaceRoots] = useState<string[]>([]);
+  const [workspaceBrowsePath, setWorkspaceBrowsePath] = useState<string>("");
+  const [workspaceBrowseParentPath, setWorkspaceBrowseParentPath] = useState<string | null>(null);
+  const [workspaceBrowseFolders, setWorkspaceBrowseFolders] = useState<WorkspaceFolderEntry[]>([]);
+  const [workspaceBrowseBusy, setWorkspaceBrowseBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toolsOpen, setToolsOpen] = useState(true);
   const [startupChecking, setStartupChecking] = useState(false);
@@ -966,17 +978,78 @@ function App() {
     }
   }
 
+  async function loadWorkspaceRoots() {
+    setWorkspaceBrowseBusy(true);
+    const response = await fetch("/api/workspaces/browse/roots");
+    if (!response.ok) {
+      setWorkspaceBrowseBusy(false);
+      return;
+    }
+    const payload = (await response.json()) as { roots: string[] };
+    const roots = payload.roots ?? [];
+    setWorkspaceRoots(roots);
+    setWorkspaceBrowseBusy(false);
+  }
+
+  async function browseWorkspacePath(targetPath: string) {
+    if (!targetPath) {
+      return;
+    }
+    setWorkspaceBrowseBusy(true);
+    const response = await fetch(`/api/workspaces/browse?path=${encodeURIComponent(targetPath)}`);
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to browse folder");
+      setWorkspaceBrowseBusy(false);
+      return;
+    }
+
+    const payload = (await response.json()) as {
+      path: string;
+      parentPath: string | null;
+      folders: WorkspaceFolderEntry[];
+    };
+    setWorkspaceBrowsePath(payload.path);
+    setWorkspaceBrowseParentPath(payload.parentPath);
+    setWorkspaceBrowseFolders(payload.folders ?? []);
+    setWorkspaceBrowseBusy(false);
+  }
+
+  async function openWorkspaceBrowser() {
+    setWorkspaceBrowserOpen(true);
+    await loadWorkspaceRoots();
+    if (workspacePathDraft) {
+      await browseWorkspacePath(workspacePathDraft);
+    }
+  }
+
+  function closeWorkspaceBrowser() {
+    setWorkspaceBrowserOpen(false);
+  }
+
   async function onCreateWorkspace(event: FormEvent) {
     event.preventDefault();
     if (createWorkspaceName.trim().length < 2) {
       return;
     }
-    await fetch("/api/workspaces", {
+    const response = await fetch("/api/workspaces", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: createWorkspaceName.trim() }),
+      body: JSON.stringify({
+        name: createWorkspaceName.trim(),
+        workspacePath: workspacePathDraft.trim() || undefined,
+      }),
     });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to create workspace");
+      return;
+    }
+
     setCreateWorkspaceName("");
+    setWorkspacePathDraft("");
+    setWorkspaceBrowserOpen(false);
     await loadBootstrap();
   }
 
@@ -1804,8 +1877,73 @@ function App() {
                   placeholder="new workspace name"
                   onChange={(event) => setCreateWorkspaceName(event.target.value)}
                 />
+                <button type="button" className="ghost" onClick={() => void openWorkspaceBrowser()}>
+                  Browse Folder
+                </button>
                 <button type="submit">Create</button>
               </form>
+
+              {workspacePathDraft ? (
+                <small className="workspace-path-draft">Using folder: {workspacePathDraft}</small>
+              ) : (
+                <small className="workspace-path-draft">No folder selected: workspace will be created in default Nexus workspace storage.</small>
+              )}
+
+              {workspaceBrowserOpen ? (
+                <section className="workspace-browser" aria-live="polite">
+                  <div className="workspace-browser-header">
+                    <strong>Select Workspace Folder</strong>
+                    <button type="button" className="ghost" onClick={closeWorkspaceBrowser}>Close</button>
+                  </div>
+
+                  {workspaceBrowsePath ? (
+                    <>
+                      <small>Current: {workspaceBrowsePath}</small>
+                      <div className="workspace-browser-actions">
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => workspaceBrowseParentPath && void browseWorkspacePath(workspaceBrowseParentPath)}
+                          disabled={!workspaceBrowseParentPath || workspaceBrowseBusy}
+                        >
+                          Up
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setWorkspacePathDraft(workspaceBrowsePath);
+                            closeWorkspaceBrowser();
+                          }}
+                          disabled={workspaceBrowseBusy}
+                        >
+                          Use This Folder
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
+
+                  {!workspaceBrowsePath ? (
+                    <ul className="workspace-root-list">
+                      {workspaceRoots.map((root) => (
+                        <li key={root}>
+                          <button type="button" className="ghost" onClick={() => void browseWorkspacePath(root)}>{root}</button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <ul className="workspace-folder-list">
+                      {workspaceBrowseFolders.map((folder) => (
+                        <li key={folder.path}>
+                          <button type="button" className="ghost" onClick={() => void browseWorkspacePath(folder.path)}>
+                            {folder.name}
+                          </button>
+                        </li>
+                      ))}
+                      {workspaceBrowseFolders.length === 0 ? <li><small>No subfolders found.</small></li> : null}
+                    </ul>
+                  )}
+                </section>
+              ) : null}
 
               <ul className="workspace-list">
                 {boot?.workspaces.map((workspace) => (
@@ -1813,6 +1951,7 @@ function App() {
                     <div>
                       <strong>{workspace.name}</strong>
                       <small>{formatBytes(workspace.sizeBytes)} | active agents: {workspace.activeHarnesses.length}</small>
+                      <small>{workspace.path}</small>
                     </div>
                     <button type="button" className="ghost" onClick={() => void onDeleteWorkspace(workspace.id)}>
                       Delete

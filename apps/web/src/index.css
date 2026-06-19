@@ -786,10 +786,56 @@ textarea {
 .workspace-create {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .workspace-create input {
   flex: 1;
+  min-width: 180px;
+}
+
+.workspace-path-draft {
+  display: block;
+  color: var(--ink-3);
+  margin-top: 4px;
+}
+
+.workspace-browser {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 10px;
+  background: rgba(18, 29, 35, 0.34);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-browser-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-browser-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.workspace-root-list,
+.workspace-folder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.workspace-root-list button,
+.workspace-folder-list button {
+  width: 100%;
+  text-align: left;
 }
 
 .workspace-list {

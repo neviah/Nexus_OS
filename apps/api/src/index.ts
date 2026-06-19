@@ -4,7 +4,11 @@ import {
   buildWorkspaceTree,
   createWorkspace,
   deleteWorkspace,
+  getWorkspaceById,
   listWorkspaces,
+  listFoldersAt,
+  listWorkspaceRoots,
+  registerWorkspacePath,
 } from "./lib/workspaceManager.js";
 import { readHarnessRegistry, resolveHarnessHealth } from "./lib/harnessRegistry.js";
 import { readSystemState, writeSystemState } from "./lib/stateStore.js";
@@ -184,6 +188,13 @@ app.get("/api/bootstrap", async (_req, res) => {
   const workspaces = await listWorkspaces({
     [state.activeWorkspaceId]: harnessStatus.filter((h) => h.status === "online").map((h) => h.id),
   });
+  const activeWorkspaceId = workspaces.some((workspace) => workspace.id === state.activeWorkspaceId)
+    ? state.activeWorkspaceId
+    : (workspaces[0]?.id ?? "default");
+  if (activeWorkspaceId !== state.activeWorkspaceId) {
+    state.activeWorkspaceId = activeWorkspaceId;
+    await writeSystemState(state);
+  }
   const liveHarnesses = harnessStatus.filter((entry) => entry.status === "online").length;
   const routerConfigured = isNexusRouterConfigured(state);
   const startup = buildStartupReadiness(routerConfigured, liveHarnesses, harnessStatus.length);
@@ -195,7 +206,7 @@ app.get("/api/bootstrap", async (_req, res) => {
     appName: "NEXUS OS",
     onboardingRequired: !routerConfigured,
     selectedPane,
-    activeWorkspaceId: state.activeWorkspaceId,
+    activeWorkspaceId,
     harnesses: harnessStatus,
     startup,
     tools: [
@@ -613,20 +624,52 @@ app.get("/api/workspaces", async (_req, res) => {
   const records = await listWorkspaces({
     [state.activeWorkspaceId]: harnesses.map((h) => h.id),
   });
+  const activeWorkspaceId = records.some((workspace) => workspace.id === state.activeWorkspaceId)
+    ? state.activeWorkspaceId
+    : (records[0]?.id ?? "default");
+  if (activeWorkspaceId !== state.activeWorkspaceId) {
+    state.activeWorkspaceId = activeWorkspaceId;
+    await writeSystemState(state);
+  }
   res.json({
-    activeWorkspaceId: state.activeWorkspaceId,
+    activeWorkspaceId,
     workspaces: records,
   });
 });
 
 app.post("/api/workspaces", async (req, res) => {
-  const { name } = req.body as { name?: string };
+  const { name, workspacePath } = req.body as { name?: string; workspacePath?: string };
   if (!name || name.trim().length < 2) {
     return res.status(400).json({ error: "Workspace name must be at least 2 characters." });
   }
 
-  await createWorkspace(name);
-  return res.json({ ok: true });
+  try {
+    const created = workspacePath?.trim()
+      ? await registerWorkspacePath({ name, workspacePath })
+      : await createWorkspace(name);
+    return res.json({ ok: true, workspace: created });
+  } catch (error) {
+    return res.status(400).json({ error: String(error) });
+  }
+});
+
+app.get("/api/workspaces/browse/roots", async (_req, res) => {
+  const roots = await listWorkspaceRoots();
+  return res.json({ roots });
+});
+
+app.get("/api/workspaces/browse", async (req, res) => {
+  const targetPath = String(req.query.path ?? "").trim();
+  if (!targetPath) {
+    return res.status(400).json({ error: "path is required" });
+  }
+
+  try {
+    const listing = await listFoldersAt(targetPath);
+    return res.json(listing);
+  } catch (error) {
+    return res.status(400).json({ error: String(error) });
+  }
 });
 
 app.delete("/api/workspaces/:id", async (req, res) => {
@@ -652,6 +695,11 @@ app.post("/api/workspaces/switch", async (req, res) => {
     return res.status(400).json({ error: "Workspace id is required." });
   }
 
+  const exists = await getWorkspaceById(id);
+  if (!exists) {
+    return res.status(404).json({ error: `Unknown workspace ${id}` });
+  }
+
   const state = await readSystemState();
   state.activeWorkspaceId = id;
   await writeSystemState(state);
@@ -660,8 +708,12 @@ app.post("/api/workspaces/switch", async (req, res) => {
 
 app.get("/api/workspaces/:id/tree", async (req, res) => {
   const { id } = req.params;
-  const tree = await buildWorkspaceTree(id);
-  return res.json({ tree });
+  try {
+    const tree = await buildWorkspaceTree(id);
+    return res.json({ tree });
+  } catch (error) {
+    return res.status(404).json({ error: String(error) });
+  }
 });
 
 app.post("/api/chat", async (req, res) => {
