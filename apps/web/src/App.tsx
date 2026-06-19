@@ -121,6 +121,14 @@ type WorkspaceTreeNode = {
   children?: WorkspaceTreeNode[];
 };
 
+type RouterProbe = {
+  origin: string;
+  dashboardUrl: string;
+  reachable: boolean;
+  checks: Array<{ url: string; ok: boolean; status?: number; error?: string }>;
+  checkedAt: string;
+};
+
 const initialRouterForm = {
   apiKey: "",
   baseUrl: "http://localhost:20128/v1",
@@ -150,6 +158,8 @@ function App() {
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
   const [routerFrameRefresh, setRouterFrameRefresh] = useState(0);
+  const [routerProbe, setRouterProbe] = useState<RouterProbe | null>(null);
+  const [routerProbeLoading, setRouterProbeLoading] = useState(false);
 
   const activeHarness = useMemo(
     () => boot?.harnesses.find((harness) => harness.id === selectedPane.id) ?? null,
@@ -174,8 +184,26 @@ function App() {
     await loadWorkspaceTree(payload.activeWorkspaceId);
     await loadFailedTasks();
     await loadLastStartupCheck();
+    await loadRouterProbe();
     setStatusMessage(payload.onboardingRequired ? "First run detected: Configure 9router endpoint to unlock harnesses." : "Ready");
   }, []);
+
+  async function loadRouterProbe() {
+    setRouterProbeLoading(true);
+    try {
+      const response = await fetch("/api/tools/9router/probe");
+      if (!response.ok) {
+        setRouterProbe(null);
+        return;
+      }
+      const payload = (await response.json()) as RouterProbe;
+      setRouterProbe(payload);
+    } catch {
+      setRouterProbe(null);
+    } finally {
+      setRouterProbeLoading(false);
+    }
+  }
 
   async function loadLastStartupCheck() {
     const response = await fetch("/api/startup/check/last");
@@ -194,6 +222,12 @@ function App() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadBootstrap();
   }, [loadBootstrap]);
+
+  useEffect(() => {
+    if (selectedPane.type === "tool" && selectedPane.id === "9router") {
+      void loadRouterProbe();
+    }
+  }, [selectedPane]);
 
   async function loadWorkspaceTree(workspaceId: string) {
     const response = await fetch(`/api/workspaces/${workspaceId}/tree`);
@@ -509,7 +543,9 @@ function App() {
   const startupReady = boot?.startup.ready ?? false;
   const startupBlockers = boot?.startup.blockers ?? [];
   const diagnosticsAlertCount = failedTasks.length + (startupReady ? 0 : Math.max(1, startupBlockers.length));
-  const routerDashboardUrl = getRouterDashboardUrl(routerForm.baseUrl || boot?.router9.baseUrl || initialRouterForm.baseUrl);
+  const routerDashboardUrl = routerProbe?.dashboardUrl
+    ?? getRouterDashboardUrl(routerForm.baseUrl || boot?.router9.baseUrl || initialRouterForm.baseUrl);
+  const routerRootUrl = routerProbe?.origin ?? getRouterOrigin(routerForm.baseUrl || boot?.router9.baseUrl || initialRouterForm.baseUrl);
 
   return (
     <main className="app-shell">
@@ -638,21 +674,53 @@ function App() {
                 <button type="button" className="ghost" onClick={() => setRouterFrameRefresh((current) => current + 1)}>
                   Reload
                 </button>
+                <button type="button" className="ghost" onClick={() => void loadRouterProbe()} disabled={routerProbeLoading}>
+                  {routerProbeLoading ? "Checking..." : "Probe"}
+                </button>
               </form>
 
               <p className="router-hint">
                 Local default endpoint is http://localhost:20128/v1. Use the embedded dashboard below to connect free or API-key providers.
               </p>
 
-              <div className="router-embed-wrap">
-                <iframe
-                  key={routerFrameRefresh}
-                  className="router-embed"
-                  src={routerDashboardUrl}
-                  title="9router Dashboard"
-                  loading="lazy"
-                />
-              </div>
+              {routerProbe && !routerProbe.reachable ? (
+                <section className="router-unavailable">
+                  <h3>9router dashboard not reachable</h3>
+                  <p>
+                    Checked: {routerProbe.checks.map((entry) => `${entry.url} (${entry.status ?? entry.error ?? "failed"})`).join(" | ")}
+                  </p>
+                  <div className="router-unavailable-actions">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => {
+                        window.open(routerDashboardUrl, "_blank", "noopener,noreferrer");
+                      }}
+                    >
+                      Open /dashboard
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => {
+                        window.open(routerRootUrl, "_blank", "noopener,noreferrer");
+                      }}
+                    >
+                      Open Root
+                    </button>
+                  </div>
+                </section>
+              ) : (
+                <div className="router-embed-wrap">
+                  <iframe
+                    key={`${routerFrameRefresh}-${routerDashboardUrl}`}
+                    className="router-embed"
+                    src={routerDashboardUrl}
+                    title="9router Dashboard"
+                    loading="lazy"
+                  />
+                </div>
+              )}
             </div>
           ) : null}
 
@@ -880,6 +948,15 @@ function getRouterDashboardUrl(baseUrl: string): string {
     return `${parsed.origin}/dashboard`;
   } catch {
     return "http://localhost:20128/dashboard";
+  }
+}
+
+function getRouterOrigin(baseUrl: string): string {
+  try {
+    const parsed = new URL(baseUrl);
+    return parsed.origin;
+  } catch {
+    return "http://localhost:20128";
   }
 }
 

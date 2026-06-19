@@ -27,6 +27,16 @@ const app = express();
 const port = Number(process.env.PORT ?? 8080);
 const activeStreams = new Map<string, AbortController>();
 
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: number, totalHarnesses: number): StartupReadiness {
   const blockers: string[] = [];
 
@@ -120,6 +130,41 @@ app.get("/api/startup/check/last", async (_req, res) => {
 app.get("/api/tools/9router/status", async (_req, res) => {
   const state = await readSystemState();
   res.json(getRouterSummary(state));
+});
+
+app.get("/api/tools/9router/probe", async (_req, res) => {
+  const state = await readSystemState();
+  let origin = "http://localhost:20128";
+
+  try {
+    origin = new URL(state.router9.baseUrl).origin;
+  } catch {
+    // Keep fallback origin
+  }
+
+  const candidates = [`${origin}/dashboard`, `${origin}/`];
+  const checks: Array<{ url: string; ok: boolean; status?: number; error?: string }> = [];
+
+  for (const url of candidates) {
+    try {
+      const response = await fetchWithTimeout(url, 2000);
+      checks.push({ url, ok: response.ok, status: response.status });
+    } catch (error) {
+      checks.push({ url, ok: false, error: String(error) });
+    }
+  }
+
+  const preferred = checks.find((entry) => entry.ok) ?? checks[0];
+  const dashboardUrl = preferred?.url ?? `${origin}/dashboard`;
+  const reachable = checks.some((entry) => entry.ok);
+
+  res.json({
+    origin,
+    dashboardUrl,
+    reachable,
+    checks,
+    checkedAt: new Date().toISOString(),
+  });
 });
 
 app.post("/api/tools/9router/config", async (req, res) => {
