@@ -22,6 +22,14 @@ import {
   updateTaskStatus,
 } from "./lib/taskResumeEngine.js";
 import { getLastStartupCheck, persistStartupCheck } from "./lib/startupCheckStore.js";
+import {
+  ensureRouterState,
+  getRouterProviders,
+  routeChatWithFallback,
+  syncProviderModels,
+  updateRouterConfig,
+  upsertRouterProvider,
+} from "./lib/nexusRouter.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -198,6 +206,115 @@ app.post("/api/tools/9router/config", async (req, res) => {
 
   await writeSystemState(state);
   return res.json({ ok: true, router9: getRouterSummary(state) });
+});
+
+app.get("/api/router/providers", async (_req, res) => {
+  const state = await readSystemState();
+  res.json({ providers: getRouterProviders(state) });
+});
+
+app.post("/api/router/providers", async (req, res) => {
+  const body = req.body as {
+    id?: string;
+    name?: string;
+    type?: "openai-compatible" | "openrouter";
+    baseUrl?: string;
+    apiKey?: string;
+    enabled?: boolean;
+    defaultModel?: string;
+  };
+
+  if (!body.id || !body.name || !body.type || !body.baseUrl || !body.apiKey) {
+    return res.status(400).json({ error: "id, name, type, baseUrl, and apiKey are required" });
+  }
+
+  const state = await readSystemState();
+  const provider = upsertRouterProvider(state, {
+    id: body.id,
+    name: body.name,
+    type: body.type,
+    baseUrl: body.baseUrl,
+    apiKey: body.apiKey,
+    enabled: body.enabled,
+    defaultModel: body.defaultModel,
+  });
+  await writeSystemState(state);
+  return res.json({ ok: true, provider });
+});
+
+app.get("/api/router/models", async (req, res) => {
+  const providerId = String(req.query.providerId ?? "").trim();
+  if (!providerId) {
+    return res.status(400).json({ error: "providerId is required" });
+  }
+
+  const state = await readSystemState();
+  try {
+    const models = await syncProviderModels(state, providerId);
+    await writeSystemState(state);
+    return res.json({ providerId, models });
+  } catch (error) {
+    return res.status(502).json({ error: String(error) });
+  }
+});
+
+app.get("/api/router/config", async (_req, res) => {
+  const state = await readSystemState();
+  const router = ensureRouterState(state);
+  res.json({
+    fallbackChain: router.fallbackChain,
+    retryPolicy: router.retryPolicy,
+    logs: router.logs.slice(0, 30),
+  });
+});
+
+app.post("/api/router/config", async (req, res) => {
+  const body = req.body as {
+    fallbackChain?: Array<{ providerId: string; model: string }>;
+    retryPolicy?: {
+      maxAttempts?: number;
+      backoffMs?: number;
+      retryOnStatus?: number[];
+    };
+  };
+
+  const state = await readSystemState();
+  const updated = updateRouterConfig(state, {
+    fallbackChain: body.fallbackChain,
+    retryPolicy: body.retryPolicy,
+  });
+  await writeSystemState(state);
+  res.json({ ok: true, ...updated });
+});
+
+app.post("/api/router/chat", async (req, res) => {
+  const body = req.body as {
+    providerId?: string;
+    model?: string;
+    fallbackChain?: Array<{ providerId: string; model: string }>;
+    messages?: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+    temperature?: number;
+  };
+
+  if (!Array.isArray(body.messages) || body.messages.length === 0) {
+    return res.status(400).json({ error: "messages is required" });
+  }
+
+  const state = await readSystemState();
+  try {
+    const result = await routeChatWithFallback(state, {
+      providerId: body.providerId,
+      model: body.model,
+      fallbackChain: body.fallbackChain,
+      messages: body.messages,
+      temperature: body.temperature,
+    });
+    await writeSystemState(state);
+    return res.json(result);
+  } catch (error) {
+    await writeSystemState(state);
+    return res.status(502).json({ error: String(error) });
+  }
 });
 
 app.get("/api/workspaces", async (_req, res) => {

@@ -55,6 +55,56 @@ export type SystemState = {
       message: string;
     }>;
   };
+  nexusRouter?: {
+    providers: Array<{
+      id: string;
+      name: string;
+      type: "openai-compatible" | "openrouter";
+      baseUrl: string;
+      apiKey: string;
+      enabled: boolean;
+      defaultModel?: string;
+      models?: string[];
+      lastSyncedAt?: string;
+    }>;
+    fallbackChain: Array<{
+      providerId: string;
+      model: string;
+    }>;
+    retryPolicy: {
+      maxAttempts: number;
+      backoffMs: number;
+      retryOnStatus: number[];
+    };
+    logs: Array<{
+      timestamp: string;
+      level: "info" | "warn" | "error";
+      message: string;
+    }>;
+  };
+};
+
+export type NexusRouterProvider = {
+  id: string;
+  name: string;
+  type: "openai-compatible" | "openrouter";
+  baseUrl: string;
+  apiKey: string;
+  enabled: boolean;
+  defaultModel?: string;
+  models?: string[];
+  lastSyncedAt?: string;
+};
+
+export type NexusRouterFallbackTarget = {
+  providerId: string;
+  model: string;
+};
+
+export type NexusRouterRetryPolicy = {
+  maxAttempts: number;
+  backoffMs: number;
+  retryOnStatus: number[];
 };
 
 export type ChatMessage = {

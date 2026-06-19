@@ -19,7 +19,10 @@
 ## Startup Readiness
 
 - `GET /api/startup/check`
-  - Runs live startup checks and returns startup blockers + per-harness conformance summary.
+  - Runs live startup checks with protocol probes and returns startup blockers + per-harness conformance summary.
+  - Persists check result to history.
+- `GET /api/startup/check/last`
+  - Returns the last recorded startup check result with timestamp.
 
 ## 9router
 
@@ -34,6 +37,49 @@ Request body:
   "baseUrl": "https://api.9router.io/v1",
   "defaultModel": "deepseek-v3",
   "fallbackOrder": ["deepseek-v3", "qwen-2.5-72b", "claude-3.5-sonnet"]
+}
+```
+
+## Nexus Router (Native)
+
+- `GET /api/router/providers`
+  - Returns saved router providers (API keys masked).
+- `POST /api/router/providers`
+  - Upserts provider config.
+- `GET /api/router/models?providerId=<id>`
+  - Syncs and caches models from provider `/v1/models` endpoint.
+- `GET /api/router/config`
+  - Returns fallback chain + retry policy + recent router logs.
+- `POST /api/router/config`
+  - Updates fallback chain and/or retry policy.
+- `POST /api/router/chat`
+  - Executes OpenAI-compatible routed chat using retry + fallback.
+
+Example provider upsert request:
+
+```json
+{
+  "id": "openrouter-main",
+  "name": "OpenRouter Main",
+  "type": "openrouter",
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "apiKey": "sk-or-v1-...",
+  "enabled": true,
+  "defaultModel": "openai/gpt-4.1-mini"
+}
+```
+
+Example router chat request:
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "Write a TypeScript retry helper" }
+  ],
+  "fallbackChain": [
+    { "providerId": "openrouter-main", "model": "openai/gpt-4.1-mini" },
+    { "providerId": "openrouter-main", "model": "anthropic/claude-sonnet-4" }
+  ]
 }
 ```
 
