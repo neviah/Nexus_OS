@@ -705,6 +705,208 @@ textarea {
   margin: 4px 0 8px;
 }
 
+/* ── Nexus Router Console ─────────────────────────────────────────────── */
+
+.nxr-console {
+  overflow-y: auto;
+  gap: 0;
+}
+
+.nxr-section {
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(47, 71, 79, 0.28);
+}
+
+.nxr-section:last-child {
+  border-bottom: 0;
+}
+
+.nxr-section h3 {
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+}
+
+.nxr-hint {
+  margin: 0 0 8px;
+  font-size: 0.79rem;
+  color: var(--ink-3);
+}
+
+.nxr-hint code {
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.78rem;
+}
+
+.nxr-provider-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.nxr-provider-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--ink-3);
+}
+
+.nxr-provider-form label:nth-child(3),
+.nxr-provider-form button {
+  grid-column: 1 / -1;
+}
+
+.nxr-provider-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.nxr-provider-list > li {
+  background: rgba(21, 33, 40, 0.28);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.nxr-provider-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.nxr-provider-row > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nxr-provider-row small {
+  color: var(--ink-3);
+  font-size: 0.78rem;
+}
+
+.nxr-sync-btn {
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  flex-shrink: 0;
+}
+
+.nxr-model-list {
+  margin-top: 8px;
+  font-size: 0.79rem;
+  color: var(--ink-3);
+}
+
+.nxr-model-list ul {
+  list-style: disc;
+  padding-left: 18px;
+  margin: 6px 0 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+}
+
+.nxr-fallback-editor {
+  width: 100%;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.83rem;
+  resize: vertical;
+}
+
+.nxr-retry {
+  display: flex;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.nxr-retry label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--ink-3);
+}
+
+.nxr-retry input {
+  width: 90px;
+}
+
+.nxr-test-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.nxr-test-row input {
+  flex: 1;
+}
+
+.nxr-test-result {
+  background: rgba(17, 27, 33, 0.6);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 0.85rem;
+}
+
+.nxr-test-result small {
+  color: var(--ink-3);
+  display: block;
+  margin-bottom: 6px;
+}
+
+.nxr-test-result p {
+  margin: 0 0 8px;
+  line-height: 1.5;
+}
+
+.nxr-test-result details {
+  font-size: 0.79rem;
+  color: var(--ink-3);
+}
+
+.nxr-test-result details ul {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+}
+
+.nxr-logs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 0.79rem;
+}
+
+.nxr-logs li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  color: var(--ink-2);
+}
+
+.nxr-logs small {
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+
+.nxr-log-error {
+  color: var(--bad);
+}
+
+.nxr-log-warn {
+  color: var(--warn);
+}
+
 @media (max-width: 1420px) {
   .app-shell {
     padding: 12px;

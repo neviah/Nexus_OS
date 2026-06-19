@@ -109,9 +109,14 @@ The live probe checks adapter config quality and attempts health endpoint verifi
 NEXUS OS now gates agent usage on startup readiness:
 
 - 9router must be configured
-- At least one harness must pass live health checks
+- At least one harness must pass live health checks and protocol probes (OpenAI, generic, stream)
 
 Use the right-pane `Run Startup Check` button (or `GET /api/startup/check`) to verify readiness and clear blockers.
+
+Startup check results are persisted and displayed with:
+- Last check timestamp
+- Ready/Blocked status badge
+- Per-harness protocol probe details (latency, success/failure)
 
 ## Important Security Note
 

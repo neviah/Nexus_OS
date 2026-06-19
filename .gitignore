@@ -9,6 +9,7 @@ apps/api/dist/
 
 data/system-state.local.json
 data/inflight-tasks.local.json
+data/startup-check.local.json
 
 .DS_Store
 Thumbs.db

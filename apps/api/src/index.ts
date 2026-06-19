@@ -92,8 +92,13 @@ app.get("/api/bootstrap", async (_req, res) => {
     startup,
     tools: [
       {
+        id: "nexus-router",
+        name: "Nexus Router",
+        status: (state.nexusRouter?.providers ?? []).some((p) => p.enabled) ? "online" : "setup-required",
+      },
+      {
         id: "9router",
-        name: "9router",
+        name: "9router (ext)",
         status: state.onboardingComplete ? "online" : "setup-required",
       },
       { id: "image-generator", name: "Image Generator", status: "offline" },

@@ -129,6 +129,42 @@ type RouterProbe = {
   checkedAt: string;
 };
 
+// ── Nexus Router types ──────────────────────────────────────────────────────
+type NxProvider = {
+  id: string;
+  name: string;
+  type: "openai-compatible" | "openrouter";
+  baseUrl: string;
+  enabled: boolean;
+  defaultModel?: string;
+  models?: string[];
+  lastSyncedAt?: string;
+  maskedApiKey: string;
+};
+
+type NxFallbackTarget = { providerId: string; model: string };
+
+type NxRetryPolicy = {
+  maxAttempts: number;
+  backoffMs: number;
+  retryOnStatus: number[];
+};
+
+type NxRouterConfig = {
+  fallbackChain: NxFallbackTarget[];
+  retryPolicy: NxRetryPolicy;
+  logs: Array<{ timestamp: string; level: string; message: string }>;
+};
+
+const PRESET_PROVIDERS: Array<{ id: string; name: string; type: NxProvider["type"]; baseUrl: string; defaultModel: string }> = [
+  { id: "openrouter", name: "OpenRouter", type: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "openai/gpt-4.1-mini" },
+  { id: "openai", name: "OpenAI", type: "openai-compatible", baseUrl: "https://api.openai.com/v1", defaultModel: "gpt-4.1-mini" },
+  { id: "anthropic-compat", name: "Anthropic (via OpenRouter)", type: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "anthropic/claude-sonnet-4-5" },
+  { id: "together", name: "Together AI", type: "openai-compatible", baseUrl: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3-8b-chat-hf" },
+  { id: "groq", name: "Groq", type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama3-8b-8192" },
+  { id: "custom", name: "Custom / Local", type: "openai-compatible", baseUrl: "http://localhost:11434/v1", defaultModel: "llama3" },
+];
+
 const initialRouterForm = {
   apiKey: "",
   baseUrl: "http://localhost:20128/v1",
@@ -163,6 +199,18 @@ function App() {
   const [routerBrowserInput, setRouterBrowserInput] = useState("http://localhost:20128/dashboard");
   const [routerBrowserUrl, setRouterBrowserUrl] = useState("http://localhost:20128/dashboard");
 
+  // Nexus Router state
+  const [nxProviders, setNxProviders] = useState<NxProvider[]>([]);
+  const [nxProviderForm, setNxProviderForm] = useState({ preset: "openrouter", id: "openrouter", name: "OpenRouter", type: "openrouter" as NxProvider["type"], baseUrl: "https://openrouter.ai/api/v1", apiKey: "", defaultModel: "openai/gpt-4.1-mini", enabled: true });
+  const [nxSaving, setNxSaving] = useState(false);
+  const [nxSyncingId, setNxSyncingId] = useState<string | null>(null);
+  const [nxFallbackEditor, setNxFallbackEditor] = useState("");
+  const [nxRetryEditor, setNxRetryEditor] = useState<NxRetryPolicy>({ maxAttempts: 3, backoffMs: 400, retryOnStatus: [429, 500, 502, 503, 504] });
+  const [nxTestPrompt, setNxTestPrompt] = useState("Say hello briefly.");
+  const [nxTestResult, setNxTestResult] = useState<{ content: string; model: string; providerId: string; elapsedMs: number; attempts: Array<{ providerId: string; model: string; status: string; details: string }> } | null>(null);
+  const [nxTestBusy, setNxTestBusy] = useState(false);
+  const [nxConsoleLogs, setNxConsoleLogs] = useState<Array<{ timestamp: string; level: string; message: string }>>([]);
+
   const activeHarness = useMemo(
     () => boot?.harnesses.find((harness) => harness.id === selectedPane.id) ?? null,
     [boot, selectedPane.id],
@@ -183,15 +231,114 @@ function App() {
     setRouterBrowserUrl(bootDashboard);
 
     const preferredPane: PaneSelection = payload.onboardingRequired
-      ? { type: "tool", id: "9router" }
+      ? { type: "tool", id: "nexus-router" }
       : payload.selectedPane;
     setSelectedPane(preferredPane);
     await loadWorkspaceTree(payload.activeWorkspaceId);
     await loadFailedTasks();
     await loadLastStartupCheck();
     await loadRouterProbe();
-    setStatusMessage(payload.onboardingRequired ? "First run detected: Configure 9router endpoint to unlock harnesses." : "Ready");
+    await loadNxRouter();
+    setStatusMessage(payload.onboardingRequired ? "First run: Add a provider in Nexus Router to get started." : "Ready");
   }, []);
+
+  async function loadNxRouter() {
+    try {
+      const [provRes, cfgRes] = await Promise.all([
+        fetch("/api/router/providers"),
+        fetch("/api/router/config"),
+      ]);
+      if (provRes.ok) {
+        const data = (await provRes.json()) as { providers: NxProvider[] };
+        setNxProviders(data.providers);
+      }
+      if (cfgRes.ok) {
+        const data = (await cfgRes.json()) as NxRouterConfig;
+        setNxRetryEditor(data.retryPolicy);
+        setNxFallbackEditor(data.fallbackChain.map((t) => `${t.providerId}::${t.model}`).join("\n"));
+        setNxConsoleLogs(data.logs);
+      }
+    } catch { /* silent */ }
+  }
+
+  async function nxSaveProvider(event: FormEvent) {
+    event.preventDefault();
+    setNxSaving(true);
+    try {
+      const res = await fetch("/api/router/providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(nxProviderForm),
+      });
+      if (res.ok) {
+        await loadNxRouter();
+        setStatusMessage(`Provider "${nxProviderForm.name}" saved.`);
+      } else {
+        const err = (await res.json()) as { error: string };
+        setStatusMessage(err.error);
+      }
+    } finally {
+      setNxSaving(false);
+    }
+  }
+
+  async function nxSyncModels(providerId: string) {
+    setNxSyncingId(providerId);
+    try {
+      const res = await fetch(`/api/router/models?providerId=${encodeURIComponent(providerId)}`);
+      if (res.ok) {
+        await loadNxRouter();
+        setStatusMessage(`Models synced for ${providerId}.`);
+      } else {
+        const err = (await res.json()) as { error: string };
+        setStatusMessage(err.error);
+      }
+    } finally {
+      setNxSyncingId(null);
+    }
+  }
+
+  async function nxSaveConfig() {
+    const fallbackChain = nxFallbackEditor
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [providerId, ...rest] = line.split("::");
+        return { providerId: providerId.trim(), model: rest.join("::").trim() };
+      });
+    const res = await fetch("/api/router/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fallbackChain, retryPolicy: nxRetryEditor }),
+    });
+    if (res.ok) {
+      await loadNxRouter();
+      setStatusMessage("Router config saved.");
+    }
+  }
+
+  async function nxTestChat() {
+    setNxTestBusy(true);
+    setNxTestResult(null);
+    try {
+      const res = await fetch("/api/router/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: nxTestPrompt }] }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setNxTestResult(data as typeof nxTestResult);
+        setStatusMessage(`Test routed via ${(data as { providerId: string }).providerId}`);
+      } else {
+        setStatusMessage((data as { error: string }).error ?? "Router chat failed");
+      }
+    } finally {
+      setNxTestBusy(false);
+      await loadNxRouter();
+    }
+  }
 
   async function loadRouterProbe() {
     setRouterProbeLoading(true);
@@ -652,6 +799,140 @@ function App() {
         </aside>
 
         <section className="pane pane-middle">
+          {selectedPane.type === "tool" && selectedPane.id === "nexus-router" ? (
+            <div className="tool-view nxr-console">
+              <h2>Nexus Router</h2>
+              <p className="subtitle">Your own provider router — add API keys, sync models, build fallback chains.</p>
+
+              {/* ── Provider Form ── */}
+              <section className="nxr-section">
+                <h3>Add / Update Provider</h3>
+                <form className="nxr-provider-form" onSubmit={(event) => void nxSaveProvider(event)}>
+                  <label>
+                    Preset
+                    <select
+                      value={nxProviderForm.preset}
+                      onChange={(event) => {
+                        const preset = PRESET_PROVIDERS.find((p) => p.id === event.target.value) ?? PRESET_PROVIDERS[0];
+                        setNxProviderForm((c) => ({ ...c, preset: preset.id, id: preset.id, name: preset.name, type: preset.type, baseUrl: preset.baseUrl, defaultModel: preset.defaultModel }));
+                      }}
+                    >
+                      {PRESET_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    Display Name
+                    <input type="text" required value={nxProviderForm.name} onChange={(event) => setNxProviderForm((c) => ({ ...c, name: event.target.value }))} />
+                  </label>
+                  <label>
+                    API Key
+                    <input type="password" required value={nxProviderForm.apiKey} placeholder="sk-..." onChange={(event) => setNxProviderForm((c) => ({ ...c, apiKey: event.target.value }))} />
+                  </label>
+                  <label>
+                    Base URL
+                    <input type="text" required value={nxProviderForm.baseUrl} onChange={(event) => setNxProviderForm((c) => ({ ...c, baseUrl: event.target.value }))} />
+                  </label>
+                  <label>
+                    Default Model
+                    <input type="text" value={nxProviderForm.defaultModel} onChange={(event) => setNxProviderForm((c) => ({ ...c, defaultModel: event.target.value }))} />
+                  </label>
+                  <button type="submit" disabled={nxSaving}>{nxSaving ? "Saving..." : "Save Provider"}</button>
+                </form>
+              </section>
+
+              {/* ── Connected Providers ── */}
+              {nxProviders.length > 0 ? (
+                <section className="nxr-section">
+                  <h3>Connected Providers</h3>
+                  <ul className="nxr-provider-list">
+                    {nxProviders.map((provider) => (
+                      <li key={provider.id}>
+                        <div className="nxr-provider-row">
+                          <span className={`health ${provider.enabled ? "healthy" : "offline"}`} />
+                          <div>
+                            <strong>{provider.name}</strong>
+                            <small>{provider.id} · {provider.maskedApiKey || "(no key)"} · {provider.models?.length ?? 0} models{provider.lastSyncedAt ? ` · synced ${new Date(provider.lastSyncedAt).toLocaleTimeString()}` : ""}</small>
+                          </div>
+                          <button
+                            type="button"
+                            className="ghost nxr-sync-btn"
+                            onClick={() => void nxSyncModels(provider.id)}
+                            disabled={nxSyncingId === provider.id}
+                          >
+                            {nxSyncingId === provider.id ? "Syncing..." : "Sync Models"}
+                          </button>
+                        </div>
+                        {provider.models && provider.models.length > 0 ? (
+                          <details className="nxr-model-list">
+                            <summary>{provider.models.length} models</summary>
+                            <ul>{provider.models.slice(0, 30).map((m) => <li key={m}>{m}</li>)}</ul>
+                          </details>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+
+              {/* ── Fallback Chain ── */}
+              <section className="nxr-section">
+                <h3>Fallback Chain</h3>
+                <p className="nxr-hint">One target per line: <code>providerId::modelName</code></p>
+                <textarea
+                  className="nxr-fallback-editor"
+                  value={nxFallbackEditor}
+                  rows={5}
+                  onChange={(event) => setNxFallbackEditor(event.target.value)}
+                  placeholder={"openrouter::openai/gpt-4.1-mini\nopenrouter::anthropic/claude-haiku-4-5"}
+                />
+                <div className="nxr-retry">
+                  <label>
+                    Max Attempts
+                    <input type="number" min={1} max={8} value={nxRetryEditor.maxAttempts} onChange={(event) => setNxRetryEditor((c) => ({ ...c, maxAttempts: Number(event.target.value) }))} />
+                  </label>
+                  <label>
+                    Backoff ms
+                    <input type="number" min={0} max={5000} step={100} value={nxRetryEditor.backoffMs} onChange={(event) => setNxRetryEditor((c) => ({ ...c, backoffMs: Number(event.target.value) }))} />
+                  </label>
+                </div>
+                <button type="button" onClick={() => void nxSaveConfig()}>Save Fallback Config</button>
+              </section>
+
+              {/* ── Test Chat ── */}
+              <section className="nxr-section">
+                <h3>Test Route</h3>
+                <div className="nxr-test-row">
+                  <input type="text" value={nxTestPrompt} onChange={(event) => setNxTestPrompt(event.target.value)} placeholder="Test prompt..." />
+                  <button type="button" onClick={() => void nxTestChat()} disabled={nxTestBusy}>{nxTestBusy ? "Routing..." : "Send"}</button>
+                </div>
+                {nxTestResult ? (
+                  <div className="nxr-test-result">
+                    <small>{nxTestResult.providerId} · {nxTestResult.model} · {nxTestResult.elapsedMs}ms</small>
+                    <p>{nxTestResult.content}</p>
+                    <details>
+                      <summary>Attempts ({nxTestResult.attempts.length})</summary>
+                      <ul>{nxTestResult.attempts.map((a, i) => <li key={i}>{a.status === "success" ? "✓" : "✗"} {a.providerId}/{a.model} — {a.details}</li>)}</ul>
+                    </details>
+                  </div>
+                ) : null}
+              </section>
+
+              {/* ── Router Logs ── */}
+              {nxConsoleLogs.length > 0 ? (
+                <section className="nxr-section">
+                  <h3>Router Logs</h3>
+                  <ul className="nxr-logs">
+                    {nxConsoleLogs.slice(0, 10).map((log, i) => (
+                      <li key={i} className={`nxr-log-${log.level}`}>
+                        <small>{new Date(log.timestamp).toLocaleTimeString()}</small> {log.message}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ) : null}
+            </div>
+          ) : null}
+
           {selectedPane.type === "tool" && selectedPane.id === "9router" ? (
             <div className="tool-view">
               <h2>9router Dashboard</h2>
@@ -793,7 +1074,7 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && selectedPane.id !== "9router" ? (
+          {selectedPane.type === "tool" && selectedPane.id !== "9router" && selectedPane.id !== "nexus-router" ? (
             <div className="placeholder-view">
               <h2>{boot?.tools.find((tool) => tool.id === selectedPane.id)?.name ?? "Tool"}</h2>
               <p>Tool plugin slot ready. Hook this panel to a future backend module.</p>
