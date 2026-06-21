@@ -269,6 +269,7 @@ Priority: P1 (low effort, high signal quality improvement)
 - Scan machine capabilities and recommend the best local models a user can download and run.
 - Prefer bundled Ollama/Piper runtimes and provide one-click model download/setup guidance when free cloud tokens run out.
 - Include saved prompt/recipe system per workspace/harness.
+- Surface Cookbook-installed models directly inside Router Providers so they can be added to the fallback chain.
 
 4. Video generation
 - Start with external API connector interface and job queue.
@@ -281,9 +282,9 @@ Priority: P1 (low effort, high signal quality improvement)
 
 1. 3D model generation
 2. Music generation
-- Preferred first path: embed StableDAW / theDAW style local web UI rather than building a custom Nexus music UI from scratch.
-- StableDAW is attractive because it already ships a local web interface, a small default model path, and an HTTP API.
-- Treat it as an optional heavyweight tool because install size and VRAM requirements are materially larger than chat/TTS.
+- Preferred first path: embed AceJAM as the initial local music tool, then expand later if Nexus needs a broader DAW-style surface.
+- AceJAM is attractive because it is lighter, more focused, and closer to a clean music-generator tool card.
+- Treat StableDAW / theDAW as a later heavyweight option because install size and VRAM requirements are materially larger than chat/TTS.
 
 ### Phase D: Game Creator tools
 

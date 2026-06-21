@@ -38,6 +38,7 @@ export type CookbookSnapshot = {
     ollamaInstalled: boolean;
     piperInstalled: boolean;
   };
+  installedModels: string[];
   recommendations: CookbookRecommendation[];
   scannedAt: string;
 };
@@ -74,6 +75,7 @@ export async function buildCookbookSnapshot(state: SystemState): Promise<Cookboo
       ollamaInstalled: runtimeStatus.ollamaInstalled,
       piperInstalled: runtimeStatus.piperInstalled,
     },
+    installedModels: runtimeStatus.ollamaModels,
     recommendations: buildRecommendations({
       totalRamGb,
       gpuNames,

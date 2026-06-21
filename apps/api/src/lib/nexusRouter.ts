@@ -6,6 +6,7 @@ import type {
   NexusRouterRetryPolicy,
   SystemState,
 } from "../types.js";
+import { getRuntimeStatus, startOllamaIfNeeded } from "./localRuntimeManager.js";
 
 export type RouterProviderPublic = Omit<NexusRouterProvider, "apiKey"> & { maskedApiKey: string };
 
@@ -22,6 +23,9 @@ const DEFAULT_RETRY_POLICY: NexusRouterRetryPolicy = {
   backoffMs: 400,
   retryOnStatus: [408, 409, 425, 429, 500, 502, 503, 504],
 };
+
+const COOKBOOK_PROVIDER_ID = "cookbook";
+const LOCAL_OLLAMA_CHAT_URL = "http://127.0.0.1:11434/v1/chat/completions";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -61,6 +65,46 @@ function buildModelsUrl(provider: NexusRouterProvider): string {
     return `${root}/models`;
   }
   return `${root}/v1/models`;
+}
+
+async function routeViaCookbook(input: {
+  model: string;
+  messages: Array<Pick<ChatMessage, "role" | "content">>;
+  temperature?: number;
+}): Promise<{ content: string }> {
+  const runtimeStatus = await getRuntimeStatus();
+  if (!runtimeStatus.ollamaInstalled) {
+    throw new Error("Cookbook local routing requires Ollama to be installed.");
+  }
+
+  await startOllamaIfNeeded();
+
+  const response = await fetch(LOCAL_OLLAMA_CHAT_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: input.model,
+      messages: input.messages,
+      temperature: input.temperature ?? 0.2,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Cookbook local routing failed: HTTP ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string | null } }>;
+  };
+
+  const content = payload.choices?.[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error("Cookbook local routing returned empty content.");
+  }
+
+  return { content };
 }
 
 export function ensureRouterState(state: SystemState): NonNullable<SystemState["nexusRouter"]> {
@@ -286,6 +330,40 @@ export async function routeChatWithFallback(
   const retry = router.retryPolicy;
 
   for (const target of targets) {
+    if (target.providerId === COOKBOOK_PROVIDER_ID) {
+      try {
+        const routed = await routeViaCookbook({
+          model: target.model,
+          messages: input.messages,
+          temperature: input.temperature,
+        });
+
+        attempts.push({
+          providerId: COOKBOOK_PROVIDER_ID,
+          model: target.model,
+          status: "success",
+          details: "ok via local Ollama",
+        });
+        appendRouterLog(router, "info", `Routed chat via cookbook:${target.model}`);
+
+        return {
+          content: routed.content,
+          model: target.model,
+          providerId: COOKBOOK_PROVIDER_ID,
+          attempts,
+          elapsedMs: Date.now() - started,
+        };
+      } catch (error) {
+        attempts.push({
+          providerId: COOKBOOK_PROVIDER_ID,
+          model: target.model,
+          status: "failed",
+          details: String(error),
+        });
+        continue;
+      }
+    }
+
     const provider = router.providers.find((entry) => entry.id === target.providerId && entry.enabled);
     if (!provider) {
       attempts.push({

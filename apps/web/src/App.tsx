@@ -193,6 +193,7 @@ type CookbookSnapshot = {
     ollamaInstalled: boolean;
     piperInstalled: boolean;
   };
+  installedModels: string[];
   recommendations: CookbookRecommendation[];
   scannedAt: string;
 };
@@ -226,6 +227,16 @@ type NxProvider = {
   models?: string[];
   lastSyncedAt?: string;
   maskedApiKey: string;
+};
+
+type NxProviderView = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  models: string[];
+  lastSyncedAt?: string;
+  maskedApiKey: string;
+  isLocal?: boolean;
 };
 
 type NxFallbackTarget = { providerId: string; model: string };
@@ -557,6 +568,37 @@ function App() {
 
   const fallbackChoiceSet = useMemo(() => new Set(fallbackChoiceOptions), [fallbackChoiceOptions]);
 
+  const cookbookModelOptions = useMemo(() => cookbookSnapshot?.installedModels ?? [], [cookbookSnapshot]);
+
+  const cookbookProviderView = useMemo<NxProviderView | null>(() => {
+    if (!cookbookSnapshot && !runtimeStatus) {
+      return null;
+    }
+
+    return {
+      id: "cookbook",
+      name: "Cookbook",
+      enabled: cookbookModelOptions.length > 0,
+      models: cookbookModelOptions,
+      lastSyncedAt: cookbookSnapshot?.scannedAt,
+      maskedApiKey: "",
+      isLocal: true,
+    };
+  }, [cookbookSnapshot, runtimeStatus, cookbookModelOptions]);
+
+  const nxProviderViews = useMemo<NxProviderView[]>(() => {
+    const remoteProviders = nxProviders.map((provider) => ({
+      id: provider.id,
+      name: provider.name,
+      enabled: provider.enabled,
+      models: nxModelOptionsByProvider[provider.id] ?? provider.models ?? [],
+      lastSyncedAt: provider.lastSyncedAt,
+      maskedApiKey: provider.maskedApiKey,
+    }));
+
+    return cookbookProviderView ? [cookbookProviderView, ...remoteProviders] : remoteProviders;
+  }, [cookbookProviderView, nxProviders, nxModelOptionsByProvider]);
+
   function createFallbackRow(target?: NxFallbackTarget): NxFallbackRow {
     return {
       id: crypto.randomUUID(),
@@ -584,7 +626,7 @@ function App() {
       return { label: "select provider", tone: "idle" };
     }
 
-    const provider = nxProviders.find((entry) => entry.id === row.providerId);
+    const provider = nxProviderViews.find((entry) => entry.id === row.providerId);
     if (!provider || !provider.enabled) {
       return { label: "provider offline", tone: "bad" };
     }
@@ -689,6 +731,12 @@ function App() {
   async function nxSyncModels(providerId: string) {
     setNxSyncingId(providerId);
     try {
+      if (providerId === "cookbook") {
+        await loadCookbookSnapshot();
+        setStatusMessage("Cookbook models refreshed.");
+        return;
+      }
+
       const res = await fetch(`/api/router/models?providerId=${encodeURIComponent(providerId)}`);
       if (res.ok) {
         const payload = (await res.json()) as { models?: string[] };
@@ -1464,17 +1512,17 @@ function App() {
               </section>
 
               {/* ── Connected Providers ── */}
-              {nxProviders.length > 0 ? (
+              {nxProviderViews.length > 0 ? (
                 <section className="nxr-section">
                   <h3>Connected Providers</h3>
                   <ul className="nxr-provider-list">
-                    {nxProviders.map((provider) => (
+                    {nxProviderViews.map((provider) => (
                       <li key={provider.id}>
                         <div className="nxr-provider-row">
                           <span className={`health ${provider.enabled ? "healthy" : "offline"}`} />
                           <div>
                             <strong>{provider.name}</strong>
-                            <small>{provider.id} · {provider.maskedApiKey || "(no key)"} · {provider.models?.length ?? 0} models{provider.lastSyncedAt ? ` · synced ${new Date(provider.lastSyncedAt).toLocaleTimeString()}` : ""}</small>
+                            <small>{provider.id} · {provider.isLocal ? "local" : (provider.maskedApiKey || "(no key)")} · {provider.models.length} models{provider.lastSyncedAt ? ` · synced ${new Date(provider.lastSyncedAt).toLocaleTimeString()}` : ""}</small>
                           </div>
                           <button
                             type="button"
@@ -1485,7 +1533,7 @@ function App() {
                             {nxSyncingId === provider.id ? "Syncing..." : "Sync Models"}
                           </button>
                         </div>
-                        {provider.models && provider.models.length > 0 ? (
+                        {provider.models.length > 0 ? (
                           <details className="nxr-model-list">
                             <summary>{provider.models.length} models</summary>
                             <ul>{provider.models.slice(0, 30).map((m) => <li key={m}>{m}</li>)}</ul>
@@ -1506,7 +1554,9 @@ function App() {
                 <p className="nxr-hint">Pick provider + model per row. Model dropdown uses synced active models.</p>
                 <div className="nxr-fallback-rows">
                   {nxFallbackRows.map((row) => {
-                    const modelOptions = nxModelOptionsByProvider[row.providerId] ?? [];
+                    const modelOptions = row.providerId === "cookbook"
+                      ? cookbookModelOptions
+                      : (nxModelOptionsByProvider[row.providerId] ?? nxProviderViews.find((provider) => provider.id === row.providerId)?.models ?? []);
                     const health = getFallbackRowHealth(row);
                     return (
                       <div key={row.id} className="nxr-fallback-row">
@@ -1515,13 +1565,13 @@ function App() {
                           onChange={(event) => {
                             const providerId = event.target.value;
                             setNxFallbackRows((rows) => rows.map((entry) => entry.id === row.id ? { ...entry, providerId, model: "" } : entry));
-                            if (providerId && (nxModelOptionsByProvider[providerId]?.length ?? 0) === 0) {
+                            if (providerId && providerId !== "cookbook" && (nxModelOptionsByProvider[providerId]?.length ?? 0) === 0) {
                               void nxSyncModels(providerId);
                             }
                           }}
                         >
                           <option value="">Select provider</option>
-                          {nxProviders.filter((provider) => provider.enabled).map((provider) => (
+                          {nxProviderViews.filter((provider) => provider.enabled).map((provider) => (
                             <option key={provider.id} value={provider.id}>{provider.name}</option>
                           ))}
                         </select>
@@ -1707,6 +1757,7 @@ function App() {
                       </button>
                     </div>
                     <small>Installed Ollama models: {runtimeStatus?.ollamaModels.join(", ") || "none yet"}</small>
+                    <small>Cookbook models: {cookbookSnapshot.installedModels.join(", ") || "none yet"}</small>
                   </section>
 
                   <section className="tool-card-grid">
