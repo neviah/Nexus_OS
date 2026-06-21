@@ -7,6 +7,11 @@ import { getRootDir } from "./stateStore.js";
 
 const execFileAsync = promisify(execFile);
 const runtimeRoot = path.join(getRootDir(), "data", "runtime-tools");
+const acejamRoot = path.join(runtimeRoot, "acejam.pinokio");
+const acejamAppRoot = path.join(acejamRoot, "app");
+const acejamVenvRoot = path.join(acejamAppRoot, "env");
+const acejamPort = 7860;
+const acejamUrl = `http://127.0.0.1:${acejamPort}`;
 const piperRoot = path.join(runtimeRoot, "piper");
 const piperVoicesRoot = path.join(piperRoot, "voices");
 const defaultPiperVoiceBase = "en_US-lessac-medium";
@@ -18,6 +23,9 @@ export type RuntimeStatus = {
   ollamaInstalled: boolean;
   ollamaRunning: boolean;
   ollamaModels: string[];
+  acejamInstalled: boolean;
+  acejamRunning: boolean;
+  acejamUrl: string;
   piperInstalled: boolean;
   piperPath: string | null;
   piperVoices: string[];
@@ -28,6 +36,8 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   const ollamaInstalled = await commandWorks("ollama", ["--version"]);
   const ollamaRunning = ollamaInstalled ? await commandWorks("ollama", ["list"]) : false;
   const ollamaModels = ollamaRunning ? await getOllamaModels() : [];
+  const acejamInstalled = await acejamLooksInstalled();
+  const acejamRunning = await isAceJamRunning();
   const piperPath = await resolvePiperPath();
   const piperInstalled = Boolean(piperPath);
   const piperVoices = await getInstalledPiperVoices();
@@ -36,11 +46,101 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
     ollamaInstalled,
     ollamaRunning,
     ollamaModels,
+    acejamInstalled,
+    acejamRunning,
+    acejamUrl,
     piperInstalled,
     piperPath,
     piperVoices,
     defaultVoiceInstalled: piperVoices.includes(defaultPiperVoiceBase),
   };
+}
+
+export async function installAceJam(): Promise<void> {
+  if (process.platform !== "win32") {
+    throw new Error("Automated AceJAM install is currently implemented for Windows only.");
+  }
+
+  const zipPath = path.join(runtimeRoot, "acejam.pinokio-main.zip");
+  const tempExtractRoot = path.join(runtimeRoot, "acejam-extract");
+  const extractedRepoRoot = path.join(tempExtractRoot, "acejam.pinokio-main");
+
+  await fs.mkdir(runtimeRoot, { recursive: true });
+  await downloadFile("https://github.com/cocktailpeanut/acejam.pinokio/archive/refs/heads/main.zip", zipPath);
+
+  await fs.rm(tempExtractRoot, { recursive: true, force: true });
+  await execFileAsync("powershell.exe", [
+    "-NoProfile",
+    "-Command",
+    `Expand-Archive -Path '${escapePowerShell(zipPath)}' -DestinationPath '${escapePowerShell(tempExtractRoot)}' -Force`,
+  ], { windowsHide: true, timeout: 10 * 60 * 1000 });
+
+  await fs.rm(acejamRoot, { recursive: true, force: true });
+  await fs.rename(extractedRepoRoot, acejamRoot);
+
+  const python = await resolveSystemPython();
+  await execFileAsync(python, ["-m", "venv", acejamVenvRoot], {
+    windowsHide: true,
+    timeout: 5 * 60 * 1000,
+  });
+
+  const venvPython = acejamPythonPath();
+  await execFileAsync(venvPython, ["-m", "pip", "install", "--upgrade", "pip"], {
+    cwd: acejamAppRoot,
+    windowsHide: true,
+    timeout: 5 * 60 * 1000,
+    maxBuffer: 1024 * 1024 * 16,
+  });
+  await execFileAsync(venvPython, ["-m", "pip", "install", "-r", "requirements.txt"], {
+    cwd: acejamAppRoot,
+    windowsHide: true,
+    timeout: 60 * 60 * 1000,
+    maxBuffer: 1024 * 1024 * 32,
+  });
+}
+
+export async function startAceJamIfNeeded(): Promise<void> {
+  if (await isAceJamRunning()) {
+    return;
+  }
+
+  if (!(await acejamLooksInstalled())) {
+    throw new Error("AceJAM is not installed yet.");
+  }
+
+  const python = acejamPythonPath();
+  const cacheRoot = path.join(acejamRoot, "cache");
+  const huggingFaceRoot = path.join(cacheRoot, "huggingface");
+
+  await fs.mkdir(cacheRoot, { recursive: true });
+  await fs.mkdir(huggingFaceRoot, { recursive: true });
+
+  spawn(python, ["app.py"], {
+    cwd: acejamAppRoot,
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: {
+      ...process.env,
+      GRADIO_ANALYTICS_ENABLED: "False",
+      GRADIO_SERVER_NAME: "127.0.0.1",
+      PYTHONUNBUFFERED: "1",
+      XDG_CACHE_HOME: cacheRoot,
+      HF_HOME: huggingFaceRoot,
+      HF_MODULES_CACHE: path.join(cacheRoot, "hf_modules"),
+      MPLCONFIGDIR: path.join(cacheRoot, "matplotlib"),
+      LLAMA_CACHE: path.join(cacheRoot, "llama"),
+    },
+  }).unref();
+
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (await isAceJamRunning()) {
+      return;
+    }
+    await sleep(1000);
+  }
+
+  throw new Error("AceJAM did not become ready after start.");
 }
 
 export async function installOllama(): Promise<void> {
@@ -205,6 +305,41 @@ async function commandWorks(command: string, args: string[]): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function acejamLooksInstalled(): Promise<boolean> {
+  try {
+    await fs.access(path.join(acejamAppRoot, "app.py"));
+    await fs.access(path.join(acejamAppRoot, "requirements.txt"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isAceJamRunning(): Promise<boolean> {
+  try {
+    const response = await fetch(`${acejamUrl}/`, { method: "GET" });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function acejamPythonPath(): string {
+  if (process.platform === "win32") {
+    return path.join(acejamVenvRoot, "Scripts", "python.exe");
+  }
+  return path.join(acejamVenvRoot, "bin", "python");
+}
+
+async function resolveSystemPython(): Promise<string> {
+  for (const candidate of ["py", "python", "python3"]) {
+    if (await commandWorks(candidate, ["--version"])) {
+      return candidate;
+    }
+  }
+  throw new Error("Python is required to install AceJAM. Install Python 3.10+ and retry.");
 }
 
 async function downloadFile(url: string, destinationPath: string): Promise<void> {

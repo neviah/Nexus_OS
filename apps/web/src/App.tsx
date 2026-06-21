@@ -210,6 +210,9 @@ type RuntimeStatus = {
   ollamaInstalled: boolean;
   ollamaRunning: boolean;
   ollamaModels: string[];
+  acejamInstalled: boolean;
+  acejamRunning: boolean;
+  acejamUrl: string;
   piperInstalled: boolean;
   piperPath: string | null;
   piperVoices: string[];
@@ -234,6 +237,7 @@ type NxProviderView = {
   name: string;
   enabled: boolean;
   models: string[];
+  baseUrl?: string;
   lastSyncedAt?: string;
   maskedApiKey: string;
   isLocal?: boolean;
@@ -272,6 +276,19 @@ const PRESET_PROVIDERS: Array<{ id: string; name: string; type: NxProvider["type
   { id: "groq", name: "Groq", type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama3-8b-8192" },
   { id: "custom", name: "Custom / Local", type: "openai-compatible", baseUrl: "http://localhost:11434/v1", defaultModel: "llama3" },
 ];
+
+const PROVIDER_API_KEY_LINKS: Record<string, string> = {
+  openrouter: "https://openrouter.ai/keys",
+  openai: "https://platform.openai.com/api-keys",
+  anthropic: "https://console.anthropic.com/settings/keys",
+  together: "https://api.together.xyz/settings/api-keys",
+  groq: "https://console.groq.com/keys",
+  deepseek: "https://platform.deepseek.com/api_keys",
+  mistral: "https://console.mistral.ai/api-keys",
+  xai: "https://console.x.ai/team/api-keys",
+  fireworks: "https://fireworks.ai/account/api-keys",
+  google: "https://aistudio.google.com/app/apikey",
+};
 
 function App() {
   const [boot, setBoot] = useState<BootstrapPayload | null>(null);
@@ -592,6 +609,7 @@ function App() {
       name: provider.name,
       enabled: provider.enabled,
       models: nxModelOptionsByProvider[provider.id] ?? provider.models ?? [],
+      baseUrl: provider.baseUrl,
       lastSyncedAt: provider.lastSyncedAt,
       maskedApiKey: provider.maskedApiKey,
     }));
@@ -609,6 +627,58 @@ function App() {
 
   function fallbackKey(target: NxFallbackTarget): string {
     return `${target.providerId}::${target.model}`;
+  }
+
+  function moveFallbackRow(rowId: string, direction: -1 | 1) {
+    setNxFallbackRows((rows) => {
+      const index = rows.findIndex((entry) => entry.id === rowId);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= rows.length) {
+        return rows;
+      }
+
+      const next = [...rows];
+      const [moved] = next.splice(index, 1);
+      next.splice(nextIndex, 0, moved);
+      return next;
+    });
+  }
+
+  function getProviderApiKeyUrl(provider: NxProviderView): string | null {
+    const id = provider.id.toLowerCase();
+    if (PROVIDER_API_KEY_LINKS[id]) {
+      return PROVIDER_API_KEY_LINKS[id];
+    }
+
+    const providerName = provider.name.toLowerCase();
+    if (providerName.includes("deepseek")) {
+      return PROVIDER_API_KEY_LINKS.deepseek;
+    }
+    if (providerName.includes("anthropic") || providerName.includes("claude")) {
+      return PROVIDER_API_KEY_LINKS.anthropic;
+    }
+
+    if (!provider.baseUrl) {
+      return null;
+    }
+
+    try {
+      const host = new URL(provider.baseUrl).hostname.toLowerCase();
+      if (host.includes("openrouter.ai")) return PROVIDER_API_KEY_LINKS.openrouter;
+      if (host.includes("openai.com")) return PROVIDER_API_KEY_LINKS.openai;
+      if (host.includes("anthropic.com")) return PROVIDER_API_KEY_LINKS.anthropic;
+      if (host.includes("deepseek.com")) return PROVIDER_API_KEY_LINKS.deepseek;
+      if (host.includes("together.xyz")) return PROVIDER_API_KEY_LINKS.together;
+      if (host.includes("groq.com")) return PROVIDER_API_KEY_LINKS.groq;
+      if (host.includes("mistral.ai")) return PROVIDER_API_KEY_LINKS.mistral;
+      if (host.includes("x.ai")) return PROVIDER_API_KEY_LINKS.xai;
+      if (host.includes("fireworks.ai")) return PROVIDER_API_KEY_LINKS.fireworks;
+      if (host.includes("googleapis.com") || host.includes("generativelanguage.googleapis.com")) return PROVIDER_API_KEY_LINKS.google;
+    } catch {
+      return null;
+    }
+
+    return null;
   }
 
   function parseFallbackKey(value: string): NxFallbackTarget | null {
@@ -832,6 +902,9 @@ function App() {
     }
     if (selectedPane.type === "tool" && selectedPane.id === "voice-studio") {
       void loadVoiceStatus();
+    }
+    if (selectedPane.type === "tool" && selectedPane.id === "music-generator") {
+      void loadRuntimeStatus();
     }
   }, [selectedPane, boot?.activeWorkspaceId]);
 
@@ -1532,6 +1605,15 @@ function App() {
                           >
                             {nxSyncingId === provider.id ? "Syncing..." : "Sync Models"}
                           </button>
+                          {getProviderApiKeyUrl(provider) ? (
+                            <button
+                              type="button"
+                              className="ghost nxr-sync-btn"
+                              onClick={() => window.open(getProviderApiKeyUrl(provider) ?? "", "_blank", "noopener,noreferrer")}
+                            >
+                              Get API Key
+                            </button>
+                          ) : null}
                         </div>
                         {provider.models.length > 0 ? (
                           <details className="nxr-model-list">
@@ -1553,7 +1635,7 @@ function App() {
                 </div>
                 <p className="nxr-hint">Pick provider + model per row. Model dropdown uses synced active models.</p>
                 <div className="nxr-fallback-rows">
-                  {nxFallbackRows.map((row) => {
+                  {nxFallbackRows.map((row, rowIndex) => {
                     const modelOptions = row.providerId === "cookbook"
                       ? cookbookModelOptions
                       : (nxModelOptionsByProvider[row.providerId] ?? nxProviderViews.find((provider) => provider.id === row.providerId)?.models ?? []);
@@ -1592,6 +1674,22 @@ function App() {
                           disabled={!row.providerId || nxSyncingId === row.providerId}
                         >
                           {nxSyncingId === row.providerId ? "Syncing..." : "Refresh"}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => moveFallbackRow(row.id, -1)}
+                          disabled={rowIndex === 0}
+                        >
+                          Up
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => moveFallbackRow(row.id, 1)}
+                          disabled={rowIndex === nxFallbackRows.length - 1}
+                        >
+                          Down
                         </button>
                         <button
                           type="button"
@@ -1913,7 +2011,73 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio"].includes(selectedPane.id) ? (
+          {selectedPane.type === "tool" && selectedPane.id === "music-generator" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Music Generator</h2>
+                  <p className="subtitle">AceJAM local music generation runtime with install/start controls.</p>
+                </div>
+                <button type="button" onClick={() => void loadRuntimeStatus()} disabled={runtimeBusyAction !== null}>
+                  Refresh
+                </button>
+              </div>
+
+              <section className="tool-section">
+                <h3>AceJAM runtime</h3>
+                <div className="tool-action-row tool-wrap-row">
+                  <button
+                    type="button"
+                    onClick={() => void runRuntimeAction(
+                      "install-acejam",
+                      () => fetch("/api/tools/runtimes/install", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ runtime: "acejam" }),
+                      }),
+                      "AceJAM installed.",
+                    )}
+                    disabled={runtimeBusyAction !== null || runtimeStatus?.acejamInstalled}
+                  >
+                    {runtimeStatus?.acejamInstalled ? "AceJAM Installed" : runtimeBusyAction === "install-acejam" ? "Installing AceJAM..." : "Install AceJAM"}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void runRuntimeAction(
+                      "start-acejam",
+                      () => fetch("/api/tools/runtimes/acejam/start", { method: "POST" }),
+                      "AceJAM started.",
+                    )}
+                    disabled={runtimeBusyAction !== null || !runtimeStatus?.acejamInstalled || runtimeStatus?.acejamRunning}
+                  >
+                    {runtimeStatus?.acejamRunning ? "AceJAM Running" : runtimeBusyAction === "start-acejam" ? "Starting AceJAM..." : "Start AceJAM"}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => window.open(runtimeStatus?.acejamUrl ?? "http://127.0.0.1:7860", "_blank", "noopener,noreferrer")}
+                    disabled={!runtimeStatus?.acejamRunning}
+                  >
+                    Open AceJAM UI
+                  </button>
+                </div>
+                <small>Status: {runtimeStatus?.acejamInstalled ? "installed" : "not installed"} · {runtimeStatus?.acejamRunning ? "running" : "stopped"}</small>
+                <small>URL: {runtimeStatus?.acejamUrl ?? "http://127.0.0.1:7860"}</small>
+              </section>
+
+              <section className="tool-section">
+                <h3>Notes</h3>
+                <ul className="tool-list">
+                  <li>First startup may be slow while models and runtime dependencies are downloaded.</li>
+                  <li>AceJAM runs locally and is intended for offline or low-cost music generation flows.</li>
+                  <li>If install fails, ensure Python 3.10+ is installed and available in PATH.</li>
+                </ul>
+              </section>
+            </div>
+          ) : null}
+
+          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator"].includes(selectedPane.id) ? (
             <div className="placeholder-view">
               <h2>{boot?.tools.find((tool) => tool.id === selectedPane.id)?.name ?? "Tool"}</h2>
               <p>Tool plugin slot ready. Hook this panel to a future backend module.</p>

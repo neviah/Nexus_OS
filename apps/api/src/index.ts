@@ -38,10 +38,12 @@ import { ensureManagedHarnesses, getManagedHarnessRuntimeStatus } from "./lib/ma
 import { buildCookbookSnapshot, getVoiceStatus } from "./lib/toolAdvisor.js";
 import {
   getRuntimeStatus,
+  installAceJam,
   installDefaultPiperVoice,
   installOllama,
   installPiper,
   pullOllamaModel,
+  startAceJamIfNeeded,
   startOllamaIfNeeded,
   synthesizeWithPiper,
 } from "./lib/localRuntimeManager.js";
@@ -212,6 +214,7 @@ app.get("/api/bootstrap", async (_req, res) => {
   const state = await readSystemState();
   const harnesses = await readHarnessRegistry();
   const harnessStatus = await resolveHarnessHealth(harnesses);
+  const runtimeStatus = await getRuntimeStatus();
   const workspaces = await listWorkspaces({
     [state.activeWorkspaceId]: harnessStatus.filter((h) => h.status === "online").map((h) => h.id),
   });
@@ -244,6 +247,11 @@ app.get("/api/bootstrap", async (_req, res) => {
       },
       { id: "cookbook", name: "Cookbook", status: "online" },
       { id: "voice-studio", name: "Voice Studio", status: "online" },
+      {
+        id: "music-generator",
+        name: "Music Generator",
+        status: runtimeStatus.acejamRunning ? "online" : (runtimeStatus.acejamInstalled ? "setup-required" : "offline"),
+      },
       { id: "image-generator", name: "Image Generator", status: "offline" },
       { id: "video-generator", name: "Video Generator", status: "offline" },
     ],
@@ -274,11 +282,13 @@ app.get("/api/tools/runtimes/status", async (_req, res) => {
 });
 
 app.post("/api/tools/runtimes/install", async (req, res) => {
-  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" };
+  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" };
   try {
     if (body.runtime === "ollama") {
       await installOllama();
       await startOllamaIfNeeded();
+    } else if (body.runtime === "acejam") {
+      await installAceJam();
     } else if (body.runtime === "piper") {
       await installPiper();
     } else if (body.runtime === "default-piper-voice") {
@@ -297,6 +307,16 @@ app.post("/api/tools/runtimes/install", async (req, res) => {
 app.post("/api/tools/runtimes/ollama/start", async (_req, res) => {
   try {
     await startOllamaIfNeeded();
+    const status = await getRuntimeStatus();
+    return res.json({ ok: true, status });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/runtimes/acejam/start", async (_req, res) => {
+  try {
+    await startAceJamIfNeeded();
     const status = await getRuntimeStatus();
     return res.json({ ok: true, status });
   } catch (error) {
