@@ -1,5 +1,7 @@
 import express from "express";
 import cors from "cors";
+import fs from "node:fs/promises";
+import path from "node:path";
 import {
   buildWorkspaceTree,
   createWorkspace,
@@ -11,7 +13,7 @@ import {
   registerWorkspacePath,
 } from "./lib/workspaceManager.js";
 import { readHarnessRegistry, resolveHarnessHealth } from "./lib/harnessRegistry.js";
-import { readSystemState, writeSystemState } from "./lib/stateStore.js";
+import { getRootDir, readSystemState, writeSystemState } from "./lib/stateStore.js";
 import { getRouterSummary } from "./lib/routerStatus.js";
 import type { ChatMessage, StartupReadiness, SystemState } from "./types.js";
 import { invokeHarness, streamHarness } from "./lib/harnessAdapter.js";
@@ -83,15 +85,139 @@ type RuntimeJob = {
   id: string;
   action: RuntimeJobAction;
   model?: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;
   logs: string[];
   error?: string;
+  cancelRequestedAt?: string;
+  retryOfId?: string;
 };
 
 const runtimeJobs = new Map<string, RuntimeJob>();
+const runtimeJobsPath = path.join(getRootDir(), "data", "runtime-jobs.local.json");
+let runtimeJobsLoaded = false;
+let runtimeJobPersistQueue: Promise<void> = Promise.resolve();
+
+function toRuntimeJobPayload(limit = 80): RuntimeJob[] {
+  return Array.from(runtimeJobs.values())
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+    .slice(0, limit);
+}
+
+async function loadRuntimeJobsFromDisk(): Promise<void> {
+  if (runtimeJobsLoaded) {
+    return;
+  }
+
+  runtimeJobsLoaded = true;
+
+  try {
+    const raw = await fs.readFile(runtimeJobsPath, "utf-8");
+    const parsed = JSON.parse(raw) as { jobs?: RuntimeJob[] };
+    for (const job of parsed.jobs ?? []) {
+      runtimeJobs.set(job.id, job);
+    }
+  } catch {
+    // No persisted runtime jobs yet.
+  }
+}
+
+function scheduleRuntimeJobPersist(): void {
+  runtimeJobPersistQueue = runtimeJobPersistQueue
+    .then(async () => {
+      await fs.mkdir(path.dirname(runtimeJobsPath), { recursive: true });
+      await fs.writeFile(runtimeJobsPath, JSON.stringify({ jobs: toRuntimeJobPayload(200) }, null, 2), "utf-8");
+    })
+    .catch(() => {
+      // Persist failures are non-fatal for runtime control.
+    });
+}
+
+function requestRuntimeJobCancel(job: RuntimeJob): boolean {
+  if (job.status === "completed" || job.status === "failed" || job.status === "canceled") {
+    return false;
+  }
+  if (job.status === "queued") {
+    job.status = "canceled";
+    job.cancelRequestedAt = new Date().toISOString();
+    job.finishedAt = job.cancelRequestedAt;
+    job.updatedAt = job.cancelRequestedAt;
+    appendRuntimeJobLog(job, "Canceled while queued.");
+    return true;
+  }
+
+  if (job.status === "running") {
+    job.status = "canceling";
+    job.cancelRequestedAt = new Date().toISOString();
+    job.updatedAt = job.cancelRequestedAt;
+    appendRuntimeJobLog(job, "Cancellation requested. Waiting for current step to finish.");
+    return true;
+  }
+
+  return false;
+}
+
+function ensureRuntimeJobNotCanceled(job: RuntimeJob): void {
+  if (job.status === "canceling") {
+    const canceled = new Error("Runtime job canceled");
+    canceled.name = "RuntimeJobCanceledError";
+    throw canceled;
+  }
+}
+
+function createRuntimeJob(action: RuntimeJobAction, model?: string, retryOfId?: string): RuntimeJob {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    action,
+    model: model?.trim(),
+    status: "queued",
+    createdAt: now,
+    updatedAt: now,
+    logs: [],
+    retryOfId,
+  };
+}
+
+function startRuntimeJob(job: RuntimeJob): void {
+  runtimeJobs.set(job.id, job);
+  appendRuntimeJobLog(job, "Queued");
+  scheduleRuntimeJobPersist();
+
+  void (async () => {
+    try {
+      if (job.status !== "queued") {
+        return;
+      }
+      job.status = "running";
+      job.updatedAt = new Date().toISOString();
+      appendRuntimeJobLog(job, "Job is running.");
+      await executeRuntimeJob(job);
+      ensureRuntimeJobNotCanceled(job);
+      job.status = "completed";
+      job.finishedAt = new Date().toISOString();
+      job.updatedAt = job.finishedAt;
+      appendRuntimeJobLog(job, "Completed successfully.");
+      scheduleRuntimeJobPersist();
+    } catch (error) {
+      if (error instanceof Error && error.name === "RuntimeJobCanceledError") {
+        job.status = "canceled";
+        job.finishedAt = new Date().toISOString();
+        job.updatedAt = job.finishedAt;
+        appendRuntimeJobLog(job, "Canceled.");
+      } else {
+        job.status = "failed";
+        job.error = String(error);
+        job.finishedAt = new Date().toISOString();
+        job.updatedAt = job.finishedAt;
+        appendRuntimeJobLog(job, `Failed: ${job.error}`);
+      }
+      scheduleRuntimeJobPersist();
+    }
+  })();
+}
 
 function appendRuntimeJobLog(job: RuntimeJob, message: string): void {
   job.logs.push(`[${new Date().toISOString()}] ${message}`);
@@ -99,14 +225,18 @@ function appendRuntimeJobLog(job: RuntimeJob, message: string): void {
     job.logs = job.logs.slice(job.logs.length - 200);
   }
   job.updatedAt = new Date().toISOString();
+  scheduleRuntimeJobPersist();
 }
 
 async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
+  ensureRuntimeJobNotCanceled(job);
   appendRuntimeJobLog(job, `Starting ${job.action}`);
 
   if (job.action === "install-ollama") {
+    ensureRuntimeJobNotCanceled(job);
     appendRuntimeJobLog(job, "Installing Ollama runtime...");
     await installOllama();
+    ensureRuntimeJobNotCanceled(job);
     appendRuntimeJobLog(job, "Starting Ollama service...");
     await startOllamaIfNeeded();
     appendRuntimeJobLog(job, "Ollama install completed.");
@@ -114,6 +244,7 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
   }
 
   if (job.action === "start-ollama") {
+    ensureRuntimeJobNotCanceled(job);
     appendRuntimeJobLog(job, "Starting Ollama service...");
     await startOllamaIfNeeded();
     appendRuntimeJobLog(job, "Ollama is running.");
@@ -124,6 +255,7 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
     if (!job.model?.trim()) {
       throw new Error("pull-ollama-model requires a model name.");
     }
+    ensureRuntimeJobNotCanceled(job);
     appendRuntimeJobLog(job, `Pulling Ollama model ${job.model}...`);
     await pullOllamaModel(job.model.trim());
     appendRuntimeJobLog(job, `Model ${job.model} pulled successfully.`);
@@ -131,6 +263,7 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
   }
 
   if (job.action === "install-piper") {
+    ensureRuntimeJobNotCanceled(job);
     appendRuntimeJobLog(job, "Installing Piper runtime...");
     await installPiper();
     appendRuntimeJobLog(job, "Piper install completed.");
@@ -138,6 +271,7 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
   }
 
   if (job.action === "install-default-piper-voice") {
+    ensureRuntimeJobNotCanceled(job);
     appendRuntimeJobLog(job, "Downloading default Piper voice...");
     await installDefaultPiperVoice();
     appendRuntimeJobLog(job, "Default Piper voice installed.");
@@ -145,6 +279,7 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
   }
 
   if (job.action === "install-acejam") {
+    ensureRuntimeJobNotCanceled(job);
     appendRuntimeJobLog(job, "Installing AceJAM runtime...");
     await installAceJam();
     appendRuntimeJobLog(job, "AceJAM install completed.");
@@ -152,6 +287,7 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
   }
 
   if (job.action === "start-acejam") {
+    ensureRuntimeJobNotCanceled(job);
     appendRuntimeJobLog(job, "Starting AceJAM service...");
     await startAceJamIfNeeded();
     appendRuntimeJobLog(job, "AceJAM is running.");
@@ -372,14 +508,14 @@ app.get("/api/tools/runtimes/status", async (_req, res) => {
   res.json(status);
 });
 
-app.get("/api/tools/runtimes/jobs", (_req, res) => {
-  const jobs = Array.from(runtimeJobs.values())
-    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-    .slice(0, 30);
+app.get("/api/tools/runtimes/jobs", async (_req, res) => {
+  await loadRuntimeJobsFromDisk();
+  const jobs = toRuntimeJobPayload();
   res.json({ jobs });
 });
 
-app.get("/api/tools/runtimes/jobs/:jobId", (req, res) => {
+app.get("/api/tools/runtimes/jobs/:jobId", async (req, res) => {
+  await loadRuntimeJobsFromDisk();
   const job = runtimeJobs.get(req.params.jobId);
   if (!job) {
     return res.status(404).json({ error: "Unknown runtime job" });
@@ -388,42 +524,48 @@ app.get("/api/tools/runtimes/jobs/:jobId", (req, res) => {
 });
 
 app.post("/api/tools/runtimes/jobs", async (req, res) => {
+  await loadRuntimeJobsFromDisk();
   const body = req.body as { action?: RuntimeJobAction; model?: string };
   if (!body.action) {
     return res.status(400).json({ error: "action is required" });
   }
 
-  const job: RuntimeJob = {
-    id: crypto.randomUUID(),
-    action: body.action,
-    model: body.model?.trim(),
-    status: "queued",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    logs: [],
-  };
-
-  runtimeJobs.set(job.id, job);
-  appendRuntimeJobLog(job, "Queued");
-
-  void (async () => {
-    try {
-      job.status = "running";
-      job.updatedAt = new Date().toISOString();
-      await executeRuntimeJob(job);
-      job.status = "completed";
-      job.finishedAt = new Date().toISOString();
-      job.updatedAt = job.finishedAt;
-    } catch (error) {
-      job.status = "failed";
-      job.error = String(error);
-      job.finishedAt = new Date().toISOString();
-      job.updatedAt = job.finishedAt;
-      appendRuntimeJobLog(job, `Failed: ${job.error}`);
-    }
-  })();
+  const job = createRuntimeJob(body.action, body.model);
+  startRuntimeJob(job);
 
   return res.status(202).json({ ok: true, job });
+});
+
+app.post("/api/tools/runtimes/jobs/:jobId/cancel", async (req, res) => {
+  await loadRuntimeJobsFromDisk();
+  const job = runtimeJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Unknown runtime job" });
+  }
+
+  const accepted = requestRuntimeJobCancel(job);
+  scheduleRuntimeJobPersist();
+  if (!accepted) {
+    return res.status(409).json({ error: "Runtime job is already finished", job });
+  }
+  return res.json({ ok: true, job });
+});
+
+app.post("/api/tools/runtimes/jobs/:jobId/retry", async (req, res) => {
+  await loadRuntimeJobsFromDisk();
+  const job = runtimeJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Unknown runtime job" });
+  }
+
+  if (job.status !== "failed" && job.status !== "canceled") {
+    return res.status(409).json({ error: "Only failed or canceled jobs can be retried", job });
+  }
+
+  const retryJob = createRuntimeJob(job.action, job.model, job.id);
+  appendRuntimeJobLog(retryJob, `Retry created from job ${job.id}.`);
+  startRuntimeJob(retryJob);
+  return res.status(202).json({ ok: true, job: retryJob });
 });
 
 app.post("/api/tools/runtimes/install", async (req, res) => {

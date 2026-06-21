@@ -221,14 +221,15 @@ type RuntimeStatus = {
 
 type RuntimeJob = {
   id: string;
-  action: string;
+  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam";
   model?: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;
   logs: string[];
   error?: string;
+  retryOfId?: string;
 };
 
 // ── Nexus Router types ──────────────────────────────────────────────────────
@@ -331,6 +332,7 @@ function App() {
   const [workspaceBrowseBusy, setWorkspaceBrowseBusy] = useState(false);
   const [cookbookSnapshot, setCookbookSnapshot] = useState<CookbookSnapshot | null>(null);
   const [cookbookBusy, setCookbookBusy] = useState(false);
+  const [cookbookTab, setCookbookTab] = useState<"overview" | "jobs">("overview");
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceText, setVoiceText] = useState("Nexus OS voice check. This is your text to speech tool.");
@@ -338,6 +340,7 @@ function App() {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeBusyAction, setRuntimeBusyAction] = useState<string | null>(null);
   const [runtimeJobs, setRuntimeJobs] = useState<RuntimeJob[]>([]);
+  const [expandedRuntimeJobIds, setExpandedRuntimeJobIds] = useState<Record<string, boolean>>({});
   const [imagePrompt, setImagePrompt] = useState("Cinematic cyberpunk skyline at sunrise, ultra detailed, volumetric light");
   const [imageBusy, setImageBusy] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -393,26 +396,7 @@ function App() {
     setVoiceBusy(false);
   }
 
-  async function runRuntimeJob(actionId: string, action: string, successMessage: string, model?: string) {
-    setRuntimeBusyAction(actionId);
-    const response = await fetch("/api/tools/runtimes/jobs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, model }),
-    });
-
-    if (!response.ok) {
-      const payload = (await response.json()) as { error?: string };
-      setStatusMessage(payload.error ?? "Runtime job failed to start");
-      setRuntimeBusyAction(null);
-      return;
-    }
-
-    const payload = (await response.json()) as { job: RuntimeJob };
-    const jobId = payload.job.id;
-    setStatusMessage(`${action} queued...`);
-    await loadRuntimeJobs();
-
+  async function waitForRuntimeJobCompletion(jobId: string, successMessage: string) {
     while (true) {
       const poll = await fetch(`/api/tools/runtimes/jobs/${encodeURIComponent(jobId)}`);
       if (!poll.ok) {
@@ -438,8 +422,70 @@ function App() {
         return;
       }
 
+      if (job.status === "canceled") {
+        setStatusMessage("Runtime job canceled.");
+        setRuntimeBusyAction(null);
+        return;
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
+  }
+
+  async function runRuntimeJob(actionId: string, action: RuntimeJob["action"], successMessage: string, model?: string) {
+    setRuntimeBusyAction(actionId);
+    const response = await fetch("/api/tools/runtimes/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, model }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Runtime job failed to start");
+      setRuntimeBusyAction(null);
+      return;
+    }
+
+    const payload = (await response.json()) as { job: RuntimeJob };
+    const jobId = payload.job.id;
+    setStatusMessage(`${action} queued...`);
+    await loadRuntimeJobs();
+    await waitForRuntimeJobCompletion(jobId, successMessage);
+  }
+
+  async function cancelRuntimeJob(job: RuntimeJob) {
+    const response = await fetch(`/api/tools/runtimes/jobs/${encodeURIComponent(job.id)}/cancel`, {
+      method: "POST",
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Could not cancel runtime job.");
+      return;
+    }
+
+    setStatusMessage(`Cancellation requested for ${job.action}.`);
+    await loadRuntimeJobs();
+  }
+
+  async function retryRuntimeJob(job: RuntimeJob) {
+    const response = await fetch(`/api/tools/runtimes/jobs/${encodeURIComponent(job.id)}/retry`, {
+      method: "POST",
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Could not retry runtime job.");
+      return;
+    }
+
+    setStatusMessage(`Retry queued for ${job.action}.`);
+    await loadRuntimeJobs();
+  }
+
+  function toggleRuntimeJobExpanded(jobId: string) {
+    setExpandedRuntimeJobIds((current) => ({ ...current, [jobId]: !current[jobId] }));
   }
   
   function stopVoicePlayback() {
@@ -1003,7 +1049,7 @@ function App() {
   }, [selectedPane, boot?.activeWorkspaceId]);
 
   useEffect(() => {
-    const hasActive = runtimeJobs.some((job) => job.status === "queued" || job.status === "running");
+    const hasActive = runtimeJobs.some((job) => job.status === "queued" || job.status === "running" || job.status === "canceling");
     if (!hasActive) {
       return;
     }
@@ -1922,7 +1968,83 @@ function App() {
                 </button>
               </div>
 
-              {cookbookSnapshot ? (
+              <div className="tool-tabs" role="tablist" aria-label="Cookbook panels">
+                <button
+                  type="button"
+                  className={`tool-tab ${cookbookTab === "overview" ? "active" : ""}`}
+                  onClick={() => setCookbookTab("overview")}
+                >
+                  Overview
+                </button>
+                <button
+                  type="button"
+                  className={`tool-tab ${cookbookTab === "jobs" ? "active" : ""}`}
+                  onClick={() => {
+                    setCookbookTab("jobs");
+                    void loadRuntimeJobs();
+                  }}
+                >
+                  Runtime Jobs
+                </button>
+              </div>
+
+              {cookbookTab === "jobs" ? (
+                <section className="tool-section">
+                  <h3>Runtime Jobs</h3>
+                  {runtimeJobs.length === 0 ? (
+                    <p>No runtime tasks yet.</p>
+                  ) : (
+                    <ul className="runtime-jobs-list">
+                      {runtimeJobs.map((job) => (
+                        <li key={job.id} className="runtime-job-card">
+                          <div className="runtime-job-header">
+                            <div>
+                              <strong>{job.action}{job.model ? ` (${job.model})` : ""}</strong>
+                              <small className={`runtime-job-status status-${job.status}`}>{job.status}</small>
+                            </div>
+                            <small>{new Date(job.updatedAt).toLocaleString()}</small>
+                          </div>
+
+                          {job.error ? <p className="runtime-job-error">{job.error}</p> : null}
+
+                          <div className="runtime-job-actions">
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => toggleRuntimeJobExpanded(job.id)}
+                            >
+                              {expandedRuntimeJobIds[job.id] ? "Hide Logs" : "Show Logs"}
+                            </button>
+
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => void cancelRuntimeJob(job)}
+                              disabled={job.status !== "queued" && job.status !== "running" && job.status !== "canceling"}
+                            >
+                              {job.status === "canceling" ? "Canceling..." : "Cancel"}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => void retryRuntimeJob(job)}
+                              disabled={job.status !== "failed" && job.status !== "canceled"}
+                            >
+                              Retry
+                            </button>
+                          </div>
+
+                          {expandedRuntimeJobIds[job.id] ? (
+                            <pre className="runtime-job-log">{job.logs.join("\n") || "No logs yet."}</pre>
+                          ) : (
+                            <small>{job.logs[job.logs.length - 1] ?? "No logs yet."}</small>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              ) : cookbookSnapshot ? (
                 <>
                   <section className="tool-section">
                     <h3>Bundled runtimes</h3>
@@ -1965,24 +2087,6 @@ function App() {
                     </div>
                     <small>Installed Ollama models: {runtimeStatus?.ollamaModels.join(", ") || "none yet"}</small>
                     <small>Cookbook models: {cookbookSnapshot.installedModels.join(", ") || "none yet"}</small>
-                  </section>
-
-                  <section className="tool-section">
-                    <h3>Runtime Jobs</h3>
-                    {runtimeJobs.length === 0 ? (
-                      <p>No runtime tasks yet.</p>
-                    ) : (
-                      <ul className="tool-list">
-                        {runtimeJobs.slice(0, 8).map((job) => (
-                          <li key={job.id}>
-                            <strong>{job.action}{job.model ? ` (${job.model})` : ""}</strong>
-                            <small>{job.status} · {new Date(job.updatedAt).toLocaleTimeString()}</small>
-                            {job.logs.length > 0 ? <small>{job.logs[job.logs.length - 1]}</small> : null}
-                            {job.error ? <small>{job.error}</small> : null}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
                   </section>
 
                   <section className="tool-card-grid">
@@ -2190,23 +2294,6 @@ function App() {
                 </ul>
               </section>
 
-              <section className="tool-section">
-                <h3>Runtime Jobs</h3>
-                {runtimeJobs.length === 0 ? (
-                  <p>No runtime tasks yet.</p>
-                ) : (
-                  <ul className="tool-list">
-                    {runtimeJobs.slice(0, 8).map((job) => (
-                      <li key={job.id}>
-                        <strong>{job.action}{job.model ? ` (${job.model})` : ""}</strong>
-                        <small>{job.status} · {new Date(job.updatedAt).toLocaleTimeString()}</small>
-                        {job.logs.length > 0 ? <small>{job.logs[job.logs.length - 1]}</small> : null}
-                        {job.error ? <small>{job.error}</small> : null}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
             </div>
           ) : null}
 
