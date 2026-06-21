@@ -430,6 +430,54 @@ function App() {
     }
   }
 
+  async function playAudioPayload(payload: { audioBase64: string; mimeType: string }) {
+    const byteChars = atob(payload.audioBase64);
+    const bytes = new Uint8Array(byteChars.length);
+    for (let index = 0; index < byteChars.length; index += 1) {
+      bytes[index] = byteChars.charCodeAt(index);
+    }
+    const blob = new Blob([bytes], { type: payload.mimeType });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+
+    await new Promise<void>((resolve) => {
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        resolve();
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve();
+      };
+      void audio.play().catch(() => {
+        URL.revokeObjectURL(url);
+        resolve();
+      });
+    });
+  }
+
+  async function speakHarnessReplyIfAssigned(harnessId: string, text: string) {
+    const voiceId = voiceAssignments[harnessId];
+    if (!voiceId || !text.trim()) {
+      return;
+    }
+
+    const response = await fetch("/api/tools/voice/speak", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text.trim(), voiceId }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Assigned harness voice playback failed.");
+      return;
+    }
+
+    const payload = (await response.json()) as { audioBase64: string; mimeType: string };
+    await playAudioPayload(payload);
+  }
+
   async function saveVoiceAssignments(next: Record<string, string>) {
     setVoiceAssignmentsBusy(true);
     const response = await fetch("/api/tools/voice/assignments", {
@@ -564,23 +612,8 @@ function App() {
 
         if (response.ok) {
           const payload = (await response.json()) as { audioBase64: string; mimeType: string };
-          const byteChars = atob(payload.audioBase64);
-          const bytes = new Uint8Array(byteChars.length);
-          for (let index = 0; index < byteChars.length; index += 1) {
-            bytes[index] = byteChars.charCodeAt(index);
-          }
-          const blob = new Blob([bytes], { type: payload.mimeType });
-          const url = URL.createObjectURL(blob);
-          const audio = new Audio(url);
-          audio.onended = () => {
-            URL.revokeObjectURL(url);
-            setVoicePlaying(false);
-          };
-          audio.onerror = () => {
-            URL.revokeObjectURL(url);
-            setVoicePlaying(false);
-          };
-          await audio.play();
+          await playAudioPayload(payload);
+          setVoicePlaying(false);
           return;
         }
 
@@ -1045,6 +1078,7 @@ function App() {
     await loadFailedTasks();
     await loadLastStartupCheck();
     await loadNxRouter();
+    await loadVoiceAssignments();
     setStatusMessage(payload.onboardingRequired ? "First run: Add a provider in Nexus Router to get started." : "Ready");
   }, []);
 
@@ -1572,6 +1606,10 @@ function App() {
     await saveHarnessThread(harnessId, threadSnapshot);
     setChatBusy(false);
     setActiveRequestId(null);
+    const finalAssistant = threadSnapshot.messages.find((entry) => entry.id === assistantPlaceholder.id)?.content ?? "";
+    if (finalAssistant.trim()) {
+      void speakHarnessReplyIfAssigned(harnessId, finalAssistant);
+    }
     setStatusMessage("Ready");
   }
 

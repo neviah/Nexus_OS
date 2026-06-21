@@ -151,19 +151,30 @@ export async function installOllama(): Promise<void> {
   if (process.platform !== "win32") {
     throw new Error("Automated Ollama install is currently implemented for Windows only.");
   }
-  await execFileAsync("winget", [
-    "install",
-    "--id",
-    "Ollama.Ollama",
-    "-e",
-    "--silent",
-    "--disable-interactivity",
-    "--accept-package-agreements",
-    "--accept-source-agreements",
-  ], {
-    windowsHide: true,
-    timeout: 20 * 60 * 1000,
-  });
+
+  const failures: string[] = [];
+
+  try {
+    await installOllamaViaWinget();
+  } catch (error) {
+    failures.push(`winget: ${String(error)}`);
+  }
+
+  if (await resolveOllamaPath()) {
+    return;
+  }
+
+  try {
+    await installOllamaViaDirectInstaller();
+  } catch (error) {
+    failures.push(`direct installer: ${String(error)}`);
+  }
+
+  if (await resolveOllamaPath()) {
+    return;
+  }
+
+  throw new Error(`Ollama install failed. Attempts: ${failures.join(" | ") || "unknown"}`);
 }
 
 export async function startOllamaIfNeeded(): Promise<void> {
@@ -348,6 +359,52 @@ async function resolveOllamaPath(): Promise<string | null> {
   }
 
   return null;
+}
+
+async function installOllamaViaWinget(): Promise<void> {
+  await execFileAsync("winget", [
+    "install",
+    "--id",
+    "Ollama.Ollama",
+    "-e",
+    "--silent",
+    "--disable-interactivity",
+    "--accept-package-agreements",
+    "--accept-source-agreements",
+  ], {
+    windowsHide: true,
+    timeout: 20 * 60 * 1000,
+  });
+}
+
+async function installOllamaViaDirectInstaller(): Promise<void> {
+  await fs.mkdir(runtimeRoot, { recursive: true });
+  const installerPath = path.join(runtimeRoot, "OllamaSetup.exe");
+  await downloadFile("https://ollama.com/download/OllamaSetup.exe", installerPath);
+
+  const argVariants: string[][] = [
+    ["/S"],
+    ["/quiet"],
+    ["/VERYSILENT", "/NORESTART"],
+  ];
+
+  let lastError: unknown = null;
+  for (const args of argVariants) {
+    try {
+      await execFileAsync(installerPath, args, {
+        windowsHide: true,
+        timeout: 20 * 60 * 1000,
+      });
+      await sleep(2000);
+      if (await resolveOllamaPath()) {
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw new Error(`Unable to run OllamaSetup.exe successfully. ${String(lastError ?? "No installer variant succeeded")}`);
 }
 
 async function installPiperVoice(voiceId: string): Promise<void> {
