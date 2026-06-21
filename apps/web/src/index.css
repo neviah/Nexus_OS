@@ -579,6 +579,28 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.runtime-core-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(93, 169, 199, 0.5);
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: var(--ink-2);
+  background: rgba(54, 103, 117, 0.25);
+  font-size: 0.82rem;
+}
+
+.harness-voice-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.harness-voice-row select {
+  min-width: 220px;
+}
+
 .tool-wrap-row {
   flex-wrap: wrap;
 }

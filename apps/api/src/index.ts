@@ -48,6 +48,7 @@ import {
   startAceJamIfNeeded,
   startOllamaIfNeeded,
   synthesizeWithPiper,
+  synthesizeWithPiperToFile,
 } from "./lib/localRuntimeManager.js";
 import {
   appendHarnessRun,
@@ -97,8 +98,10 @@ type RuntimeJob = {
 
 const runtimeJobs = new Map<string, RuntimeJob>();
 const runtimeJobsPath = path.join(getRootDir(), "data", "runtime-jobs.local.json");
+const piperAssignmentsPath = path.join(getRootDir(), "data", "piper-voice-assignments.local.json");
 let runtimeJobsLoaded = false;
 let runtimeJobPersistQueue: Promise<void> = Promise.resolve();
+let coreRuntimeProvisionAttempted = false;
 
 function toRuntimeJobPayload(limit = 80): RuntimeJob[] {
   return Array.from(runtimeJobs.values())
@@ -226,6 +229,103 @@ function appendRuntimeJobLog(job: RuntimeJob, message: string): void {
   }
   job.updatedAt = new Date().toISOString();
   scheduleRuntimeJobPersist();
+}
+
+async function readPiperAssignments(): Promise<Record<string, string>> {
+  try {
+    const raw = await fs.readFile(piperAssignmentsPath, "utf-8");
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+async function writePiperAssignments(assignments: Record<string, string>): Promise<void> {
+  await fs.mkdir(path.dirname(piperAssignmentsPath), { recursive: true });
+  await fs.writeFile(piperAssignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
+}
+
+function inferExtensionFromContentType(contentType: string | null, fallback = "bin"): string {
+  if (!contentType) return fallback;
+  const normalized = contentType.toLowerCase();
+  if (normalized.includes("image/png")) return "png";
+  if (normalized.includes("image/jpeg")) return "jpg";
+  if (normalized.includes("image/webp")) return "webp";
+  if (normalized.includes("audio/wav")) return "wav";
+  if (normalized.includes("audio/mpeg")) return "mp3";
+  if (normalized.includes("audio/ogg")) return "ogg";
+  return fallback;
+}
+
+function sanitizeFileNameSegment(input: string, fallback: string): string {
+  const cleaned = input
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return cleaned || fallback;
+}
+
+async function ensureWorkspaceAssetsDir(workspaceId?: string): Promise<{ workspaceId: string; assetsPath: string }> {
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId);
+  if (!workspace.path) {
+    throw new Error("Active workspace path is unavailable.");
+  }
+  const assetsPath = path.join(workspace.path, "Assets");
+  await fs.mkdir(assetsPath, { recursive: true });
+  return { workspaceId: workspace.id, assetsPath };
+}
+
+async function saveBufferToWorkspaceAssets(input: {
+  workspaceId?: string;
+  category: "images" | "voice" | "music";
+  baseName: string;
+  extension: string;
+  bytes: Buffer;
+}): Promise<{ workspaceId: string; absolutePath: string; relativePath: string }> {
+  const resolved = await ensureWorkspaceAssetsDir(input.workspaceId);
+  const categoryDir = path.join(resolved.assetsPath, input.category);
+  await fs.mkdir(categoryDir, { recursive: true });
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const fileName = `${sanitizeFileNameSegment(input.baseName, input.category)}-${timestamp}.${input.extension}`;
+  const absolutePath = path.join(categoryDir, fileName);
+  await fs.writeFile(absolutePath, input.bytes);
+  const relativePath = path.relative(path.dirname(resolved.assetsPath), absolutePath).replace(/\\/g, "/");
+
+  return { workspaceId: resolved.workspaceId, absolutePath, relativePath };
+}
+
+function findActiveRuntimeJobByAction(action: RuntimeJobAction): RuntimeJob | undefined {
+  return Array.from(runtimeJobs.values()).find((job) =>
+    job.action === action && (job.status === "queued" || job.status === "running" || job.status === "canceling")
+  );
+}
+
+async function ensureCoreRuntimeProvisioning(): Promise<void> {
+  if (coreRuntimeProvisionAttempted) {
+    return;
+  }
+  coreRuntimeProvisionAttempted = true;
+
+  await loadRuntimeJobsFromDisk();
+  const status = await getRuntimeStatus();
+  if (status.ollamaInstalled && status.ollamaRunning) {
+    return;
+  }
+
+  if (findActiveRuntimeJobByAction("install-ollama")) {
+    return;
+  }
+
+  const coreJob = createRuntimeJob("install-ollama");
+  appendRuntimeJobLog(coreJob, "Queued by NexusOS core runtime provisioning.");
+  startRuntimeJob(coreJob);
 }
 
 async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
@@ -438,6 +538,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.get("/api/bootstrap", async (_req, res) => {
+  void ensureCoreRuntimeProvisioning();
   const state = await readSystemState();
   const harnesses = await readHarnessRegistry();
   const harnessStatus = await resolveHarnessHealth(harnesses);
@@ -504,6 +605,7 @@ app.get("/api/tools/cookbook/scan", async (_req, res) => {
 });
 
 app.get("/api/tools/runtimes/status", async (_req, res) => {
+  void ensureCoreRuntimeProvisioning();
   const status = await getRuntimeStatus();
   res.json(status);
 });
@@ -631,15 +733,77 @@ app.get("/api/tools/voice/status", async (_req, res) => {
   res.json(status);
 });
 
+app.get("/api/tools/voice/voices", async (_req, res) => {
+  const runtime = await getRuntimeStatus();
+  const assignments = await readPiperAssignments();
+  res.json({
+    voices: runtime.piperVoices,
+    defaultVoiceId: runtime.piperVoices.includes("en_US-lessac-medium") ? "en_US-lessac-medium" : runtime.piperVoices[0] ?? null,
+    assignments,
+  });
+});
+
+app.get("/api/tools/voice/assignments", async (_req, res) => {
+  const harnesses = await readHarnessRegistry();
+  const runtime = await getRuntimeStatus();
+  const assignments = await readPiperAssignments();
+  res.json({
+    voices: runtime.piperVoices,
+    harnesses: harnesses.map((h) => ({ id: h.id, name: h.name })),
+    assignments,
+  });
+});
+
+app.post("/api/tools/voice/assignments", async (req, res) => {
+  const body = req.body as { assignments?: Record<string, string> };
+  if (!body.assignments || typeof body.assignments !== "object") {
+    return res.status(400).json({ error: "assignments map is required" });
+  }
+
+  const runtime = await getRuntimeStatus();
+  const validVoiceSet = new Set(runtime.piperVoices);
+  const cleaned: Record<string, string> = {};
+  for (const [harnessId, voiceId] of Object.entries(body.assignments)) {
+    const trimmedVoice = voiceId.trim();
+    if (trimmedVoice && validVoiceSet.has(trimmedVoice)) {
+      cleaned[harnessId.trim()] = trimmedVoice;
+    }
+  }
+
+  await writePiperAssignments(cleaned);
+  return res.json({ ok: true, assignments: cleaned });
+});
+
 app.post("/api/tools/voice/speak", async (req, res) => {
-  const body = req.body as { text?: string };
+  const body = req.body as { text?: string; voiceId?: string };
   if (!body.text?.trim()) {
     return res.status(400).json({ error: "text is required" });
   }
 
   try {
-    const audio = await synthesizeWithPiper(body.text.trim());
+    const audio = await synthesizeWithPiper(body.text.trim(), body.voiceId?.trim());
     return res.json({ ok: true, ...audio });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/voice/save", async (req, res) => {
+  const body = req.body as { text?: string; voiceId?: string; workspaceId?: string; fileName?: string };
+  if (!body.text?.trim()) {
+    return res.status(400).json({ error: "text is required" });
+  }
+
+  try {
+    const voiceId = body.voiceId?.trim() || "default";
+    const saveTarget = await ensureWorkspaceAssetsDir(body.workspaceId);
+    const destination = path.join(
+      saveTarget.assetsPath,
+      "voice",
+      `${sanitizeFileNameSegment(body.fileName ?? `tts-${voiceId}`, "tts")}-${new Date().toISOString().replace(/[:.]/g, "-")}.wav`,
+    );
+    await synthesizeWithPiperToFile(body.text.trim(), destination, body.voiceId?.trim());
+    return res.json({ ok: true, workspaceId: saveTarget.workspaceId, absolutePath: destination, relativePath: path.relative(path.dirname(saveTarget.assetsPath), destination).replace(/\\/g, "/") });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
   }
@@ -654,7 +818,61 @@ app.post("/api/tools/image/generate", async (req, res) => {
 
   try {
     const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?model=flux&nologo=true&enhance=true&seed=${Date.now()}`;
-    return res.json({ ok: true, imageUrl });
+    return res.json({ ok: true, imageUrl, engine: "pollinations", model: "flux" });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/image/save", async (req, res) => {
+  const body = req.body as { imageUrl?: string; prompt?: string; workspaceId?: string; fileName?: string };
+  const imageUrl = body.imageUrl?.trim();
+  if (!imageUrl) {
+    return res.status(400).json({ error: "imageUrl is required" });
+  }
+
+  try {
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      return res.status(500).json({ error: `Failed to download image: ${response.status} ${response.statusText}` });
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const extension = inferExtensionFromContentType(response.headers.get("content-type"), "png");
+    const saved = await saveBufferToWorkspaceAssets({
+      workspaceId: body.workspaceId,
+      category: "images",
+      baseName: body.fileName ?? body.prompt ?? "generated-image",
+      extension,
+      bytes,
+    });
+    return res.json({ ok: true, ...saved });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/music/save", async (req, res) => {
+  const body = req.body as { sourceUrl?: string; workspaceId?: string; fileName?: string };
+  const sourceUrl = body.sourceUrl?.trim();
+  if (!sourceUrl) {
+    return res.status(400).json({ error: "sourceUrl is required" });
+  }
+
+  try {
+    const response = await fetch(sourceUrl);
+    if (!response.ok) {
+      return res.status(500).json({ error: `Failed to download music file: ${response.status} ${response.statusText}` });
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const extension = inferExtensionFromContentType(response.headers.get("content-type"), "wav");
+    const saved = await saveBufferToWorkspaceAssets({
+      workspaceId: body.workspaceId,
+      category: "music",
+      baseName: body.fileName ?? "generated-music",
+      extension,
+      bytes,
+    });
+    return res.json({ ok: true, ...saved });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
   }
@@ -1503,6 +1721,7 @@ void (async () => {
   }, 15_000);
 
   app.listen(port, () => {
+    void ensureCoreRuntimeProvisioning();
     // eslint-disable-next-line no-console
     console.log(`NEXUS OS API running on http://localhost:${port}`);
     // eslint-disable-next-line no-console

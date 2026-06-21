@@ -216,16 +216,13 @@ export async function installDefaultPiperVoice(): Promise<void> {
   await downloadFile(defaultPiperVoiceConfig, path.join(piperVoicesRoot, `${defaultPiperVoiceBase}.onnx.json`));
 }
 
-export async function synthesizeWithPiper(text: string): Promise<{ audioBase64: string; mimeType: string }> {
+export async function synthesizeWithPiper(text: string, voiceId?: string): Promise<{ audioBase64: string; mimeType: string }> {
   const piperPath = await resolvePiperPath();
   if (!piperPath) {
     throw new Error("Piper is not installed.");
   }
 
-  const voicePath = path.join(piperVoicesRoot, `${defaultPiperVoiceBase}.onnx`);
-  const voiceConfigPath = path.join(piperVoicesRoot, `${defaultPiperVoiceBase}.onnx.json`);
-  await fs.access(voicePath);
-  await fs.access(voiceConfigPath);
+  const { voicePath, voiceConfigPath } = await resolveVoiceFiles(voiceId);
 
   const outputPath = path.join(runtimeRoot, `piper-preview-${Date.now()}.wav`);
   await fs.mkdir(runtimeRoot, { recursive: true });
@@ -247,6 +244,27 @@ export async function synthesizeWithPiper(text: string): Promise<{ audioBase64: 
     audioBase64: bytes.toString("base64"),
     mimeType: "audio/wav",
   };
+}
+
+export async function synthesizeWithPiperToFile(text: string, destinationPath: string, voiceId?: string): Promise<void> {
+  const piperPath = await resolvePiperPath();
+  if (!piperPath) {
+    throw new Error("Piper is not installed.");
+  }
+
+  const { voicePath, voiceConfigPath } = await resolveVoiceFiles(voiceId);
+  await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+
+  await runPiperProcess(piperPath, [
+    "--model",
+    voicePath,
+    "--config",
+    voiceConfigPath,
+    "--output_file",
+    destinationPath,
+    "--sentence_silence",
+    "0.2",
+  ], text);
 }
 
 export async function resolvePiperPath(): Promise<string | null> {
@@ -301,6 +319,15 @@ async function getInstalledPiperVoices(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+async function resolveVoiceFiles(voiceId?: string): Promise<{ voicePath: string; voiceConfigPath: string }> {
+  const selectedVoice = (voiceId?.trim() || defaultPiperVoiceBase);
+  const voicePath = path.join(piperVoicesRoot, `${selectedVoice}.onnx`);
+  const voiceConfigPath = path.join(piperVoicesRoot, `${selectedVoice}.onnx.json`);
+  await fs.access(voicePath);
+  await fs.access(voiceConfigPath);
+  return { voicePath, voiceConfigPath };
 }
 
 async function commandWorks(command: string, args: string[]): Promise<boolean> {

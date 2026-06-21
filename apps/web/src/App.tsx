@@ -206,6 +206,12 @@ type VoiceStatus = {
   scannedAt: string;
 };
 
+type VoiceAssignmentsPayload = {
+  voices: string[];
+  harnesses: Array<{ id: string; name: string }>;
+  assignments: Record<string, string>;
+};
+
 type RuntimeStatus = {
   ollamaInstalled: boolean;
   ollamaRunning: boolean;
@@ -337,13 +343,21 @@ function App() {
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceText, setVoiceText] = useState("Nexus OS voice check. This is your text to speech tool.");
   const [voicePlaying, setVoicePlaying] = useState(false);
+  const [voicePreviewVoiceId, setVoicePreviewVoiceId] = useState<string>("");
+  const [voiceAvailableVoices, setVoiceAvailableVoices] = useState<string[]>([]);
+  const [voiceAssignments, setVoiceAssignments] = useState<Record<string, string>>({});
+  const [voiceAssignmentsBusy, setVoiceAssignmentsBusy] = useState(false);
+  const [voiceSaveBusy, setVoiceSaveBusy] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeBusyAction, setRuntimeBusyAction] = useState<string | null>(null);
   const [runtimeJobs, setRuntimeJobs] = useState<RuntimeJob[]>([]);
   const [expandedRuntimeJobIds, setExpandedRuntimeJobIds] = useState<Record<string, boolean>>({});
   const [imagePrompt, setImagePrompt] = useState("Cinematic cyberpunk skyline at sunrise, ultra detailed, volumetric light");
   const [imageBusy, setImageBusy] = useState(false);
+  const [imageSaveBusy, setImageSaveBusy] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [musicSourceUrl, setMusicSourceUrl] = useState("");
+  const [musicSaveBusy, setMusicSaveBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toolsOpen, setToolsOpen] = useState(true);
   const [startupChecking, setStartupChecking] = useState(false);
@@ -392,8 +406,42 @@ function App() {
     }
     const payload = (await response.json()) as VoiceStatus;
     setVoiceStatus(payload);
+    await loadVoiceAssignments();
     await loadRuntimeStatus();
     setVoiceBusy(false);
+  }
+
+  async function loadVoiceAssignments() {
+    const response = await fetch("/api/tools/voice/assignments");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as VoiceAssignmentsPayload;
+    setVoiceAvailableVoices(payload.voices ?? []);
+    setVoiceAssignments(payload.assignments ?? {});
+    if (!voicePreviewVoiceId && (payload.voices?.length ?? 0) > 0) {
+      setVoicePreviewVoiceId(payload.voices[0]);
+    }
+  }
+
+  async function saveVoiceAssignments(next: Record<string, string>) {
+    setVoiceAssignmentsBusy(true);
+    const response = await fetch("/api/tools/voice/assignments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ assignments: next }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to save voice assignments.");
+      setVoiceAssignmentsBusy(false);
+      return;
+    }
+
+    setVoiceAssignments(next);
+    setVoiceAssignmentsBusy(false);
+    setStatusMessage("Harness voice assignments saved.");
   }
 
   async function waitForRuntimeJobCompletion(jobId: string, successMessage: string) {
@@ -505,7 +553,7 @@ function App() {
         const response = await fetch("/api/tools/voice/speak", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text, voiceId: voicePreviewVoiceId || undefined }),
         });
 
         if (response.ok) {
@@ -570,6 +618,81 @@ function App() {
     setImageUrl(payload.imageUrl);
     setStatusMessage("Image generated.");
     setImageBusy(false);
+  }
+
+  async function saveGeneratedImage() {
+    if (!imageUrl) {
+      return;
+    }
+
+    setImageSaveBusy(true);
+    const response = await fetch("/api/tools/image/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageUrl, prompt: imagePrompt, workspaceId: boot?.activeWorkspaceId }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Image save failed.");
+      setImageSaveBusy(false);
+      return;
+    }
+
+    const payload = (await response.json()) as { relativePath: string };
+    setStatusMessage(`Saved image to ${payload.relativePath}`);
+    setImageSaveBusy(false);
+  }
+
+  async function saveVoiceGeneration() {
+    const text = voiceText.trim();
+    if (!text) {
+      return;
+    }
+
+    setVoiceSaveBusy(true);
+    const response = await fetch("/api/tools/voice/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voiceId: voicePreviewVoiceId || undefined, workspaceId: boot?.activeWorkspaceId }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Voice save failed.");
+      setVoiceSaveBusy(false);
+      return;
+    }
+
+    const payload = (await response.json()) as { relativePath: string };
+    setStatusMessage(`Saved voice to ${payload.relativePath}`);
+    setVoiceSaveBusy(false);
+  }
+
+  async function saveMusicFromUrl() {
+    const sourceUrl = musicSourceUrl.trim();
+    if (!sourceUrl) {
+      setStatusMessage("Paste a music file URL first.");
+      return;
+    }
+
+    setMusicSaveBusy(true);
+    const response = await fetch("/api/tools/music/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceUrl, workspaceId: boot?.activeWorkspaceId }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Music save failed.");
+      setMusicSaveBusy(false);
+      return;
+    }
+
+    const payload = (await response.json()) as { relativePath: string };
+    setStatusMessage(`Saved music to ${payload.relativePath}`);
+    setMusicSaveBusy(false);
   }
 
   // Nexus Router state
@@ -2049,29 +2172,9 @@ function App() {
                   <section className="tool-section">
                     <h3>Bundled runtimes</h3>
                     <div className="tool-action-row tool-wrap-row">
-                      <button
-                        type="button"
-                        onClick={() => void runRuntimeJob(
-                          "install-ollama",
-                          "install-ollama",
-                          "Ollama installed and started.",
-                        )}
-                        disabled={runtimeBusyAction !== null || runtimeStatus?.ollamaInstalled}
-                      >
-                        {runtimeStatus?.ollamaInstalled ? "Ollama Installed" : runtimeBusyAction === "install-ollama" ? "Installing Ollama..." : "Install Ollama"}
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost"
-                        onClick={() => void runRuntimeJob(
-                          "start-ollama",
-                          "start-ollama",
-                          "Ollama started.",
-                        )}
-                        disabled={runtimeBusyAction !== null || !runtimeStatus?.ollamaInstalled || runtimeStatus?.ollamaRunning}
-                      >
-                        {runtimeStatus?.ollamaRunning ? "Ollama Running" : runtimeBusyAction === "start-ollama" ? "Starting Ollama..." : "Start Ollama"}
-                      </button>
+                      <span className="runtime-core-chip">
+                        Ollama Core Runtime: {runtimeStatus?.ollamaInstalled ? (runtimeStatus?.ollamaRunning ? "Running" : "Installing / Starting") : "Provisioning"}
+                      </span>
                       <button
                         type="button"
                         onClick={() => void runRuntimeJob(
@@ -2085,6 +2188,7 @@ function App() {
                         {runtimeBusyAction === "pull-qwen" ? "Pulling Qwen2.5 Coder 7B..." : "Install Coding Fallback Model"}
                       </button>
                     </div>
+                    <small>Ollama is now treated as a core NexusOS runtime and is auto-provisioned by the backend.</small>
                     <small>Installed Ollama models: {runtimeStatus?.ollamaModels.join(", ") || "none yet"}</small>
                     <small>Cookbook models: {cookbookSnapshot.installedModels.join(", ") || "none yet"}</small>
                   </section>
@@ -2171,6 +2275,9 @@ function App() {
                   <button type="button" onClick={playVoicePreview} disabled={!voiceText.trim() || voicePlaying}>
                     {voicePlaying ? "Playing..." : "Play Voice"}
                   </button>
+                  <button type="button" onClick={() => void saveVoiceGeneration()} disabled={!voiceText.trim() || voiceSaveBusy}>
+                    {voiceSaveBusy ? "Saving..." : "Save To Assets"}
+                  </button>
                   <button type="button" className="ghost" onClick={stopVoicePlayback} disabled={!voicePlaying}>
                     Stop
                   </button>
@@ -2208,6 +2315,52 @@ function App() {
                 </section>
               ) : null}
 
+              {runtimeStatus?.piperInstalled ? (
+                <section className="tool-section">
+                  <h3>Piper Voice Preview</h3>
+                  <label>
+                    Voice
+                    <select
+                      value={voicePreviewVoiceId}
+                      onChange={(event) => setVoicePreviewVoiceId(event.target.value)}
+                      disabled={voiceAvailableVoices.length === 0}
+                    >
+                      {voiceAvailableVoices.length === 0 ? <option value="">No voices installed</option> : null}
+                      {voiceAvailableVoices.map((voiceId) => <option key={voiceId} value={voiceId}>{voiceId}</option>)}
+                    </select>
+                  </label>
+                  <small>Select a Piper voice, then click Play Voice to audition it.</small>
+                </section>
+              ) : null}
+
+              {runtimeStatus?.piperInstalled ? (
+                <section className="tool-section">
+                  <h3>Harness Voice Assignments</h3>
+                  <ul className="tool-list">
+                    {(boot?.harnesses ?? []).map((harness) => (
+                      <li key={harness.id} className="harness-voice-row">
+                        <strong>{harness.name}</strong>
+                        <select
+                          value={voiceAssignments[harness.id] ?? ""}
+                          onChange={(event) => {
+                            const next = { ...voiceAssignments, [harness.id]: event.target.value };
+                            if (!event.target.value) {
+                              delete next[harness.id];
+                            }
+                            void saveVoiceAssignments(next);
+                          }}
+                          disabled={voiceAssignmentsBusy || voiceAvailableVoices.length === 0}
+                        >
+                          <option value="">Default voice</option>
+                          {voiceAvailableVoices.map((voiceId) => <option key={voiceId} value={voiceId}>{voiceId}</option>)}
+                        </select>
+                      </li>
+                    ))}
+                  </ul>
+                  <small>Assignments are saved and can be applied automatically for harness-specific speech output.</small>
+                </section>
+              ) : null}
+
               {voiceStatus ? (
                 <section className="tool-card-grid">
                   <article className="tool-card">
@@ -2218,7 +2371,7 @@ function App() {
                   <article className="tool-card">
                     <h3>Piper</h3>
                     <p>{voiceStatus.piperInstalled ? "installed" : "not detected"}</p>
-                    <small>{voiceStatus.piperPath ?? "Install Piper later for offline voices and exportable audio files."}</small>
+                    <small>{voiceStatus.piperPath ?? "Install Piper for offline voices and exportable audio files."}</small>
                   </article>
                 </section>
               ) : null}
@@ -2294,6 +2447,22 @@ function App() {
                 </ul>
               </section>
 
+              <section className="tool-section">
+                <h3>Save Generated Track</h3>
+                <input
+                  type="url"
+                  value={musicSourceUrl}
+                  onChange={(event) => setMusicSourceUrl(event.target.value)}
+                  placeholder="Paste a direct music file URL from AceJAM output"
+                />
+                <div className="tool-action-row">
+                  <button type="button" onClick={() => void saveMusicFromUrl()} disabled={musicSaveBusy || !musicSourceUrl.trim()}>
+                    {musicSaveBusy ? "Saving..." : "Save To Assets"}
+                  </button>
+                </div>
+                <small>Saved tracks are written into the active workspace Assets/music folder.</small>
+              </section>
+
             </div>
           ) : null}
 
@@ -2316,6 +2485,9 @@ function App() {
                 <div className="tool-action-row">
                   <button type="button" onClick={() => void generateImage()} disabled={imageBusy}>
                     {imageBusy ? "Generating..." : "Generate Image"}
+                  </button>
+                  <button type="button" onClick={() => void saveGeneratedImage()} disabled={imageSaveBusy || !imageUrl}>
+                    {imageSaveBusy ? "Saving..." : "Save To Assets"}
                   </button>
                 </div>
               </section>
