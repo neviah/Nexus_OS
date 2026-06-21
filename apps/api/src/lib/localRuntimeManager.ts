@@ -15,8 +15,11 @@ const acejamUrl = `http://127.0.0.1:${acejamPort}`;
 const piperRoot = path.join(runtimeRoot, "piper");
 const piperVoicesRoot = path.join(piperRoot, "voices");
 const defaultPiperVoiceBase = "en_US-lessac-medium";
-const defaultPiperVoiceModel = `https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/${defaultPiperVoiceBase}.onnx`;
-const defaultPiperVoiceConfig = `https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/${defaultPiperVoiceBase}.onnx.json`;
+const bundledPiperVoices = [
+  "en_US-lessac-low",
+  "en_US-lessac-medium",
+  "en_US-lessac-high",
+];
 const piperReleaseZip = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip";
 
 export type RuntimeStatus = {
@@ -33,9 +36,10 @@ export type RuntimeStatus = {
 };
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
-  const ollamaInstalled = await commandWorks("ollama", ["--version"]);
-  const ollamaRunning = ollamaInstalled ? await commandWorks("ollama", ["list"]) : false;
-  const ollamaModels = ollamaRunning ? await getOllamaModels() : [];
+  const ollamaPath = await resolveOllamaPath();
+  const ollamaInstalled = Boolean(ollamaPath);
+  const ollamaRunning = ollamaPath ? await commandWorks(ollamaPath, ["list"]) : false;
+  const ollamaModels = ollamaRunning ? await getOllamaModels(ollamaPath ?? "ollama") : [];
   const acejamInstalled = await acejamLooksInstalled();
   const acejamRunning = await isAceJamRunning();
   const piperPath = await resolvePiperPath();
@@ -163,18 +167,23 @@ export async function installOllama(): Promise<void> {
 }
 
 export async function startOllamaIfNeeded(): Promise<void> {
-  if (await commandWorks("ollama", ["list"])) {
+  const ollamaPath = await resolveOllamaPath();
+  if (!ollamaPath) {
+    throw new Error("Ollama is not installed yet.");
+  }
+
+  if (await commandWorks(ollamaPath, ["list"])) {
     return;
   }
 
-  spawn("ollama", ["serve"], {
+  spawn(ollamaPath, ["serve"], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
   }).unref();
 
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (await commandWorks("ollama", ["list"])) {
+    if (await commandWorks(ollamaPath, ["list"])) {
       return;
     }
     await sleep(1000);
@@ -188,7 +197,12 @@ export async function pullOllamaModel(modelName: string): Promise<void> {
     throw new Error("Model name is required.");
   }
   await startOllamaIfNeeded();
-  await execFileAsync("ollama", ["pull", modelName], {
+  const ollamaPath = await resolveOllamaPath();
+  if (!ollamaPath) {
+    throw new Error("Ollama executable was not found after startup.");
+  }
+
+  await execFileAsync(ollamaPath, ["pull", modelName], {
     windowsHide: true,
     timeout: 60 * 60 * 1000,
     maxBuffer: 1024 * 1024 * 16,
@@ -211,9 +225,9 @@ export async function installPiper(): Promise<void> {
 }
 
 export async function installDefaultPiperVoice(): Promise<void> {
-  await fs.mkdir(piperVoicesRoot, { recursive: true });
-  await downloadFile(defaultPiperVoiceModel, path.join(piperVoicesRoot, `${defaultPiperVoiceBase}.onnx`));
-  await downloadFile(defaultPiperVoiceConfig, path.join(piperVoicesRoot, `${defaultPiperVoiceBase}.onnx.json`));
+  for (const voiceId of bundledPiperVoices) {
+    await installPiperVoice(voiceId);
+  }
 }
 
 export async function synthesizeWithPiper(text: string, voiceId?: string): Promise<{ audioBase64: string; mimeType: string }> {
@@ -294,9 +308,9 @@ export async function resolvePiperPath(): Promise<string | null> {
   return null;
 }
 
-async function getOllamaModels(): Promise<string[]> {
+async function getOllamaModels(ollamaCommand: string): Promise<string[]> {
   try {
-    const { stdout } = await execFileAsync("ollama", ["list"], { windowsHide: true, timeout: 10000 });
+    const { stdout } = await execFileAsync(ollamaCommand, ["list"], { windowsHide: true, timeout: 10000 });
     return stdout
       .split(/\r?\n/)
       .slice(1)
@@ -307,6 +321,48 @@ async function getOllamaModels(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+async function resolveOllamaPath(): Promise<string | null> {
+  const candidates = process.platform === "win32"
+    ? [
+      "ollama.exe",
+      path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Ollama", "ollama.exe"),
+      path.join(process.env.ProgramFiles ?? "", "Ollama", "ollama.exe"),
+      path.join(process.env["ProgramFiles(x86)"] ?? "", "Ollama", "ollama.exe"),
+    ]
+    : ["ollama", "/usr/local/bin/ollama", "/usr/bin/ollama"];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (path.isAbsolute(candidate)) {
+      try {
+        await fs.access(candidate);
+        return candidate;
+      } catch {
+        // continue
+      }
+    } else if (await commandWorks(candidate, ["--version"])) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function installPiperVoice(voiceId: string): Promise<void> {
+  const match = /^([a-z]{2})_([A-Z]{2})-([a-z0-9]+)-(low|medium|high)$/.exec(voiceId);
+  if (!match) {
+    throw new Error(`Unsupported Piper voice id: ${voiceId}`);
+  }
+
+  const [, lang, locale, speaker, quality] = match;
+  const modelUrl = `https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang}/${lang}_${locale}/${speaker}/${quality}/${voiceId}.onnx`;
+  const configUrl = `${modelUrl}.json`;
+
+  await fs.mkdir(piperVoicesRoot, { recursive: true });
+  await downloadFile(modelUrl, path.join(piperVoicesRoot, `${voiceId}.onnx`));
+  await downloadFile(configUrl, path.join(piperVoicesRoot, `${voiceId}.onnx.json`));
 }
 
 async function getInstalledPiperVoices(): Promise<string[]> {

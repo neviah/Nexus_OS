@@ -92,7 +92,7 @@ export async function getVoiceStatus(): Promise<VoiceStatus> {
     "Browser speech works immediately for quick playback inside NexusOS.",
     runtimeStatus.piperPath
       ? `Piper detected at ${runtimeStatus.piperPath}. Local offline voice generation is available for NexusOS voice playback.`
-      : "Piper not detected. NexusOS should install Piper so better offline voices and file generation are available.",
+      : "Piper is being provisioned as a core NexusOS runtime.",
   ];
 
   return {

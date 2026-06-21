@@ -601,6 +601,68 @@ button:disabled {
   min-width: 220px;
 }
 
+.cookbook-spec-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cookbook-spec-row span {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  background: rgba(18, 29, 35, 0.45);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 0.72rem;
+  color: var(--ink-2);
+}
+
+.cookbook-recommendation-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.cookbook-recommendation-line {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 8px;
+  background: rgba(18, 29, 35, 0.52);
+  padding: 6px 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.cookbook-recommendation-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cookbook-recommendation-main small {
+  color: var(--ink-3);
+  font-size: 0.72rem;
+}
+
+.cookbook-recommendation-symbol {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 22px;
+  border: 1px solid rgba(47, 71, 79, 0.45);
+  border-radius: 6px;
+  font-size: 0.72rem;
+  color: var(--ink-3);
+}
+
+.cookbook-recommendation-actions {
+  flex-wrap: nowrap;
+}
+
 .tool-wrap-row {
   flex-wrap: wrap;
 }

@@ -198,6 +198,12 @@ type CookbookSnapshot = {
   scannedAt: string;
 };
 
+const RECOMMENDED_OLLAMA_MODELS: Record<string, string> = {
+  "coding-qwen3-coder-30b": "qwen2.5-coder:32b",
+  "coding-qwen2-5-coder-7b": "qwen2.5-coder:7b",
+  "chat-llama3-2-3b": "llama3.2:3b",
+};
+
 type VoiceStatus = {
   piperInstalled: boolean;
   piperPath: string | null;
@@ -949,6 +955,55 @@ function App() {
       return null;
     }
     return { providerId: trimmedProvider, model };
+  }
+
+  function recommendationSymbol(recommendation: CookbookRecommendation): string {
+    if (recommendation.category === "coding") return "</>";
+    if (recommendation.category === "chat") return "[]";
+    return "()";
+  }
+
+  function recommendationModelName(recommendation: CookbookRecommendation): string | null {
+    return RECOMMENDED_OLLAMA_MODELS[recommendation.id] ?? null;
+  }
+
+  function findActiveModelPullJob(model: string): RuntimeJob | null {
+    return runtimeJobs.find((job) =>
+      job.action === "pull-ollama-model"
+      && job.model === model
+      && (job.status === "queued" || job.status === "running" || job.status === "canceling")
+    ) ?? null;
+  }
+
+  async function runRecommendationAction(recommendation: CookbookRecommendation) {
+    if (recommendation.runtime !== "ollama") {
+      setStatusMessage("This recommendation is provisioned by core runtime setup.");
+      return;
+    }
+
+    const model = recommendationModelName(recommendation);
+    if (!model) {
+      setStatusMessage("No install target mapped for this recommendation yet.");
+      return;
+    }
+
+    const activePull = findActiveModelPullJob(model);
+    if (activePull) {
+      await cancelRuntimeJob(activePull);
+      return;
+    }
+
+    if (runtimeStatus?.ollamaModels.includes(model)) {
+      setStatusMessage(`${model} is already installed.`);
+      return;
+    }
+
+    await runRuntimeJob(
+      `pull-${model}`,
+      "pull-ollama-model",
+      `${recommendation.name} installed into Ollama.`,
+      model,
+    );
   }
 
   function getFallbackRowHealth(row: NxFallbackRow): { label: string; tone: "ok" | "warn" | "bad" | "idle" } {
@@ -2170,74 +2225,50 @@ function App() {
               ) : cookbookSnapshot ? (
                 <>
                   <section className="tool-section">
-                    <h3>Bundled runtimes</h3>
-                    <div className="tool-action-row tool-wrap-row">
-                      <span className="runtime-core-chip">
-                        Ollama Core Runtime: {runtimeStatus?.ollamaInstalled ? (runtimeStatus?.ollamaRunning ? "Running" : "Installing / Starting") : "Provisioning"}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => void runRuntimeJob(
-                          "pull-qwen",
-                          "pull-ollama-model",
-                          "Qwen2.5 Coder 7B pulled into Ollama.",
-                          "qwen2.5-coder:7b",
-                        )}
-                        disabled={runtimeBusyAction !== null || !runtimeStatus?.ollamaInstalled}
-                      >
-                        {runtimeBusyAction === "pull-qwen" ? "Pulling Qwen2.5 Coder 7B..." : "Install Coding Fallback Model"}
-                      </button>
+                    <h3>System Snapshot</h3>
+                    <div className="cookbook-spec-row">
+                      <span>CPU {cookbookSnapshot.machine.logicalCores}c</span>
+                      <span>RAM {cookbookSnapshot.machine.totalRamGb}G ({cookbookSnapshot.machine.freeRamGb}G free)</span>
+                      <span>Disk {cookbookSnapshot.machine.freeDiskGb ?? "?"}G free</span>
+                      <span>GPU {(cookbookSnapshot.machine.gpuNames[0] ?? "none").replace(/NVIDIA|AMD|Intel/gi, "").trim() || (cookbookSnapshot.machine.gpuNames[0] ?? "none")}</span>
+                      <span>Ollama {runtimeStatus?.ollamaInstalled ? (runtimeStatus?.ollamaRunning ? "up" : "booting") : "provisioning"}</span>
+                      <span>Piper {runtimeStatus?.piperInstalled ? "up" : "provisioning"}</span>
                     </div>
-                    <small>Ollama is now treated as a core NexusOS runtime and is auto-provisioned by the backend.</small>
-                    <small>Installed Ollama models: {runtimeStatus?.ollamaModels.join(", ") || "none yet"}</small>
-                    <small>Cookbook models: {cookbookSnapshot.installedModels.join(", ") || "none yet"}</small>
-                  </section>
-
-                  <section className="tool-card-grid">
-                    <article className="tool-card">
-                      <h3>Machine</h3>
-                      <small>{cookbookSnapshot.machine.platform} · {cookbookSnapshot.machine.arch}</small>
-                      <p>{cookbookSnapshot.machine.cpuModel}</p>
-                      <small>{cookbookSnapshot.machine.logicalCores} logical cores</small>
-                    </article>
-                    <article className="tool-card">
-                      <h3>Memory</h3>
-                      <p>{cookbookSnapshot.machine.totalRamGb} GB total</p>
-                      <small>{cookbookSnapshot.machine.freeRamGb} GB free now</small>
-                    </article>
-                    <article className="tool-card">
-                      <h3>Storage</h3>
-                      <p>{cookbookSnapshot.machine.freeDiskGb ?? "Unknown"} GB free</p>
-                      <small>{cookbookSnapshot.workspace?.path ?? "No active workspace path"}</small>
-                    </article>
-                    <article className="tool-card">
-                      <h3>Runtimes</h3>
-                      <p>Ollama: {cookbookSnapshot.runtimes.ollamaInstalled ? "installed" : "missing"}</p>
-                      <small>Piper: {cookbookSnapshot.runtimes.piperInstalled ? "installed" : "missing"}</small>
-                    </article>
-                  </section>
-
-                  <section className="tool-section">
-                    <h3>Detected GPUs</h3>
-                    <ul className="tool-list">
-                      {(cookbookSnapshot.machine.gpuNames.length > 0 ? cookbookSnapshot.machine.gpuNames : ["No dedicated GPU detected"]).map((gpu) => (
-                        <li key={gpu}>{gpu}</li>
-                      ))}
-                    </ul>
+                    <small>Models installed: {runtimeStatus?.ollamaModels.join(", ") || "none yet"}</small>
                   </section>
 
                   <section className="tool-section">
                     <h3>Recommended local models</h3>
-                    <ul className="recommendation-list">
+                    <ul className="cookbook-recommendation-lines">
                       {cookbookSnapshot.recommendations.map((item) => (
-                        <li key={item.id}>
-                          <div className="recommendation-head">
+                        <li key={item.id} className="cookbook-recommendation-line">
+                          <div className="cookbook-recommendation-main">
+                            <span className="cookbook-recommendation-symbol">{recommendationSymbol(item)}</span>
                             <strong>{item.name}</strong>
-                            <span>{item.category} · {item.size} · {item.runtime}</span>
+                            <small>{item.size} · {item.runtime}</small>
                           </div>
-                          <p>{item.summary}</p>
-                          <small>{item.fitReason}</small>
-                          <small>{item.installHint}</small>
+
+                          <div className="tool-action-row cookbook-recommendation-actions">
+                            {item.runtime === "ollama" ? (
+                              <button
+                                type="button"
+                                onClick={() => void runRecommendationAction(item)}
+                                disabled={runtimeBusyAction !== null || !runtimeStatus?.ollamaInstalled}
+                              >
+                                {(() => {
+                                  const model = recommendationModelName(item);
+                                  if (!model) return "Install";
+                                  const activePull = findActiveModelPullJob(model);
+                                  if (activePull) return activePull.status === "canceling" ? "Canceling..." : "Pause";
+                                  if (runtimeStatus?.ollamaModels.includes(model)) return "Installed";
+                                  return "Install";
+                                })()}
+                              </button>
+                            ) : (
+                              <button type="button" className="ghost" disabled>Managed</button>
+                            )}
+                            <button type="button" className="ghost" onClick={() => setCookbookTab("jobs")}>Jobs</button>
+                          </div>
                         </li>
                       ))}
                     </ul>
@@ -2284,37 +2315,6 @@ function App() {
                 </div>
               </section>
 
-              {voiceStatus ? (
-                <section className="tool-section">
-                  <h3>Voice runtime setup</h3>
-                  <div className="tool-action-row tool-wrap-row">
-                    <button
-                      type="button"
-                      onClick={() => void runRuntimeJob(
-                        "install-piper",
-                        "install-piper",
-                        "Piper installed.",
-                      )}
-                      disabled={runtimeBusyAction !== null || runtimeStatus?.piperInstalled}
-                    >
-                      {runtimeStatus?.piperInstalled ? "Piper Installed" : runtimeBusyAction === "install-piper" ? "Installing Piper..." : "Install Piper"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void runRuntimeJob(
-                        "install-piper-voice",
-                        "install-default-piper-voice",
-                        "Default Piper voice installed.",
-                      )}
-                      disabled={runtimeBusyAction !== null || !runtimeStatus?.piperInstalled || runtimeStatus?.defaultVoiceInstalled}
-                    >
-                      {runtimeStatus?.defaultVoiceInstalled ? "Default Voice Installed" : runtimeBusyAction === "install-piper-voice" ? "Installing Default Voice..." : "Install Default Voice"}
-                    </button>
-                  </div>
-                  <small>Installed Piper voices: {runtimeStatus?.piperVoices.join(", ") || "none yet"}</small>
-                </section>
-              ) : null}
-
               {runtimeStatus?.piperInstalled ? (
                 <section className="tool-section">
                   <h3>Piper Voice Preview</h3>
@@ -2329,6 +2329,7 @@ function App() {
                       {voiceAvailableVoices.map((voiceId) => <option key={voiceId} value={voiceId}>{voiceId}</option>)}
                     </select>
                   </label>
+                  <small>Installed Piper voices: {runtimeStatus?.piperVoices.join(", ") || "none yet"}</small>
                   <small>Select a Piper voice, then click Play Voice to audition it.</small>
                 </section>
               ) : null}

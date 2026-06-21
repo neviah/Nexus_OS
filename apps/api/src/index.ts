@@ -101,7 +101,6 @@ const runtimeJobsPath = path.join(getRootDir(), "data", "runtime-jobs.local.json
 const piperAssignmentsPath = path.join(getRootDir(), "data", "piper-voice-assignments.local.json");
 let runtimeJobsLoaded = false;
 let runtimeJobPersistQueue: Promise<void> = Promise.resolve();
-let coreRuntimeProvisionAttempted = false;
 
 function toRuntimeJobPayload(limit = 80): RuntimeJob[] {
   return Array.from(runtimeJobs.values())
@@ -308,24 +307,32 @@ function findActiveRuntimeJobByAction(action: RuntimeJobAction): RuntimeJob | un
 }
 
 async function ensureCoreRuntimeProvisioning(): Promise<void> {
-  if (coreRuntimeProvisionAttempted) {
-    return;
-  }
-  coreRuntimeProvisionAttempted = true;
-
   await loadRuntimeJobsFromDisk();
   const status = await getRuntimeStatus();
-  if (status.ollamaInstalled && status.ollamaRunning) {
+  if (!status.ollamaInstalled || !status.ollamaRunning) {
+    if (!findActiveRuntimeJobByAction("install-ollama")) {
+      const ollamaJob = createRuntimeJob("install-ollama");
+      appendRuntimeJobLog(ollamaJob, "Queued by NexusOS core runtime provisioning.");
+      startRuntimeJob(ollamaJob);
+    }
+  }
+
+  if (!status.piperInstalled) {
+    if (!findActiveRuntimeJobByAction("install-piper")) {
+      const piperJob = createRuntimeJob("install-piper");
+      appendRuntimeJobLog(piperJob, "Queued by NexusOS core runtime provisioning.");
+      startRuntimeJob(piperJob);
+    }
     return;
   }
 
-  if (findActiveRuntimeJobByAction("install-ollama")) {
-    return;
+  if (!status.defaultVoiceInstalled || status.piperVoices.length < 3) {
+    if (!findActiveRuntimeJobByAction("install-default-piper-voice")) {
+      const voiceJob = createRuntimeJob("install-default-piper-voice");
+      appendRuntimeJobLog(voiceJob, "Queued by NexusOS core runtime provisioning.");
+      startRuntimeJob(voiceJob);
+    }
   }
-
-  const coreJob = createRuntimeJob("install-ollama");
-  appendRuntimeJobLog(coreJob, "Queued by NexusOS core runtime provisioning.");
-  startRuntimeJob(coreJob);
 }
 
 async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
@@ -729,6 +736,7 @@ app.post("/api/tools/runtimes/ollama/pull", async (req, res) => {
 });
 
 app.get("/api/tools/voice/status", async (_req, res) => {
+  void ensureCoreRuntimeProvisioning();
   const status = await getVoiceStatus();
   res.json(status);
 });
