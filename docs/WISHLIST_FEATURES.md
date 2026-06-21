@@ -245,7 +245,10 @@ Priority: P1 (low effort, high signal quality improvement)
 - Flux and/or Ideogram integration behind tool cards.
 
 2. Cookbook feature
-- Saved prompt/recipe system per workspace/harness.
+- Odysseus-style cookbook flow for local model fallback.
+- Scan machine capabilities and recommend the best local models a user can download and run.
+- Provide one-click install/setup guidance when free cloud tokens run out.
+- Include saved prompt/recipe system per workspace/harness.
 
 3. Video generation
 - Start with external API connector interface and job queue.

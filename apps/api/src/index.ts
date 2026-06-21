@@ -35,6 +35,7 @@ import {
   upsertRouterProvider,
 } from "./lib/nexusRouter.js";
 import { ensureManagedHarnesses, getManagedHarnessRuntimeStatus } from "./lib/managedHarnessRuntime.js";
+import { buildCookbookSnapshot, getVoiceStatus } from "./lib/toolAdvisor.js";
 import {
   appendHarnessRun,
   deleteHarnessSchedule,
@@ -232,6 +233,8 @@ app.get("/api/bootstrap", async (_req, res) => {
         name: "Nexus Router",
         status: (state.nexusRouter?.providers ?? []).some((p) => p.enabled) ? "online" : "setup-required",
       },
+      { id: "cookbook", name: "Cookbook", status: "online" },
+      { id: "voice-studio", name: "Voice Studio", status: "online" },
       { id: "image-generator", name: "Image Generator", status: "offline" },
       { id: "video-generator", name: "Video Generator", status: "offline" },
     ],
@@ -248,6 +251,17 @@ app.get("/api/harnesses", async (_req, res) => {
 
 app.get("/api/harnesses/runtime", (_req, res) => {
   res.json({ runtimes: getManagedHarnessRuntimeStatus() });
+});
+
+app.get("/api/tools/cookbook/scan", async (_req, res) => {
+  const state = await readSystemState();
+  const snapshot = await buildCookbookSnapshot(state);
+  res.json(snapshot);
+});
+
+app.get("/api/tools/voice/status", async (_req, res) => {
+  const status = await getVoiceStatus();
+  res.json(status);
 });
 
 app.get("/api/harnesses/conformance", async (_req, res) => {

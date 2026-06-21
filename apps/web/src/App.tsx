@@ -166,6 +166,45 @@ type WorkspaceFolderEntry = {
   path: string;
 };
 
+type CookbookRecommendation = {
+  id: string;
+  name: string;
+  category: "coding" | "chat" | "voice";
+  size: "small" | "medium" | "large";
+  runtime: "ollama" | "llama.cpp" | "piper";
+  summary: string;
+  fitReason: string;
+  installHint: string;
+};
+
+type CookbookSnapshot = {
+  workspace: { id: string; path: string } | null;
+  machine: {
+    platform: string;
+    arch: string;
+    cpuModel: string;
+    logicalCores: number;
+    totalRamGb: number;
+    freeRamGb: number;
+    freeDiskGb: number | null;
+    gpuNames: string[];
+  };
+  runtimes: {
+    ollamaInstalled: boolean;
+    piperInstalled: boolean;
+  };
+  recommendations: CookbookRecommendation[];
+  scannedAt: string;
+};
+
+type VoiceStatus = {
+  piperInstalled: boolean;
+  piperPath: string | null;
+  browserSpeechRecommended: boolean;
+  notes: string[];
+  scannedAt: string;
+};
+
 // ── Nexus Router types ──────────────────────────────────────────────────────
 type NxProvider = {
   id: string;
@@ -240,11 +279,62 @@ function App() {
   const [workspaceBrowseParentPath, setWorkspaceBrowseParentPath] = useState<string | null>(null);
   const [workspaceBrowseFolders, setWorkspaceBrowseFolders] = useState<WorkspaceFolderEntry[]>([]);
   const [workspaceBrowseBusy, setWorkspaceBrowseBusy] = useState(false);
+  const [cookbookSnapshot, setCookbookSnapshot] = useState<CookbookSnapshot | null>(null);
+  const [cookbookBusy, setCookbookBusy] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceText, setVoiceText] = useState("Nexus OS voice check. This is your text to speech tool.");
+  const [voicePlaying, setVoicePlaying] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toolsOpen, setToolsOpen] = useState(true);
   const [startupChecking, setStartupChecking] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
+  
+  async function loadCookbookSnapshot() {
+    setCookbookBusy(true);
+    const response = await fetch("/api/tools/cookbook/scan");
+    if (!response.ok) {
+      setCookbookBusy(false);
+      setStatusMessage("Failed to scan machine for cookbook recommendations");
+      return;
+    }
+    const payload = (await response.json()) as CookbookSnapshot;
+    setCookbookSnapshot(payload);
+    setCookbookBusy(false);
+  }
+  
+  async function loadVoiceStatus() {
+    setVoiceBusy(true);
+    const response = await fetch("/api/tools/voice/status");
+    if (!response.ok) {
+      setVoiceBusy(false);
+      setStatusMessage("Failed to load voice tool status");
+      return;
+    }
+    const payload = (await response.json()) as VoiceStatus;
+    setVoiceStatus(payload);
+    setVoiceBusy(false);
+  }
+  
+  function stopVoicePlayback() {
+    window.speechSynthesis.cancel();
+    setVoicePlaying(false);
+  }
+  
+  function playVoicePreview() {
+    const text = voiceText.trim();
+    if (!text) {
+      return;
+    }
+  
+    stopVoicePlayback();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.onend = () => setVoicePlaying(false);
+    utterance.onerror = () => setVoicePlaying(false);
+    setVoicePlaying(true);
+    window.speechSynthesis.speak(utterance);
+  }
 
   // Nexus Router state
   const [nxProviders, setNxProviders] = useState<NxProvider[]>([]);
@@ -617,6 +707,12 @@ function App() {
       void loadHarnessThreads(selectedPane.id);
       void loadHarnessSchedules(selectedPane.id);
       void loadHarnessRuns(selectedPane.id);
+    }
+    if (selectedPane.type === "tool" && selectedPane.id === "cookbook") {
+      void loadCookbookSnapshot();
+    }
+    if (selectedPane.type === "tool" && selectedPane.id === "voice-studio") {
+      void loadVoiceStatus();
     }
   }, [selectedPane, boot?.activeWorkspaceId]);
 
@@ -1479,7 +1575,135 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && selectedPane.id !== "nexus-router" ? (
+          {selectedPane.type === "tool" && selectedPane.id === "cookbook" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Cookbook</h2>
+                  <p className="subtitle">Scan this machine and recommend the best local fallback models when free cloud tokens run out.</p>
+                </div>
+                <button type="button" onClick={() => void loadCookbookSnapshot()} disabled={cookbookBusy}>
+                  {cookbookBusy ? "Scanning..." : "Scan Machine"}
+                </button>
+              </div>
+
+              {cookbookSnapshot ? (
+                <>
+                  <section className="tool-card-grid">
+                    <article className="tool-card">
+                      <h3>Machine</h3>
+                      <small>{cookbookSnapshot.machine.platform} · {cookbookSnapshot.machine.arch}</small>
+                      <p>{cookbookSnapshot.machine.cpuModel}</p>
+                      <small>{cookbookSnapshot.machine.logicalCores} logical cores</small>
+                    </article>
+                    <article className="tool-card">
+                      <h3>Memory</h3>
+                      <p>{cookbookSnapshot.machine.totalRamGb} GB total</p>
+                      <small>{cookbookSnapshot.machine.freeRamGb} GB free now</small>
+                    </article>
+                    <article className="tool-card">
+                      <h3>Storage</h3>
+                      <p>{cookbookSnapshot.machine.freeDiskGb ?? "Unknown"} GB free</p>
+                      <small>{cookbookSnapshot.workspace?.path ?? "No active workspace path"}</small>
+                    </article>
+                    <article className="tool-card">
+                      <h3>Runtimes</h3>
+                      <p>Ollama: {cookbookSnapshot.runtimes.ollamaInstalled ? "installed" : "missing"}</p>
+                      <small>Piper: {cookbookSnapshot.runtimes.piperInstalled ? "installed" : "missing"}</small>
+                    </article>
+                  </section>
+
+                  <section className="tool-section">
+                    <h3>Detected GPUs</h3>
+                    <ul className="tool-list">
+                      {(cookbookSnapshot.machine.gpuNames.length > 0 ? cookbookSnapshot.machine.gpuNames : ["No dedicated GPU detected"]).map((gpu) => (
+                        <li key={gpu}>{gpu}</li>
+                      ))}
+                    </ul>
+                  </section>
+
+                  <section className="tool-section">
+                    <h3>Recommended local models</h3>
+                    <ul className="recommendation-list">
+                      {cookbookSnapshot.recommendations.map((item) => (
+                        <li key={item.id}>
+                          <div className="recommendation-head">
+                            <strong>{item.name}</strong>
+                            <span>{item.category} · {item.size} · {item.runtime}</span>
+                          </div>
+                          <p>{item.summary}</p>
+                          <small>{item.fitReason}</small>
+                          <small>{item.installHint}</small>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                </>
+              ) : (
+                <div className="placeholder-view">
+                  <h2>Cookbook</h2>
+                  <p>Run a machine scan to generate local model recommendations.</p>
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {selectedPane.type === "tool" && selectedPane.id === "voice-studio" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Voice Studio</h2>
+                  <p className="subtitle">Immediate text-to-speech playback in NexusOS, with Piper readiness for better offline voices later.</p>
+                </div>
+                <button type="button" onClick={() => void loadVoiceStatus()} disabled={voiceBusy}>
+                  {voiceBusy ? "Checking..." : "Refresh Voice Status"}
+                </button>
+              </div>
+
+              <section className="tool-section">
+                <textarea
+                  value={voiceText}
+                  onChange={(event) => setVoiceText(event.target.value)}
+                  rows={6}
+                  placeholder="Type text to speak..."
+                />
+                <div className="tool-action-row">
+                  <button type="button" onClick={playVoicePreview} disabled={!voiceText.trim() || voicePlaying}>
+                    {voicePlaying ? "Playing..." : "Play Voice"}
+                  </button>
+                  <button type="button" className="ghost" onClick={stopVoicePlayback} disabled={!voicePlaying}>
+                    Stop
+                  </button>
+                </div>
+              </section>
+
+              {voiceStatus ? (
+                <section className="tool-card-grid">
+                  <article className="tool-card">
+                    <h3>Browser speech</h3>
+                    <p>{voiceStatus.browserSpeechRecommended ? "recommended now" : "unavailable"}</p>
+                    <small>Runs immediately in the app UI with no install.</small>
+                  </article>
+                  <article className="tool-card">
+                    <h3>Piper</h3>
+                    <p>{voiceStatus.piperInstalled ? "installed" : "not detected"}</p>
+                    <small>{voiceStatus.piperPath ?? "Install Piper later for offline voices and exportable audio files."}</small>
+                  </article>
+                </section>
+              ) : null}
+
+              {voiceStatus ? (
+                <section className="tool-section">
+                  <h3>Notes</h3>
+                  <ul className="tool-list">
+                    {voiceStatus.notes.map((note) => <li key={note}>{note}</li>)}
+                  </ul>
+                </section>
+              ) : null}
+            </div>
+          ) : null}
+
+          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio"].includes(selectedPane.id) ? (
             <div className="placeholder-view">
               <h2>{boot?.tools.find((tool) => tool.id === selectedPane.id)?.name ?? "Tool"}</h2>
               <p>Tool plugin slot ready. Hook this panel to a future backend module.</p>

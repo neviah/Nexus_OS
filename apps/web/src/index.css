@@ -411,6 +411,86 @@ button:disabled {
   min-width: 0;
 }
 
+.tool-console {
+  overflow: auto;
+}
+
+.tool-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.tool-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.tool-card,
+.tool-section,
+.recommendation-list li {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 10px;
+  background: rgba(18, 29, 35, 0.42);
+  padding: 10px;
+}
+
+.tool-card h3,
+.tool-section h3 {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+
+.tool-card p,
+.tool-section p,
+.recommendation-list p {
+  margin: 0 0 6px;
+}
+
+.tool-card small,
+.tool-section small,
+.recommendation-list small {
+  display: block;
+  color: var(--ink-3);
+}
+
+.tool-section {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-list,
+.recommendation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.recommendation-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.recommendation-head span {
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.tool-action-row {
+  display: flex;
+  gap: 8px;
+}
+
 .automation-panel {
   display: grid;
   gap: 8px;
