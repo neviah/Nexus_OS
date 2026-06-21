@@ -12,6 +12,14 @@ Current base includes:
 - Workspace picker with external folder support.
 - Active workspace context propagated to all harness calls.
 
+## Product Decisions Locked
+
+- Ollama will be a mandatory bundled local runtime for NexusOS. Users should not need separate external setup.
+- Piper will be a mandatory bundled local TTS runtime for NexusOS. Browser speech remains the default fallback until a Piper voice model is downloaded.
+- Image generation should start with FLUX as the first simple user-facing path.
+- Ideogram is interesting, but should wait until after a simple FLUX-first tool exists.
+- Music generation should prefer embedding an existing local web UI when possible, to reduce Nexus-specific frontend work.
+
 ## External Repo Evaluation
 
 ### 1) cheahjs/free-llm-api-resources
@@ -236,24 +244,36 @@ Priority: P1 (low effort, high signal quality improvement)
 - Keep disabled by default and independently diagnosable.
 
 5. TTS Voice Output (Piper)
-- Add local/offline TTS output for harness responses.
-- Start with one-click local voice profile and playback controls.
+- Bundle Piper with NexusOS so there is no separate user install path.
+- Browser speech is the default immediate fallback until a Piper voice is downloaded.
+- Add local/offline TTS output for harness responses and file export.
+
+6. Local Runtime Foundation
+- Bundle Ollama with NexusOS so local model fallback works out of the box.
+- Cookbook should detect bundled Ollama first, then recommend which model to pull.
+- No external setup should be required for local chat/coding fallback.
 
 ### Phase B: Creator tools
 
 1. Image generation
-- Flux and/or Ideogram integration behind tool cards.
+- FLUX first. Keep setup simple and approachable for non-technical users.
+- Use FLUX as the default image-generation tool card before adding advanced design workflows.
 
-2. Cookbook feature
+2. Advanced image generation
+- Evaluate Ideogram 4 after FLUX is stable.
+- Ideogram 4 is powerful, but it expects structured JSON prompting and has more setup complexity.
+- `ideogrammar` is a strong advanced-editor reference, but it is better as a later "pro mode" than a first image tool for simple users.
+
+3. Cookbook feature
 - Odysseus-style cookbook flow for local model fallback.
 - Scan machine capabilities and recommend the best local models a user can download and run.
-- Provide one-click install/setup guidance when free cloud tokens run out.
+- Prefer bundled Ollama/Piper runtimes and provide one-click model download/setup guidance when free cloud tokens run out.
 - Include saved prompt/recipe system per workspace/harness.
 
-3. Video generation
+4. Video generation
 - Start with external API connector interface and job queue.
 
-4. Social Media Center (YouTube first)
+5. Social Media Center (YouTube first)
 - YouTube automation tool card using free Gemini AI Studio tier.
 - Credential isolation, opt-in only, no impact to core harness routing.
 
@@ -261,6 +281,9 @@ Priority: P1 (low effort, high signal quality improvement)
 
 1. 3D model generation
 2. Music generation
+- Preferred first path: embed StableDAW / theDAW style local web UI rather than building a custom Nexus music UI from scratch.
+- StableDAW is attractive because it already ships a local web interface, a small default model path, and an HTTP API.
+- Treat it as an optional heavyweight tool because install size and VRAM requirements are materially larger than chat/TTS.
 
 ### Phase D: Game Creator tools
 
