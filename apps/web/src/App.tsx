@@ -219,6 +219,18 @@ type RuntimeStatus = {
   defaultVoiceInstalled: boolean;
 };
 
+type RuntimeJob = {
+  id: string;
+  action: string;
+  model?: string;
+  status: "queued" | "running" | "completed" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  logs: string[];
+  error?: string;
+};
+
 // ── Nexus Router types ──────────────────────────────────────────────────────
 type NxProvider = {
   id: string;
@@ -325,6 +337,7 @@ function App() {
   const [voicePlaying, setVoicePlaying] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeBusyAction, setRuntimeBusyAction] = useState<string | null>(null);
+  const [runtimeJobs, setRuntimeJobs] = useState<RuntimeJob[]>([]);
   const [imagePrompt, setImagePrompt] = useState("Cinematic cyberpunk skyline at sunrise, ultra detailed, volumetric light");
   const [imageBusy, setImageBusy] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -356,6 +369,15 @@ function App() {
     const payload = (await response.json()) as RuntimeStatus;
     setRuntimeStatus(payload);
   }
+
+  async function loadRuntimeJobs() {
+    const response = await fetch("/api/tools/runtimes/jobs");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as { jobs: RuntimeJob[] };
+    setRuntimeJobs(payload.jobs ?? []);
+  }
   
   async function loadVoiceStatus() {
     setVoiceBusy(true);
@@ -371,19 +393,53 @@ function App() {
     setVoiceBusy(false);
   }
 
-  async function runRuntimeAction(actionId: string, request: () => Promise<Response>, successMessage: string) {
+  async function runRuntimeJob(actionId: string, action: string, successMessage: string, model?: string) {
     setRuntimeBusyAction(actionId);
-    const response = await request();
+    const response = await fetch("/api/tools/runtimes/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, model }),
+    });
+
     if (!response.ok) {
       const payload = (await response.json()) as { error?: string };
-      setStatusMessage(payload.error ?? "Runtime action failed");
+      setStatusMessage(payload.error ?? "Runtime job failed to start");
       setRuntimeBusyAction(null);
       return;
     }
 
-    await Promise.all([loadRuntimeStatus(), loadCookbookSnapshot(), loadVoiceStatus()]);
-    setStatusMessage(successMessage);
-    setRuntimeBusyAction(null);
+    const payload = (await response.json()) as { job: RuntimeJob };
+    const jobId = payload.job.id;
+    setStatusMessage(`${action} queued...`);
+    await loadRuntimeJobs();
+
+    while (true) {
+      const poll = await fetch(`/api/tools/runtimes/jobs/${encodeURIComponent(jobId)}`);
+      if (!poll.ok) {
+        setStatusMessage("Runtime job disappeared before completion.");
+        setRuntimeBusyAction(null);
+        return;
+      }
+
+      const pollPayload = (await poll.json()) as { job: RuntimeJob };
+      const job = pollPayload.job;
+      await loadRuntimeJobs();
+
+      if (job.status === "completed") {
+        await Promise.all([loadRuntimeStatus(), loadCookbookSnapshot(), loadVoiceStatus(), loadRuntimeJobs()]);
+        setStatusMessage(successMessage);
+        setRuntimeBusyAction(null);
+        return;
+      }
+
+      if (job.status === "failed") {
+        setStatusMessage(job.error ?? "Runtime job failed");
+        setRuntimeBusyAction(null);
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
   }
   
   function stopVoicePlayback() {
@@ -679,7 +735,7 @@ function App() {
     });
   }
 
-  function getProviderApiKeyUrl(provider: NxProviderView): string | null {
+  function getProviderApiKeyUrl(provider: { id: string; name: string; baseUrl?: string }): string | null {
     const id = provider.id.toLowerCase();
     if (PROVIDER_API_KEY_LINKS[id]) {
       return PROVIDER_API_KEY_LINKS[id];
@@ -934,14 +990,33 @@ function App() {
     }
     if (selectedPane.type === "tool" && selectedPane.id === "cookbook") {
       void loadCookbookSnapshot();
+      void loadRuntimeJobs();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "voice-studio") {
       void loadVoiceStatus();
+      void loadRuntimeJobs();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "music-generator") {
       void loadRuntimeStatus();
+      void loadRuntimeJobs();
     }
   }, [selectedPane, boot?.activeWorkspaceId]);
+
+  useEffect(() => {
+    const hasActive = runtimeJobs.some((job) => job.status === "queued" || job.status === "running");
+    if (!hasActive) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadRuntimeJobs();
+      void loadRuntimeStatus();
+    }, 2000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [runtimeJobs]);
 
   function getHarnessSubTab(harnessId: string): HarnessSubTab {
     return harnessSubTabByHarness[harnessId] ?? "chats";
@@ -1589,15 +1664,30 @@ function App() {
                 <form className="nxr-provider-form" onSubmit={(event) => void nxSaveProvider(event)}>
                   <label>
                     Preset
-                    <select
-                      value={nxProviderForm.preset}
-                      onChange={(event) => {
-                        const preset = PRESET_PROVIDERS.find((p) => p.id === event.target.value) ?? PRESET_PROVIDERS[0];
-                        setNxProviderForm((c) => ({ ...c, preset: preset.id, id: preset.id, name: preset.name, type: preset.type, baseUrl: preset.baseUrl, defaultModel: preset.defaultModel }));
-                      }}
-                    >
-                      {PRESET_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
+                    <div className="tool-action-row tool-wrap-row">
+                      <select
+                        value={nxProviderForm.preset}
+                        onChange={(event) => {
+                          const preset = PRESET_PROVIDERS.find((p) => p.id === event.target.value) ?? PRESET_PROVIDERS[0];
+                          setNxProviderForm((c) => ({ ...c, preset: preset.id, id: preset.id, name: preset.name, type: preset.type, baseUrl: preset.baseUrl, defaultModel: preset.defaultModel }));
+                        }}
+                      >
+                        {PRESET_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                      {getProviderApiKeyUrl({ id: nxProviderForm.id, name: nxProviderForm.name, baseUrl: nxProviderForm.baseUrl }) ? (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => window.open(
+                            getProviderApiKeyUrl({ id: nxProviderForm.id, name: nxProviderForm.name, baseUrl: nxProviderForm.baseUrl }) ?? "",
+                            "_blank",
+                            "noopener,noreferrer",
+                          )}
+                        >
+                          Get API Key
+                        </button>
+                      ) : null}
+                    </div>
                   </label>
                   <label>
                     Display Name
@@ -1640,15 +1730,6 @@ function App() {
                           >
                             {nxSyncingId === provider.id ? "Syncing..." : "Sync Models"}
                           </button>
-                          {getProviderApiKeyUrl(provider) ? (
-                            <button
-                              type="button"
-                              className="ghost nxr-sync-btn"
-                              onClick={() => window.open(getProviderApiKeyUrl(provider) ?? "", "_blank", "noopener,noreferrer")}
-                            >
-                              Get API Key
-                            </button>
-                          ) : null}
                         </div>
                         {provider.models.length > 0 ? (
                           <details className="nxr-model-list">
@@ -1848,13 +1929,9 @@ function App() {
                     <div className="tool-action-row tool-wrap-row">
                       <button
                         type="button"
-                        onClick={() => void runRuntimeAction(
+                        onClick={() => void runRuntimeJob(
                           "install-ollama",
-                          () => fetch("/api/tools/runtimes/install", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ runtime: "ollama" }),
-                          }),
+                          "install-ollama",
                           "Ollama installed and started.",
                         )}
                         disabled={runtimeBusyAction !== null || runtimeStatus?.ollamaInstalled}
@@ -1864,9 +1941,9 @@ function App() {
                       <button
                         type="button"
                         className="ghost"
-                        onClick={() => void runRuntimeAction(
+                        onClick={() => void runRuntimeJob(
                           "start-ollama",
-                          () => fetch("/api/tools/runtimes/ollama/start", { method: "POST" }),
+                          "start-ollama",
                           "Ollama started.",
                         )}
                         disabled={runtimeBusyAction !== null || !runtimeStatus?.ollamaInstalled || runtimeStatus?.ollamaRunning}
@@ -1875,14 +1952,11 @@ function App() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void runRuntimeAction(
+                        onClick={() => void runRuntimeJob(
                           "pull-qwen",
-                          () => fetch("/api/tools/runtimes/ollama/pull", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ model: "qwen2.5-coder:7b" }),
-                          }),
+                          "pull-ollama-model",
                           "Qwen2.5 Coder 7B pulled into Ollama.",
+                          "qwen2.5-coder:7b",
                         )}
                         disabled={runtimeBusyAction !== null || !runtimeStatus?.ollamaInstalled}
                       >
@@ -1891,6 +1965,24 @@ function App() {
                     </div>
                     <small>Installed Ollama models: {runtimeStatus?.ollamaModels.join(", ") || "none yet"}</small>
                     <small>Cookbook models: {cookbookSnapshot.installedModels.join(", ") || "none yet"}</small>
+                  </section>
+
+                  <section className="tool-section">
+                    <h3>Runtime Jobs</h3>
+                    {runtimeJobs.length === 0 ? (
+                      <p>No runtime tasks yet.</p>
+                    ) : (
+                      <ul className="tool-list">
+                        {runtimeJobs.slice(0, 8).map((job) => (
+                          <li key={job.id}>
+                            <strong>{job.action}{job.model ? ` (${job.model})` : ""}</strong>
+                            <small>{job.status} · {new Date(job.updatedAt).toLocaleTimeString()}</small>
+                            {job.logs.length > 0 ? <small>{job.logs[job.logs.length - 1]}</small> : null}
+                            {job.error ? <small>{job.error}</small> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </section>
 
                   <section className="tool-card-grid">
@@ -1987,13 +2079,9 @@ function App() {
                   <div className="tool-action-row tool-wrap-row">
                     <button
                       type="button"
-                      onClick={() => void runRuntimeAction(
+                      onClick={() => void runRuntimeJob(
                         "install-piper",
-                        () => fetch("/api/tools/runtimes/install", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ runtime: "piper" }),
-                        }),
+                        "install-piper",
                         "Piper installed.",
                       )}
                       disabled={runtimeBusyAction !== null || runtimeStatus?.piperInstalled}
@@ -2002,13 +2090,9 @@ function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => void runRuntimeAction(
+                      onClick={() => void runRuntimeJob(
                         "install-piper-voice",
-                        () => fetch("/api/tools/runtimes/install", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ runtime: "default-piper-voice" }),
-                        }),
+                        "install-default-piper-voice",
                         "Default Piper voice installed.",
                       )}
                       disabled={runtimeBusyAction !== null || !runtimeStatus?.piperInstalled || runtimeStatus?.defaultVoiceInstalled}
@@ -2063,13 +2147,9 @@ function App() {
                 <div className="tool-action-row tool-wrap-row">
                   <button
                     type="button"
-                    onClick={() => void runRuntimeAction(
+                    onClick={() => void runRuntimeJob(
                       "install-acejam",
-                      () => fetch("/api/tools/runtimes/install", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ runtime: "acejam" }),
-                      }),
+                      "install-acejam",
                       "AceJAM installed.",
                     )}
                     disabled={runtimeBusyAction !== null || runtimeStatus?.acejamInstalled}
@@ -2079,9 +2159,9 @@ function App() {
                   <button
                     type="button"
                     className="ghost"
-                    onClick={() => void runRuntimeAction(
+                    onClick={() => void runRuntimeJob(
                       "start-acejam",
-                      () => fetch("/api/tools/runtimes/acejam/start", { method: "POST" }),
+                      "start-acejam",
                       "AceJAM started.",
                     )}
                     disabled={runtimeBusyAction !== null || !runtimeStatus?.acejamInstalled || runtimeStatus?.acejamRunning}
@@ -2108,6 +2188,24 @@ function App() {
                   <li>AceJAM runs locally and is intended for offline or low-cost music generation flows.</li>
                   <li>If install fails, ensure Python 3.10+ is installed and available in PATH.</li>
                 </ul>
+              </section>
+
+              <section className="tool-section">
+                <h3>Runtime Jobs</h3>
+                {runtimeJobs.length === 0 ? (
+                  <p>No runtime tasks yet.</p>
+                ) : (
+                  <ul className="tool-list">
+                    {runtimeJobs.slice(0, 8).map((job) => (
+                      <li key={job.id}>
+                        <strong>{job.action}{job.model ? ` (${job.model})` : ""}</strong>
+                        <small>{job.status} · {new Date(job.updatedAt).toLocaleTimeString()}</small>
+                        {job.logs.length > 0 ? <small>{job.logs[job.logs.length - 1]}</small> : null}
+                        {job.error ? <small>{job.error}</small> : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </section>
             </div>
           ) : null}

@@ -70,6 +70,97 @@ const port = Number(process.env.PORT ?? 8080);
 const activeStreams = new Map<string, AbortController>();
 const activeScheduleRuns = new Set<string>();
 
+type RuntimeJobAction =
+  | "install-ollama"
+  | "start-ollama"
+  | "pull-ollama-model"
+  | "install-piper"
+  | "install-default-piper-voice"
+  | "install-acejam"
+  | "start-acejam";
+
+type RuntimeJob = {
+  id: string;
+  action: RuntimeJobAction;
+  model?: string;
+  status: "queued" | "running" | "completed" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  logs: string[];
+  error?: string;
+};
+
+const runtimeJobs = new Map<string, RuntimeJob>();
+
+function appendRuntimeJobLog(job: RuntimeJob, message: string): void {
+  job.logs.push(`[${new Date().toISOString()}] ${message}`);
+  if (job.logs.length > 200) {
+    job.logs = job.logs.slice(job.logs.length - 200);
+  }
+  job.updatedAt = new Date().toISOString();
+}
+
+async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
+  appendRuntimeJobLog(job, `Starting ${job.action}`);
+
+  if (job.action === "install-ollama") {
+    appendRuntimeJobLog(job, "Installing Ollama runtime...");
+    await installOllama();
+    appendRuntimeJobLog(job, "Starting Ollama service...");
+    await startOllamaIfNeeded();
+    appendRuntimeJobLog(job, "Ollama install completed.");
+    return;
+  }
+
+  if (job.action === "start-ollama") {
+    appendRuntimeJobLog(job, "Starting Ollama service...");
+    await startOllamaIfNeeded();
+    appendRuntimeJobLog(job, "Ollama is running.");
+    return;
+  }
+
+  if (job.action === "pull-ollama-model") {
+    if (!job.model?.trim()) {
+      throw new Error("pull-ollama-model requires a model name.");
+    }
+    appendRuntimeJobLog(job, `Pulling Ollama model ${job.model}...`);
+    await pullOllamaModel(job.model.trim());
+    appendRuntimeJobLog(job, `Model ${job.model} pulled successfully.`);
+    return;
+  }
+
+  if (job.action === "install-piper") {
+    appendRuntimeJobLog(job, "Installing Piper runtime...");
+    await installPiper();
+    appendRuntimeJobLog(job, "Piper install completed.");
+    return;
+  }
+
+  if (job.action === "install-default-piper-voice") {
+    appendRuntimeJobLog(job, "Downloading default Piper voice...");
+    await installDefaultPiperVoice();
+    appendRuntimeJobLog(job, "Default Piper voice installed.");
+    return;
+  }
+
+  if (job.action === "install-acejam") {
+    appendRuntimeJobLog(job, "Installing AceJAM runtime...");
+    await installAceJam();
+    appendRuntimeJobLog(job, "AceJAM install completed.");
+    return;
+  }
+
+  if (job.action === "start-acejam") {
+    appendRuntimeJobLog(job, "Starting AceJAM service...");
+    await startAceJamIfNeeded();
+    appendRuntimeJobLog(job, "AceJAM is running.");
+    return;
+  }
+
+  throw new Error(`Unsupported runtime action: ${job.action}`);
+}
+
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -279,6 +370,60 @@ app.get("/api/tools/cookbook/scan", async (_req, res) => {
 app.get("/api/tools/runtimes/status", async (_req, res) => {
   const status = await getRuntimeStatus();
   res.json(status);
+});
+
+app.get("/api/tools/runtimes/jobs", (_req, res) => {
+  const jobs = Array.from(runtimeJobs.values())
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+    .slice(0, 30);
+  res.json({ jobs });
+});
+
+app.get("/api/tools/runtimes/jobs/:jobId", (req, res) => {
+  const job = runtimeJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Unknown runtime job" });
+  }
+  return res.json({ job });
+});
+
+app.post("/api/tools/runtimes/jobs", async (req, res) => {
+  const body = req.body as { action?: RuntimeJobAction; model?: string };
+  if (!body.action) {
+    return res.status(400).json({ error: "action is required" });
+  }
+
+  const job: RuntimeJob = {
+    id: crypto.randomUUID(),
+    action: body.action,
+    model: body.model?.trim(),
+    status: "queued",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    logs: [],
+  };
+
+  runtimeJobs.set(job.id, job);
+  appendRuntimeJobLog(job, "Queued");
+
+  void (async () => {
+    try {
+      job.status = "running";
+      job.updatedAt = new Date().toISOString();
+      await executeRuntimeJob(job);
+      job.status = "completed";
+      job.finishedAt = new Date().toISOString();
+      job.updatedAt = job.finishedAt;
+    } catch (error) {
+      job.status = "failed";
+      job.error = String(error);
+      job.finishedAt = new Date().toISOString();
+      job.updatedAt = job.finishedAt;
+      appendRuntimeJobLog(job, `Failed: ${job.error}`);
+    }
+  })();
+
+  return res.status(202).json({ ok: true, job });
 });
 
 app.post("/api/tools/runtimes/install", async (req, res) => {
