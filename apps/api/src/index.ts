@@ -37,6 +37,15 @@ import {
 import { ensureManagedHarnesses, getManagedHarnessRuntimeStatus } from "./lib/managedHarnessRuntime.js";
 import { buildCookbookSnapshot, getVoiceStatus } from "./lib/toolAdvisor.js";
 import {
+  getRuntimeStatus,
+  installDefaultPiperVoice,
+  installOllama,
+  installPiper,
+  pullOllamaModel,
+  startOllamaIfNeeded,
+  synthesizeWithPiper,
+} from "./lib/localRuntimeManager.js";
+import {
   appendHarnessRun,
   deleteHarnessSchedule,
   ensureHarnessAutomationStore,
@@ -259,9 +268,74 @@ app.get("/api/tools/cookbook/scan", async (_req, res) => {
   res.json(snapshot);
 });
 
+app.get("/api/tools/runtimes/status", async (_req, res) => {
+  const status = await getRuntimeStatus();
+  res.json(status);
+});
+
+app.post("/api/tools/runtimes/install", async (req, res) => {
+  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" };
+  try {
+    if (body.runtime === "ollama") {
+      await installOllama();
+      await startOllamaIfNeeded();
+    } else if (body.runtime === "piper") {
+      await installPiper();
+    } else if (body.runtime === "default-piper-voice") {
+      await installDefaultPiperVoice();
+    } else {
+      return res.status(400).json({ error: "Unknown runtime target" });
+    }
+
+    const status = await getRuntimeStatus();
+    return res.json({ ok: true, status });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/runtimes/ollama/start", async (_req, res) => {
+  try {
+    await startOllamaIfNeeded();
+    const status = await getRuntimeStatus();
+    return res.json({ ok: true, status });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/runtimes/ollama/pull", async (req, res) => {
+  const body = req.body as { model?: string };
+  if (!body.model?.trim()) {
+    return res.status(400).json({ error: "model is required" });
+  }
+
+  try {
+    await pullOllamaModel(body.model.trim());
+    const status = await getRuntimeStatus();
+    return res.json({ ok: true, status });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
 app.get("/api/tools/voice/status", async (_req, res) => {
   const status = await getVoiceStatus();
   res.json(status);
+});
+
+app.post("/api/tools/voice/speak", async (req, res) => {
+  const body = req.body as { text?: string };
+  if (!body.text?.trim()) {
+    return res.status(400).json({ error: "text is required" });
+  }
+
+  try {
+    const audio = await synthesizeWithPiper(body.text.trim());
+    return res.json({ ok: true, ...audio });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
 });
 
 app.get("/api/harnesses/conformance", async (_req, res) => {

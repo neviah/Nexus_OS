@@ -205,6 +205,16 @@ type VoiceStatus = {
   scannedAt: string;
 };
 
+type RuntimeStatus = {
+  ollamaInstalled: boolean;
+  ollamaRunning: boolean;
+  ollamaModels: string[];
+  piperInstalled: boolean;
+  piperPath: string | null;
+  piperVoices: string[];
+  defaultVoiceInstalled: boolean;
+};
+
 // ── Nexus Router types ──────────────────────────────────────────────────────
 type NxProvider = {
   id: string;
@@ -285,6 +295,8 @@ function App() {
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceText, setVoiceText] = useState("Nexus OS voice check. This is your text to speech tool.");
   const [voicePlaying, setVoicePlaying] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeBusyAction, setRuntimeBusyAction] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toolsOpen, setToolsOpen] = useState(true);
   const [startupChecking, setStartupChecking] = useState(false);
@@ -301,7 +313,17 @@ function App() {
     }
     const payload = (await response.json()) as CookbookSnapshot;
     setCookbookSnapshot(payload);
+    await loadRuntimeStatus();
     setCookbookBusy(false);
+  }
+
+  async function loadRuntimeStatus() {
+    const response = await fetch("/api/tools/runtimes/status");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as RuntimeStatus;
+    setRuntimeStatus(payload);
   }
   
   async function loadVoiceStatus() {
@@ -314,7 +336,23 @@ function App() {
     }
     const payload = (await response.json()) as VoiceStatus;
     setVoiceStatus(payload);
+    await loadRuntimeStatus();
     setVoiceBusy(false);
+  }
+
+  async function runRuntimeAction(actionId: string, request: () => Promise<Response>, successMessage: string) {
+    setRuntimeBusyAction(actionId);
+    const response = await request();
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Runtime action failed");
+      setRuntimeBusyAction(null);
+      return;
+    }
+
+    await Promise.all([loadRuntimeStatus(), loadCookbookSnapshot(), loadVoiceStatus()]);
+    setStatusMessage(successMessage);
+    setRuntimeBusyAction(null);
   }
   
   function stopVoicePlayback() {
@@ -327,13 +365,46 @@ function App() {
     if (!text) {
       return;
     }
-  
-    stopVoicePlayback();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.onend = () => setVoicePlaying(false);
-    utterance.onerror = () => setVoicePlaying(false);
-    setVoicePlaying(true);
-    window.speechSynthesis.speak(utterance);
+
+    void (async () => {
+      if (runtimeStatus?.piperInstalled && runtimeStatus.defaultVoiceInstalled) {
+        setVoicePlaying(true);
+        const response = await fetch("/api/tools/voice/speak", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+
+        if (response.ok) {
+          const payload = (await response.json()) as { audioBase64: string; mimeType: string };
+          const byteChars = atob(payload.audioBase64);
+          const bytes = new Uint8Array(byteChars.length);
+          for (let index = 0; index < byteChars.length; index += 1) {
+            bytes[index] = byteChars.charCodeAt(index);
+          }
+          const blob = new Blob([bytes], { type: payload.mimeType });
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          audio.onended = () => {
+            URL.revokeObjectURL(url);
+            setVoicePlaying(false);
+          };
+          audio.onerror = () => {
+            URL.revokeObjectURL(url);
+            setVoicePlaying(false);
+          };
+          await audio.play();
+          return;
+        }
+      }
+
+      stopVoicePlayback();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.onend = () => setVoicePlaying(false);
+      utterance.onerror = () => setVoicePlaying(false);
+      setVoicePlaying(true);
+      window.speechSynthesis.speak(utterance);
+    })();
   }
 
   // Nexus Router state
@@ -1589,6 +1660,55 @@ function App() {
 
               {cookbookSnapshot ? (
                 <>
+                  <section className="tool-section">
+                    <h3>Bundled runtimes</h3>
+                    <div className="tool-action-row tool-wrap-row">
+                      <button
+                        type="button"
+                        onClick={() => void runRuntimeAction(
+                          "install-ollama",
+                          () => fetch("/api/tools/runtimes/install", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ runtime: "ollama" }),
+                          }),
+                          "Ollama installed and started.",
+                        )}
+                        disabled={runtimeBusyAction !== null || runtimeStatus?.ollamaInstalled}
+                      >
+                        {runtimeStatus?.ollamaInstalled ? "Ollama Installed" : runtimeBusyAction === "install-ollama" ? "Installing Ollama..." : "Install Ollama"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => void runRuntimeAction(
+                          "start-ollama",
+                          () => fetch("/api/tools/runtimes/ollama/start", { method: "POST" }),
+                          "Ollama started.",
+                        )}
+                        disabled={runtimeBusyAction !== null || !runtimeStatus?.ollamaInstalled || runtimeStatus?.ollamaRunning}
+                      >
+                        {runtimeStatus?.ollamaRunning ? "Ollama Running" : runtimeBusyAction === "start-ollama" ? "Starting Ollama..." : "Start Ollama"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void runRuntimeAction(
+                          "pull-qwen",
+                          () => fetch("/api/tools/runtimes/ollama/pull", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ model: "qwen2.5-coder:7b" }),
+                          }),
+                          "Qwen2.5 Coder 7B pulled into Ollama.",
+                        )}
+                        disabled={runtimeBusyAction !== null || !runtimeStatus?.ollamaInstalled}
+                      >
+                        {runtimeBusyAction === "pull-qwen" ? "Pulling Qwen2.5 Coder 7B..." : "Install Coding Fallback Model"}
+                      </button>
+                    </div>
+                    <small>Installed Ollama models: {runtimeStatus?.ollamaModels.join(", ") || "none yet"}</small>
+                  </section>
+
                   <section className="tool-card-grid">
                     <article className="tool-card">
                       <h3>Machine</h3>
@@ -1676,6 +1796,45 @@ function App() {
                   </button>
                 </div>
               </section>
+
+              {voiceStatus ? (
+                <section className="tool-section">
+                  <h3>Voice runtime setup</h3>
+                  <div className="tool-action-row tool-wrap-row">
+                    <button
+                      type="button"
+                      onClick={() => void runRuntimeAction(
+                        "install-piper",
+                        () => fetch("/api/tools/runtimes/install", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ runtime: "piper" }),
+                        }),
+                        "Piper installed.",
+                      )}
+                      disabled={runtimeBusyAction !== null || runtimeStatus?.piperInstalled}
+                    >
+                      {runtimeStatus?.piperInstalled ? "Piper Installed" : runtimeBusyAction === "install-piper" ? "Installing Piper..." : "Install Piper"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void runRuntimeAction(
+                        "install-piper-voice",
+                        () => fetch("/api/tools/runtimes/install", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ runtime: "default-piper-voice" }),
+                        }),
+                        "Default Piper voice installed.",
+                      )}
+                      disabled={runtimeBusyAction !== null || !runtimeStatus?.piperInstalled || runtimeStatus?.defaultVoiceInstalled}
+                    >
+                      {runtimeStatus?.defaultVoiceInstalled ? "Default Voice Installed" : runtimeBusyAction === "install-piper-voice" ? "Installing Default Voice..." : "Install Default Voice"}
+                    </button>
+                  </div>
+                  <small>Installed Piper voices: {runtimeStatus?.piperVoices.join(", ") || "none yet"}</small>
+                </section>
+              ) : null}
 
               {voiceStatus ? (
                 <section className="tool-card-grid">

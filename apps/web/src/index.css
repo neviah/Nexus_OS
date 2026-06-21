@@ -491,6 +491,10 @@ button:disabled {
   gap: 8px;
 }
 
+.tool-wrap-row {
+  flex-wrap: wrap;
+}
+
 .automation-panel {
   display: grid;
   gap: 8px;

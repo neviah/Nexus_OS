@@ -1,9 +1,9 @@
 import os from "node:os";
-import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { getWorkspaceById } from "./workspaceManager.js";
+import { getRuntimeStatus } from "./localRuntimeManager.js";
 import type { SystemState } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -56,8 +56,7 @@ export async function buildCookbookSnapshot(state: SystemState): Promise<Cookboo
   const freeRamGb = toGb(os.freemem());
   const freeDiskGb = workspaceRecord ? await getFreeDiskGb(workspaceRecord.path) : null;
   const gpuNames = await getGpuNames();
-  const ollamaInstalled = await commandExists("ollama", ["--version"]);
-  const piperResolution = await resolvePiper();
+  const runtimeStatus = await getRuntimeStatus();
 
   return {
     workspace: workspaceRecord ? { id: workspaceRecord.id, path: workspaceRecord.path } : null,
@@ -72,27 +71,32 @@ export async function buildCookbookSnapshot(state: SystemState): Promise<Cookboo
       gpuNames,
     },
     runtimes: {
-      ollamaInstalled,
-      piperInstalled: Boolean(piperResolution.path),
+      ollamaInstalled: runtimeStatus.ollamaInstalled,
+      piperInstalled: runtimeStatus.piperInstalled,
     },
-    recommendations: buildRecommendations({ totalRamGb, gpuNames, ollamaInstalled, piperInstalled: Boolean(piperResolution.path) }),
+    recommendations: buildRecommendations({
+      totalRamGb,
+      gpuNames,
+      ollamaInstalled: runtimeStatus.ollamaInstalled,
+      piperInstalled: runtimeStatus.piperInstalled,
+    }),
     scannedAt: new Date().toISOString(),
   };
 }
 
 export async function getVoiceStatus(): Promise<VoiceStatus> {
-  const piperResolution = await resolvePiper();
+  const runtimeStatus = await getRuntimeStatus();
   const notes = [
     "Browser speech works immediately for quick playback inside NexusOS.",
-    piperResolution.path
-      ? `Piper detected at ${piperResolution.path}. Local offline voice generation is available for a future backend bridge.`
-      : "Piper not detected. Install Piper later for better offline voices and file generation.",
+    runtimeStatus.piperPath
+      ? `Piper detected at ${runtimeStatus.piperPath}. Local offline voice generation is available for NexusOS voice playback.`
+      : "Piper not detected. NexusOS should install Piper so better offline voices and file generation are available.",
   ];
 
   return {
-    piperInstalled: Boolean(piperResolution.path),
-    piperPath: piperResolution.path,
-    browserSpeechRecommended: true,
+    piperInstalled: runtimeStatus.piperInstalled,
+    piperPath: runtimeStatus.piperPath,
+    browserSpeechRecommended: !runtimeStatus.defaultVoiceInstalled,
     notes,
     scannedAt: new Date().toISOString(),
   };
@@ -175,7 +179,7 @@ async function getGpuNames(): Promise<string[]> {
     ], { windowsHide: true });
     return stdout
       .split(/\r?\n/)
-      .map((line) => line.trim())
+      .map((line: string) => line.trim())
       .filter(Boolean);
   } catch {
     return [];
@@ -195,41 +199,6 @@ async function getFreeDiskGb(targetPath: string): Promise<number | null> {
     return Number.isFinite(bytes) ? toGb(bytes) : null;
   } catch {
     return null;
-  }
-}
-
-async function resolvePiper(): Promise<{ path: string | null }> {
-  const candidates = process.platform === "win32"
-    ? [
-      "piper.exe",
-      path.join(os.homedir(), "piper", "piper.exe"),
-      path.join(os.homedir(), ".local", "bin", "piper.exe"),
-    ]
-    : ["piper", path.join(os.homedir(), ".local", "bin", "piper")];
-
-  for (const candidate of candidates) {
-    if (await commandExists(candidate, ["--help"])) {
-      return { path: candidate };
-    }
-    if (path.isAbsolute(candidate)) {
-      try {
-        await fs.access(candidate);
-        return { path: candidate };
-      } catch {
-        // Continue.
-      }
-    }
-  }
-
-  return { path: null };
-}
-
-async function commandExists(command: string, args: string[]): Promise<boolean> {
-  try {
-    await execFileAsync(command, args, { windowsHide: true, timeout: 5000 });
-    return true;
-  } catch {
-    return false;
   }
 }
 
