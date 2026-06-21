@@ -147,7 +147,16 @@ export async function installOllama(): Promise<void> {
   if (process.platform !== "win32") {
     throw new Error("Automated Ollama install is currently implemented for Windows only.");
   }
-  await execFileAsync("winget", ["install", "--id", "Ollama.Ollama", "-e", "--accept-package-agreements", "--accept-source-agreements"], {
+  await execFileAsync("winget", [
+    "install",
+    "--id",
+    "Ollama.Ollama",
+    "-e",
+    "--silent",
+    "--disable-interactivity",
+    "--accept-package-agreements",
+    "--accept-source-agreements",
+  ], {
     windowsHide: true,
     timeout: 20 * 60 * 1000,
   });
@@ -221,7 +230,7 @@ export async function synthesizeWithPiper(text: string): Promise<{ audioBase64: 
   const outputPath = path.join(runtimeRoot, `piper-preview-${Date.now()}.wav`);
   await fs.mkdir(runtimeRoot, { recursive: true });
 
-  await execFileAsync(piperPath, [
+  await runPiperProcess(piperPath, [
     "--model",
     voicePath,
     "--config",
@@ -230,11 +239,7 @@ export async function synthesizeWithPiper(text: string): Promise<{ audioBase64: 
     outputPath,
     "--sentence_silence",
     "0.2",
-  ], {
-    input: text,
-    windowsHide: true,
-    maxBuffer: 1024 * 1024 * 4,
-  } as never);
+  ], text);
 
   const bytes = await fs.readFile(outputPath);
   await fs.rm(outputPath, { force: true });
@@ -305,6 +310,42 @@ async function commandWorks(command: string, args: string[]): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function runPiperProcess(executable: string, args: string[], inputText: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(executable, args, {
+      windowsHide: true,
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error("Piper timed out while generating audio."));
+    }, 120000);
+
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`Piper failed with code ${code}: ${stderr.trim() || "unknown error"}`));
+      }
+    });
+
+    child.stdin.write(`${inputText.trim()}\n`);
+    child.stdin.end();
+  });
 }
 
 async function acejamLooksInstalled(): Promise<boolean> {

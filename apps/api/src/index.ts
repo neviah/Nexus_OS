@@ -252,7 +252,7 @@ app.get("/api/bootstrap", async (_req, res) => {
         name: "Music Generator",
         status: runtimeStatus.acejamRunning ? "online" : (runtimeStatus.acejamInstalled ? "setup-required" : "offline"),
       },
-      { id: "image-generator", name: "Image Generator", status: "offline" },
+      { id: "image-generator", name: "Image Generator", status: "online" },
       { id: "video-generator", name: "Video Generator", status: "offline" },
     ],
     router9: getRouterSummary(state),
@@ -353,6 +353,21 @@ app.post("/api/tools/voice/speak", async (req, res) => {
   try {
     const audio = await synthesizeWithPiper(body.text.trim());
     return res.json({ ok: true, ...audio });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/image/generate", async (req, res) => {
+  const body = req.body as { prompt?: string };
+  const prompt = body.prompt?.trim();
+  if (!prompt) {
+    return res.status(400).json({ error: "prompt is required" });
+  }
+
+  try {
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?model=flux&nologo=true&enhance=true&seed=${Date.now()}`;
+    return res.json({ ok: true, imageUrl });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
   }

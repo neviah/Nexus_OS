@@ -325,6 +325,9 @@ function App() {
   const [voicePlaying, setVoicePlaying] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeBusyAction, setRuntimeBusyAction] = useState<string | null>(null);
+  const [imagePrompt, setImagePrompt] = useState("Cinematic cyberpunk skyline at sunrise, ultra detailed, volumetric light");
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toolsOpen, setToolsOpen] = useState(true);
   const [startupChecking, setStartupChecking] = useState(false);
@@ -424,6 +427,11 @@ function App() {
           await audio.play();
           return;
         }
+
+        const payload = (await response.json()) as { error?: string };
+        setStatusMessage(payload.error ?? "Piper playback failed.");
+        setVoicePlaying(false);
+        return;
       }
 
       stopVoicePlayback();
@@ -433,6 +441,33 @@ function App() {
       setVoicePlaying(true);
       window.speechSynthesis.speak(utterance);
     })();
+  }
+
+  async function generateImage() {
+    const prompt = imagePrompt.trim();
+    if (!prompt) {
+      setStatusMessage("Type an image prompt first.");
+      return;
+    }
+
+    setImageBusy(true);
+    const response = await fetch("/api/tools/image/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Image generation failed.");
+      setImageBusy(false);
+      return;
+    }
+
+    const payload = (await response.json()) as { imageUrl: string };
+    setImageUrl(payload.imageUrl);
+    setStatusMessage("Image generated.");
+    setImageBusy(false);
   }
 
   // Nexus Router state
@@ -1989,8 +2024,8 @@ function App() {
                 <section className="tool-card-grid">
                   <article className="tool-card">
                     <h3>Browser speech</h3>
-                    <p>{voiceStatus.browserSpeechRecommended ? "recommended now" : "unavailable"}</p>
-                    <small>Runs immediately in the app UI with no install.</small>
+                    <p>{voiceStatus.browserSpeechRecommended ? "active fallback" : "available"}</p>
+                    <small>Runs immediately in the app UI when Piper is not ready or not preferred.</small>
                   </article>
                   <article className="tool-card">
                     <h3>Piper</h3>
@@ -2077,7 +2112,40 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator"].includes(selectedPane.id) ? (
+          {selectedPane.type === "tool" && selectedPane.id === "image-generator" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Image Generator</h2>
+                  <p className="subtitle">FLUX-style generation using a free hosted image endpoint.</p>
+                </div>
+              </div>
+
+              <section className="tool-section">
+                <textarea
+                  value={imagePrompt}
+                  onChange={(event) => setImagePrompt(event.target.value)}
+                  rows={4}
+                  placeholder="Describe the image you want..."
+                />
+                <div className="tool-action-row">
+                  <button type="button" onClick={() => void generateImage()} disabled={imageBusy}>
+                    {imageBusy ? "Generating..." : "Generate Image"}
+                  </button>
+                </div>
+              </section>
+
+              {imageUrl ? (
+                <section className="tool-section">
+                  <h3>Preview</h3>
+                  <img src={imageUrl} alt="Generated result" style={{ width: "100%", borderRadius: 10, border: "1px solid rgba(47, 71, 79, 0.35)" }} />
+                  <small>Tip: generate again to iterate quickly on style and composition.</small>
+                </section>
+              ) : null}
+            </div>
+          ) : null}
+
+          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator", "image-generator"].includes(selectedPane.id) ? (
             <div className="placeholder-view">
               <h2>{boot?.tools.find((tool) => tool.id === selectedPane.id)?.name ?? "Tool"}</h2>
               <p>Tool plugin slot ready. Hook this panel to a future backend module.</p>
