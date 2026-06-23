@@ -479,6 +479,9 @@ function extractWorkspaceWriteActions(output: string): WorkspaceWriteAction[] {
     }
   }
 
+  // Fallback extractor for non-JSON tool payloads like single-quoted dicts.
+  collectLooseWriteActions(output, actions);
+
   const unique = new Map<string, WorkspaceWriteAction>();
   for (const action of actions) {
     const key = `${action.path}::${action.content}`;
@@ -504,7 +507,7 @@ function extractJsonCandidates(output: string): string[] {
     fencedMatch = fenced.exec(output);
   }
 
-  const inlineObject = /(\{[\s\S]*?"(?:action|name)"\s*:\s*"write_file"[\s\S]*?\})/gi;
+  const inlineObject = /(\{[\s\S]*?["'](?:action|name|type)["']\s*:\s*["']write_file["'][\s\S]*?\})/gi;
   let inlineMatch = inlineObject.exec(output);
   while (inlineMatch) {
     const snippet = inlineMatch[1]?.trim();
@@ -535,7 +538,11 @@ function collectWorkspaceWriteActions(value: unknown, bucket: WorkspaceWriteActi
 
   const obj = value as Record<string, unknown>;
 
-  const actionName = typeof obj.action === "string" ? obj.action : (typeof obj.name === "string" ? obj.name : "");
+  const actionName = typeof obj.action === "string"
+    ? obj.action
+    : (typeof obj.name === "string"
+      ? obj.name
+      : (typeof obj.type === "string" ? obj.type : ""));
   if (actionName === "write_file") {
     const pathValue = typeof obj.path === "string" ? obj.path : undefined;
     const contentValue = typeof obj.content === "string" ? obj.content : undefined;
@@ -547,7 +554,7 @@ function collectWorkspaceWriteActions(value: unknown, bucket: WorkspaceWriteActi
   if (actionName === "write_file" && obj.arguments) {
     if (typeof obj.arguments === "string") {
       try {
-        const parsedArgs = JSON.parse(obj.arguments) as Record<string, unknown>;
+        const parsedArgs = tryParseMaybeJson(obj.arguments);
         const pathValue = typeof parsedArgs.path === "string" ? parsedArgs.path : undefined;
         const contentValue = typeof parsedArgs.content === "string" ? parsedArgs.content : undefined;
         if (pathValue && contentValue !== undefined) {
@@ -576,6 +583,35 @@ function collectWorkspaceWriteActions(value: unknown, bucket: WorkspaceWriteActi
 
   if (obj.function && typeof obj.function === "object") {
     collectWorkspaceWriteActions(obj.function, bucket);
+  }
+}
+
+function tryParseMaybeJson(input: string): Record<string, unknown> {
+  try {
+    return JSON.parse(input) as Record<string, unknown>;
+  } catch {
+    const normalized = input
+      .replace(/([,{]\s*)'([^']+?)'\s*:/g, "$1\"$2\":")
+      .replace(/:\s*'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_match, value) => `: \"${value.replace(/\"/g, "\\\"")}\"`);
+    return JSON.parse(normalized) as Record<string, unknown>;
+  }
+}
+
+function collectLooseWriteActions(output: string, bucket: WorkspaceWriteAction[]): void {
+  const patterns = [
+    /["'](?:action|name|type)["']\s*:\s*["']write_file["'][\s\S]*?["']path["']\s*:\s*["']([^"'\n]+)["'][\s\S]*?["']content["']\s*:\s*["']([\s\S]*?)["']/gi,
+  ];
+
+  for (const pattern of patterns) {
+    let match = pattern.exec(output);
+    while (match) {
+      const pathValue = match[1]?.trim();
+      const contentValue = (match[2] ?? "").replace(/\\n/g, "\n").replace(/\\'/g, "'").replace(/\\\"/g, "\"");
+      if (pathValue) {
+        bucket.push({ path: pathValue, content: contentValue });
+      }
+      match = pattern.exec(output);
+    }
   }
 }
 
