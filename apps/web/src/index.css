@@ -621,6 +621,63 @@ button:disabled {
   font-family: "IBM Plex Mono", Consolas, monospace;
 }
 
+.toast-rack {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+  max-width: 340px;
+}
+
+.toast {
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  line-height: 1.35;
+  color: #0c1419;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+  animation: toastIn 0.2s ease;
+}
+
+.toast-ok {
+  background: var(--ok);
+}
+
+.toast-warn {
+  background: var(--warn);
+}
+
+.toast-err {
+  background: var(--bad);
+  color: #fff;
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.connector-inline-error {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(239, 110, 110, 0.14);
+  border: 1px solid rgba(239, 110, 110, 0.4);
+  color: var(--bad);
+  font-size: 0.8rem;
+}
+
 .github-device-card,
 .github-advanced-details {
   border: 1px solid rgba(47, 71, 79, 0.35);

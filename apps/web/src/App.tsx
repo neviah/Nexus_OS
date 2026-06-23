@@ -422,6 +422,7 @@ function App() {
   const [musicSourceUrl, setMusicSourceUrl] = useState("");
   const [musicSaveBusy, setMusicSaveBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
+  const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
   const [gitStatus, setGitStatus] = useState<GitStatusPayload | null>(null);
   const [gitBusyAction, setGitBusyAction] = useState<"refresh" | "commit" | "push" | null>(null);
@@ -437,6 +438,8 @@ function App() {
   const [githubTokenDraft, setGithubTokenDraft] = useState("");
   const [githubDeviceFlow, setGithubDeviceFlow] = useState<GitHubDeviceFlow | null>(null);
   const [githubBusy, setGithubBusy] = useState<"connect" | "disconnect" | "refresh" | "device-start" | "device-poll" | null>(null);
+  const [githubInlineError, setGithubInlineError] = useState<string | null>(null);
+  const [nxConfigSaving, setNxConfigSaving] = useState(false);
   const [startupChecking, setStartupChecking] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
@@ -1291,6 +1294,7 @@ function App() {
   }
 
   async function nxSaveConfig() {
+    setNxConfigSaving(true);
     const fallbackChain = nxFallbackRows
       .map((row) => ({ providerId: row.providerId.trim(), model: row.model.trim() }))
       .filter((row) => row.providerId && row.model);
@@ -1314,7 +1318,11 @@ function App() {
     if (res.ok) {
       await loadNxRouter();
       setStatusMessage("Router config saved.");
+      pushToast("Router config saved.", "ok");
+    } else {
+      pushToast("Failed to save router config.", "err");
     }
+    setNxConfigSaving(false);
   }
 
   async function nxTestChat() {
@@ -1361,6 +1369,14 @@ function App() {
     document.documentElement.setAttribute("data-theme", themeId);
     window.localStorage.setItem("nexus-theme", themeId);
   }, [themeId]);
+
+  function pushToast(message: string, tone: "ok" | "warn" | "err" = "ok") {
+    const id = crypto.randomUUID();
+    setToasts((current) => [...current, { id, message, tone }]);
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((t) => t.id !== id));
+    }, 3500);
+  }
 
   useEffect(() => {
     window.localStorage.setItem("nexus-github-client-id", githubClientId);
@@ -1609,9 +1625,11 @@ function App() {
   async function startGitHubDeviceFlow() {
     const clientId = githubClientId.trim();
     if (!clientId) {
-      setStatusMessage("Add a GitHub OAuth app client ID first.");
+      setGithubInlineError("Enter a GitHub OAuth app client ID before connecting.");
+      pushToast("GitHub OAuth client ID is required.", "warn");
       return;
     }
+    setGithubInlineError(null);
 
     setGithubBusy("device-start");
     const response = await fetch("/api/tools/connectors/github/device/start", {
@@ -1622,7 +1640,10 @@ function App() {
 
     if (!response.ok) {
       const payload = (await response.json()) as { error?: string };
-      setStatusMessage(payload.error ?? "GitHub device flow could not start.");
+      const errMsg = payload.error ?? "GitHub device flow could not start.";
+      setStatusMessage(errMsg);
+      setGithubInlineError(errMsg);
+      pushToast(errMsg, "err");
       setGithubBusy(null);
       return;
     }
@@ -1651,7 +1672,9 @@ function App() {
       expiresAt,
       scopes: payload.scopes,
     });
+    setGithubInlineError(null);
     setStatusMessage(`GitHub device code ready. Open the verification page and enter ${payload.device.user_code}.`);
+    pushToast(`Enter code ${payload.device.user_code} at ${payload.device.verification_uri}`, "ok");
     if (payload.device.verification_uri_complete) {
       window.open(payload.device.verification_uri_complete, "_blank", "noopener,noreferrer");
     } else {
@@ -1685,7 +1708,10 @@ function App() {
           setGithubConnector(pollPayload.connector);
           setGithubDeviceFlow(null);
           setGithubBusy(null);
-          setStatusMessage(`GitHub connected as ${pollPayload.connector.login ?? "unknown"}.`);
+          setGithubInlineError(null);
+          const loginMsg = `GitHub connected as ${pollPayload.connector.login ?? "unknown"}.`;
+          setStatusMessage(loginMsg);
+          pushToast(loginMsg, "ok");
           return;
         }
 
@@ -1739,7 +1765,9 @@ function App() {
     const payload = (await response.json()) as { connector: GitHubConnectorStatus };
     setGithubConnector(payload.connector);
     setGithubTokenDraft("");
+    setGithubInlineError(null);
     setStatusMessage("GitHub connected.");
+    pushToast("GitHub connected.", "ok");
     setGithubBusy(null);
   }
 
@@ -1759,6 +1787,7 @@ function App() {
     const payload = (await response.json()) as { connector: GitHubConnectorStatus };
     setGithubConnector(payload.connector);
     setStatusMessage("GitHub disconnected.");
+    pushToast("GitHub disconnected.", "warn");
     setGithubBusy(null);
   }
 
@@ -2216,6 +2245,16 @@ function App() {
       <div className="orb orb-left" />
       <div className="orb orb-right" />
 
+      {toasts.length > 0 ? (
+        <div className="toast-rack" aria-live="polite">
+          {toasts.map((t) => (
+            <div key={t.id} className={`toast toast-${t.tone}`}>
+              {t.tone === "ok" ? "✓" : t.tone === "err" ? "✗" : "!"}{" "}{t.message}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {onboardingRequired ? (
         <section className="first-run-banner">
           <strong>First launch checkpoint:</strong> Configure Nexus Router providers to unlock all harness routing.
@@ -2528,7 +2567,9 @@ function App() {
                     <input type="number" min={0} max={5000} step={100} value={nxRetryEditor.backoffMs} onChange={(event) => setNxRetryEditor((c) => ({ ...c, backoffMs: Number(event.target.value) }))} />
                   </label>
                 </div>
-                <button type="button" onClick={() => void nxSaveConfig()}>Save Fallback Config</button>
+                <button type="button" onClick={() => void nxSaveConfig()} disabled={nxConfigSaving}>
+                  {nxConfigSaving ? "Saving..." : "Save Fallback Config"}
+                </button>
               </section>
 
               {/* ── Test Chat ── */}
@@ -2977,6 +3018,10 @@ function App() {
                         {githubBusy === "refresh" ? "Refreshing..." : "Refresh"}
                       </button>
                     </div>
+
+                    {githubInlineError ? (
+                      <p className="connector-inline-error">{githubInlineError}</p>
+                    ) : null}
 
                     {githubConnector?.connected ? (
                       <small>
