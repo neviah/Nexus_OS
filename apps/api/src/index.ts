@@ -105,13 +105,38 @@ const piperAssignmentsPath = path.join(getRootDir(), "data", "piper-voice-assign
 const githubConnectorPath = path.join(getRootDir(), "data", "connectors.github.local.json");
 let runtimeJobsLoaded = false;
 let runtimeJobPersistQueue: Promise<void> = Promise.resolve();
+const pendingGitHubDeviceFlows = new Map<string, GitHubDeviceFlowSession>();
 
 type GitHubConnectorState = {
-  token: string;
+  accessToken: string;
   login?: string;
   scopes?: string[];
   connectedAt?: string;
   lastVerifiedAt?: string;
+};
+
+type GitHubDeviceFlowSession = {
+  clientId: string;
+  scopes: string[];
+  expiresAt: number;
+  interval: number;
+};
+
+type GitHubDeviceCodeResponse = {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  expires_in: number;
+  interval?: number;
+};
+
+type GitHubDeviceTokenResponse = {
+  access_token?: string;
+  token_type?: string;
+  scope?: string;
+  error?: string;
+  error_description?: string;
 };
 
 type WorkspaceWriteAction = {
@@ -483,13 +508,16 @@ async function runGit(
 async function readGitHubConnectorState(): Promise<GitHubConnectorState | null> {
   try {
     const raw = await fs.readFile(githubConnectorPath, "utf-8");
-    const parsed = JSON.parse(raw) as GitHubConnectorState;
-    if (!parsed || typeof parsed.token !== "string" || !parsed.token.trim()) {
+    const parsed = JSON.parse(raw) as Partial<GitHubConnectorState> & { token?: string; accessToken?: string };
+    const accessToken = typeof parsed.accessToken === "string"
+      ? parsed.accessToken.trim()
+      : (typeof parsed.token === "string" ? parsed.token.trim() : "");
+    if (!parsed || !accessToken) {
       return null;
     }
     return {
       ...parsed,
-      token: parsed.token.trim(),
+      accessToken,
       scopes: Array.isArray(parsed.scopes) ? parsed.scopes : [],
     };
   } catch {
@@ -511,6 +539,17 @@ function maskToken(token: string): string {
     return "****";
   }
   return `${token.slice(0, 4)}...${token.slice(-4)}`;
+}
+
+function normalizeGitHubRemoteUrl(remoteUrl: string): string {
+  const trimmed = remoteUrl.trim();
+  if (/^git@github\.com:/i.test(trimmed)) {
+    return `https://github.com/${trimmed.replace(/^git@github\.com:/i, "")}`;
+  }
+  if (/^ssh:\/\/git@github\.com\//i.test(trimmed)) {
+    return `https://github.com/${trimmed.replace(/^ssh:\/\/git@github\.com\//i, "")}`;
+  }
+  return trimmed;
 }
 
 async function verifyGitHubToken(token: string): Promise<{ login: string; scopes: string[] }> {
@@ -543,6 +582,68 @@ async function verifyGitHubToken(token: string): Promise<{ login: string; scopes
   };
 }
 
+async function startGitHubDeviceFlow(clientId: string, scopes: string[]): Promise<GitHubDeviceCodeResponse> {
+  const response = await fetch("https://github.com/login/device/code", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": "NexusOS",
+    },
+    body: new URLSearchParams({
+      client_id: clientId,
+      scope: scopes.join(" "),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub device flow start failed: ${response.status} ${response.statusText}`);
+  }
+
+  const payload = await response.json() as GitHubDeviceCodeResponse;
+  if (!payload.device_code || !payload.user_code || !payload.verification_uri || !payload.expires_in) {
+    throw new Error("GitHub device flow response was incomplete.");
+  }
+
+  return payload;
+}
+
+async function pollGitHubDeviceFlow(clientId: string, deviceCode: string): Promise<GitHubDeviceTokenResponse> {
+  const response = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": "NexusOS",
+    },
+    body: new URLSearchParams({
+      client_id: clientId,
+      device_code: deviceCode,
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub device flow poll failed: ${response.status} ${response.statusText}`);
+  }
+
+  return response.json() as Promise<GitHubDeviceTokenResponse>;
+}
+
+async function saveVerifiedGitHubConnector(accessToken: string): Promise<{ connector: ReturnType<typeof toGitHubConnectorStatus> }> {
+  const verified = await verifyGitHubToken(accessToken);
+  const now = new Date().toISOString();
+  const connector: GitHubConnectorState = {
+    accessToken,
+    login: verified.login,
+    scopes: verified.scopes,
+    connectedAt: now,
+    lastVerifiedAt: now,
+  };
+  await writeGitHubConnectorState(connector);
+  return { connector: toGitHubConnectorStatus(connector) };
+}
+
 function toGitHubConnectorStatus(state: GitHubConnectorState | null): {
   connected: boolean;
   login: string | null;
@@ -565,7 +666,7 @@ function toGitHubConnectorStatus(state: GitHubConnectorState | null): {
   return {
     connected: true,
     login: state.login ?? null,
-    maskedToken: maskToken(state.token),
+    maskedToken: maskToken(state.accessToken),
     scopes: state.scopes ?? [],
     connectedAt: state.connectedAt ?? null,
     lastVerifiedAt: state.lastVerifiedAt ?? null,
@@ -754,15 +855,17 @@ function collectWorkspaceWriteActions(value: unknown, bucket: WorkspaceWriteActi
       : (typeof obj.type === "string"
         ? obj.type
         : (typeof obj.tool === "string" ? obj.tool : "")));
-  if (isWriteActionName(actionName)) {
-    const pathValue = typeof obj.path === "string" ? obj.path : undefined;
-    const contentValue = typeof obj.content === "string" ? obj.content : undefined;
+  const pathValue = typeof obj.path === "string" ? obj.path : undefined;
+  const contentValue = typeof obj.content === "string" ? obj.content : undefined;
+  const looksLikeBareWrite = !actionName && Boolean(pathValue && contentValue !== undefined);
+
+  if (isWriteActionName(actionName) || looksLikeBareWrite) {
     if (pathValue && contentValue !== undefined) {
       bucket.push({ path: pathValue.trim(), content: contentValue });
     }
   }
 
-  if (isWriteActionName(actionName) && obj.arguments) {
+  if ((isWriteActionName(actionName) || looksLikeBareWrite) && obj.arguments) {
     if (typeof obj.arguments === "string") {
       try {
         const parsedArgs = tryParseMaybeJson(obj.arguments);
@@ -811,6 +914,7 @@ function tryParseMaybeJson(input: string): Record<string, unknown> {
 function collectLooseWriteActions(output: string, bucket: WorkspaceWriteAction[]): void {
   const patterns = [
     /["'](?:action|name|type|tool)["']\s*:\s*["'](?:write_file|write|create_file)["'][\s\S]*?["']path["']\s*:\s*["']([^"'\n]+)["'][\s\S]*?["']content["']\s*:\s*["']([\s\S]*?)["']/gi,
+    /\{[\s\S]*?["']path["']\s*:\s*["']([^"'\n]+)["'][\s\S]*?["']content["']\s*:\s*["']([\s\S]*?)["'][\s\S]*?\}/gi,
   ];
 
   for (const pattern of patterns) {
@@ -1307,6 +1411,92 @@ app.get("/api/tools/connectors/github/status", async (_req, res) => {
   return res.json(toGitHubConnectorStatus(connector));
 });
 
+app.post("/api/tools/connectors/github/device/start", async (req, res) => {
+  const { clientId, scopes } = req.body as { clientId?: string; scopes?: string[] };
+  const trimmedClientId = clientId?.trim() ?? "";
+  if (!trimmedClientId) {
+    return res.status(400).json({ error: "GitHub OAuth clientId is required." });
+  }
+
+  try {
+    const flow = await startGitHubDeviceFlow(trimmedClientId, Array.isArray(scopes) && scopes.length > 0 ? scopes : ["repo"]);
+    pendingGitHubDeviceFlows.set(flow.device_code, {
+      clientId: trimmedClientId,
+      scopes: Array.isArray(scopes) && scopes.length > 0 ? scopes : ["repo"],
+      expiresAt: Date.now() + (flow.expires_in * 1000),
+      interval: flow.interval ?? 5,
+    });
+    return res.json({
+      ok: true,
+      device: flow,
+      clientId: trimmedClientId,
+      scopes: Array.isArray(scopes) && scopes.length > 0 ? scopes : ["repo"],
+    });
+  } catch (error) {
+    return res.status(502).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/connectors/github/device/poll", async (req, res) => {
+  const { clientId, deviceCode } = req.body as { clientId?: string; deviceCode?: string };
+  const trimmedClientId = clientId?.trim() ?? "";
+  const trimmedDeviceCode = deviceCode?.trim() ?? "";
+  if (!trimmedClientId || !trimmedDeviceCode) {
+    return res.status(400).json({ error: "clientId and deviceCode are required." });
+  }
+
+  const session = pendingGitHubDeviceFlows.get(trimmedDeviceCode);
+  if (!session) {
+    return res.status(404).json({ error: "GitHub device flow session not found." });
+  }
+
+  if (session.clientId !== trimmedClientId) {
+    return res.status(400).json({ error: "Client ID does not match the pending device flow." });
+  }
+
+  if (Date.now() > session.expiresAt) {
+    pendingGitHubDeviceFlows.delete(trimmedDeviceCode);
+    return res.status(410).json({ error: "GitHub device flow expired." });
+  }
+
+  try {
+    const tokenResponse = await pollGitHubDeviceFlow(trimmedClientId, trimmedDeviceCode);
+    if (tokenResponse.error) {
+      if (tokenResponse.error === "authorization_pending" || tokenResponse.error === "slow_down") {
+        return res.status(202).json({
+          ok: false,
+          pending: true,
+          error: tokenResponse.error,
+          errorDescription: tokenResponse.error_description ?? null,
+          interval: session.interval,
+        });
+      }
+
+      if (tokenResponse.error === "expired_token") {
+        pendingGitHubDeviceFlows.delete(trimmedDeviceCode);
+        return res.status(410).json({ error: tokenResponse.error_description ?? "GitHub device token expired." });
+      }
+
+      return res.status(401).json({ error: tokenResponse.error_description ?? tokenResponse.error ?? "GitHub device flow failed." });
+    }
+
+    if (!tokenResponse.access_token) {
+      return res.status(502).json({ error: "GitHub did not return an access token." });
+    }
+
+    pendingGitHubDeviceFlows.delete(trimmedDeviceCode);
+    const verified = await saveVerifiedGitHubConnector(tokenResponse.access_token);
+    return res.json({
+      ok: true,
+      connector: verified.connector,
+      tokenType: tokenResponse.token_type ?? null,
+      scope: tokenResponse.scope ?? null,
+    });
+  } catch (error) {
+    return res.status(502).json({ error: String(error) });
+  }
+});
+
 app.post("/api/tools/connectors/github/connect", async (req, res) => {
   const { token } = req.body as { token?: string };
   const trimmedToken = token?.trim() ?? "";
@@ -1315,17 +1505,8 @@ app.post("/api/tools/connectors/github/connect", async (req, res) => {
   }
 
   try {
-    const verified = await verifyGitHubToken(trimmedToken);
-    const now = new Date().toISOString();
-    const connector: GitHubConnectorState = {
-      token: trimmedToken,
-      login: verified.login,
-      scopes: verified.scopes,
-      connectedAt: now,
-      lastVerifiedAt: now,
-    };
-    await writeGitHubConnectorState(connector);
-    return res.json({ ok: true, connector: toGitHubConnectorStatus(connector) });
+    const verified = await saveVerifiedGitHubConnector(trimmedToken);
+    return res.json({ ok: true, connector: verified.connector });
   } catch (error) {
     return res.status(401).json({ error: String(error) });
   }
@@ -1371,15 +1552,21 @@ app.post("/api/tools/git/push", async (req, res) => {
     const remoteUrlResult = await runGit(["remote", "get-url", remoteName]);
     const remoteUrl = remoteUrlResult.stdout.trim();
     const connector = await readGitHubConnectorState();
+    const normalizedRemoteUrl = normalizeGitHubRemoteUrl(remoteUrl);
+    const isGithubRemote = /github\.com/i.test(normalizedRemoteUrl);
     const canUseConnector = Boolean(
-      connector?.token
-      && /^https?:\/\//i.test(remoteUrl)
-      && /github\.com/i.test(remoteUrl),
+      connector?.accessToken
+      && /^https?:\/\//i.test(normalizedRemoteUrl)
+      && isGithubRemote,
     );
+
+    if (connector?.accessToken && !isGithubRemote) {
+      return res.status(400).json({ error: "GitHub connector is connected, but the current remote is not GitHub. Use a GitHub remote or disconnect the connector." });
+    }
 
     const pushResult = await runGit(
       ["push", remoteName, branchName],
-      canUseConnector ? { githubToken: connector?.token, remoteUrl } : undefined,
+      canUseConnector ? { githubToken: connector?.accessToken, remoteUrl: normalizedRemoteUrl } : undefined,
     );
     const status = await getGitStatusSnapshot();
     return res.json({

@@ -275,6 +275,17 @@ type GitHubConnectorStatus = {
   lastVerifiedAt: string | null;
 };
 
+type GitHubDeviceFlow = {
+  clientId: string;
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete?: string;
+  interval: number;
+  expiresAt: number;
+  scopes: string[];
+};
+
 type SettingsTab = "connectors" | "appearance" | "automation";
 
 // ── Nexus Router types ──────────────────────────────────────────────────────
@@ -417,8 +428,15 @@ function App() {
   const [gitCommitMessage, setGitCommitMessage] = useState("Update NexusOS workspace changes");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("connectors");
   const [githubConnector, setGithubConnector] = useState<GitHubConnectorStatus | null>(null);
+  const [githubClientId, setGithubClientId] = useState<string>(() => {
+    if (typeof window === "undefined") {
+      return "";
+    }
+    return window.localStorage.getItem("nexus-github-client-id") ?? "";
+  });
   const [githubTokenDraft, setGithubTokenDraft] = useState("");
-  const [githubBusy, setGithubBusy] = useState<"connect" | "disconnect" | "refresh" | null>(null);
+  const [githubDeviceFlow, setGithubDeviceFlow] = useState<GitHubDeviceFlow | null>(null);
+  const [githubBusy, setGithubBusy] = useState<"connect" | "disconnect" | "refresh" | "device-start" | "device-poll" | null>(null);
   const [startupChecking, setStartupChecking] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
@@ -1345,6 +1363,10 @@ function App() {
   }, [themeId]);
 
   useEffect(() => {
+    window.localStorage.setItem("nexus-github-client-id", githubClientId);
+  }, [githubClientId]);
+
+  useEffect(() => {
     if (selectedPane.type === "agent") {
       void loadHarnessThreads(selectedPane.id);
       void loadHarnessSchedules(selectedPane.id);
@@ -1582,6 +1604,115 @@ function App() {
     const payload = (await response.json()) as GitHubConnectorStatus;
     setGithubConnector(payload);
     setGithubBusy(null);
+  }
+
+  async function startGitHubDeviceFlow() {
+    const clientId = githubClientId.trim();
+    if (!clientId) {
+      setStatusMessage("Add a GitHub OAuth app client ID first.");
+      return;
+    }
+
+    setGithubBusy("device-start");
+    const response = await fetch("/api/tools/connectors/github/device/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId, scopes: ["repo"] }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "GitHub device flow could not start.");
+      setGithubBusy(null);
+      return;
+    }
+
+    const payload = (await response.json()) as {
+      device: {
+        device_code: string;
+        user_code: string;
+        verification_uri: string;
+        verification_uri_complete?: string;
+        interval: number;
+        expires_in: number;
+      };
+      clientId: string;
+      scopes: string[];
+    };
+
+    const expiresAt = Date.now() + (payload.device.expires_in * 1000);
+    setGithubDeviceFlow({
+      clientId: payload.clientId,
+      deviceCode: payload.device.device_code,
+      userCode: payload.device.user_code,
+      verificationUri: payload.device.verification_uri,
+      verificationUriComplete: payload.device.verification_uri_complete,
+      interval: payload.device.interval || 5,
+      expiresAt,
+      scopes: payload.scopes,
+    });
+    setStatusMessage(`GitHub device code ready. Open the verification page and enter ${payload.device.user_code}.`);
+    if (payload.device.verification_uri_complete) {
+      window.open(payload.device.verification_uri_complete, "_blank", "noopener,noreferrer");
+    } else {
+      window.open(payload.device.verification_uri, "_blank", "noopener,noreferrer");
+    }
+    setGithubBusy(null);
+
+    const pollUntilConnected = async () => {
+      const flow = {
+        clientId: payload.clientId,
+        deviceCode: payload.device.device_code,
+        userCode: payload.device.user_code,
+        verificationUri: payload.device.verification_uri,
+        verificationUriComplete: payload.device.verification_uri_complete,
+        interval: payload.device.interval || 5,
+        expiresAt,
+        scopes: payload.scopes,
+      };
+      let pollInterval = Math.max(3, flow.interval) * 1000;
+
+      while (Date.now() < flow.expiresAt) {
+        setGithubBusy("device-poll");
+        const pollResponse = await fetch("/api/tools/connectors/github/device/poll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientId: flow.clientId, deviceCode: flow.deviceCode }),
+        });
+
+        if (pollResponse.ok) {
+          const pollPayload = (await pollResponse.json()) as { connector: GitHubConnectorStatus };
+          setGithubConnector(pollPayload.connector);
+          setGithubDeviceFlow(null);
+          setGithubBusy(null);
+          setStatusMessage(`GitHub connected as ${pollPayload.connector.login ?? "unknown"}.`);
+          return;
+        }
+
+        if (pollResponse.status === 202) {
+          const pollPayload = (await pollResponse.json()) as { interval?: number };
+          pollInterval = Math.max(3, pollPayload.interval ?? flow.interval) * 1000;
+          await new Promise((resolve) => window.setTimeout(resolve, pollInterval));
+          continue;
+        }
+
+        const pollPayload = (await pollResponse.json()) as { error?: string };
+        if (pollResponse.status === 410) {
+          setStatusMessage(pollPayload.error ?? "GitHub device flow expired.");
+          break;
+        }
+
+        setStatusMessage(pollPayload.error ?? "GitHub device flow failed.");
+        break;
+      }
+
+      setGithubBusy(null);
+      if (Date.now() >= expiresAt) {
+        setStatusMessage("GitHub device flow expired before approval.");
+      }
+    };
+
+    void pollUntilConnected();
   }
 
   async function connectGitHubConnector() {
@@ -2852,22 +2983,22 @@ function App() {
                         Connected as {githubConnector.login ?? "unknown"} ({githubConnector.maskedToken ?? "token"})
                       </small>
                     ) : (
-                      <small>Not connected. Add a GitHub fine-grained token to enable automatic authenticated push.</small>
+                      <small>Not connected. Start GitHub device flow to connect without pasting a token.</small>
                     )}
 
                     <label>
-                      GitHub Token
+                      GitHub OAuth Client ID
                       <input
-                        type="password"
-                        value={githubTokenDraft}
-                        placeholder="github_pat_..."
-                        onChange={(event) => setGithubTokenDraft(event.target.value)}
+                        type="text"
+                        value={githubClientId}
+                        placeholder="GitHub OAuth app client ID"
+                        onChange={(event) => setGithubClientId(event.target.value)}
                       />
                     </label>
 
                     <div className="tool-action-row">
-                      <button type="button" onClick={() => void connectGitHubConnector()} disabled={githubBusy !== null}>
-                        {githubBusy === "connect" ? "Connecting..." : "Connect GitHub"}
+                      <button type="button" onClick={() => void startGitHubDeviceFlow()} disabled={githubBusy !== null}>
+                        {githubBusy === "device-start" || githubBusy === "device-poll" ? "Connecting..." : "Connect GitHub"}
                       </button>
                       <button
                         type="button"
@@ -2879,10 +3010,37 @@ function App() {
                       </button>
                     </div>
 
+                    {githubDeviceFlow ? (
+                      <div className="github-device-card">
+                        <strong>Device Code: {githubDeviceFlow.userCode}</strong>
+                        <small>Go to {githubDeviceFlow.verificationUri} and enter the code above.</small>
+                        <small>Scopes: {githubDeviceFlow.scopes.join(", ")}</small>
+                        <small>Expires: {new Date(githubDeviceFlow.expiresAt).toLocaleTimeString()}</small>
+                      </div>
+                    ) : null}
+
+                    <details className="github-advanced-details">
+                      <summary>Advanced token fallback</summary>
+                      <label>
+                        GitHub Token
+                      <input
+                        type="password"
+                        value={githubTokenDraft}
+                        placeholder="github_pat_..."
+                        onChange={(event) => setGithubTokenDraft(event.target.value)}
+                      />
+                      </label>
+                      <div className="tool-action-row">
+                        <button type="button" onClick={() => void connectGitHubConnector()} disabled={githubBusy !== null || !githubTokenDraft.trim()}>
+                          {githubBusy === "connect" ? "Connecting..." : "Use Token Instead"}
+                        </button>
+                      </div>
+                    </details>
+
                     {githubConnector?.scopes.length ? (
                       <small>Token scopes: {githubConnector.scopes.join(", ")}</small>
                     ) : (
-                      <small>Recommended scopes: contents read/write (and pull_requests only if PR automation is needed).</small>
+                      <small>Recommended scopes: contents read/write, plus pull_requests only if PR automation is needed.</small>
                     )}
                   </section>
 

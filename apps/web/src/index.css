@@ -621,6 +621,28 @@ button:disabled {
   font-family: "IBM Plex Mono", Consolas, monospace;
 }
 
+.github-device-card,
+.github-advanced-details {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 8px;
+  background: rgba(12, 22, 27, 0.5);
+  padding: 8px 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.github-device-card small,
+.github-advanced-details small {
+  color: var(--ink-3);
+  font-size: 0.75rem;
+}
+
+.github-advanced-details summary {
+  cursor: pointer;
+  color: var(--ink-3);
+  font-size: 0.8rem;
+}
+
 .tool-list,
 .recommendation-list {
   list-style: none;
