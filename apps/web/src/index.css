@@ -149,6 +149,10 @@ h3 {
   flex-direction: column;
   gap: 12px;
   background: rgba(13, 23, 29, 0.32);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
 }
 
 .pane-middle {
@@ -1172,14 +1176,18 @@ textarea {
   background: rgba(21, 33, 40, 0.24);
   padding: 7px 8px;
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
-  align-items: center;
 }
 
 .workspace-list small {
   display: block;
   color: var(--ink-3);
+}
+
+.workspace-list button {
+  align-self: flex-end;
 }
 
 .tree-panel {
