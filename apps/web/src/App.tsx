@@ -369,6 +369,12 @@ function App() {
   const [startupChecking, setStartupChecking] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
+  const [streamTrace, setStreamTrace] = useState("");
+  const [streamTraceOpen, setStreamTraceOpen] = useState(false);
+  const [autoSpeakHarnessReplies, setAutoSpeakHarnessReplies] = useState(true);
+  const [harnessSpeaking, setHarnessSpeaking] = useState(false);
+  const harnessSpeechAudioRef = useRef<HTMLAudioElement | null>(null);
+  const harnessSpeechUrlRef = useRef<string | null>(null);
   
   async function loadCookbookSnapshot() {
     setCookbookBusy(true);
@@ -430,7 +436,21 @@ function App() {
     }
   }
 
-  async function playAudioPayload(payload: { audioBase64: string; mimeType: string }) {
+  function stopHarnessSpeech() {
+    const activeAudio = harnessSpeechAudioRef.current;
+    if (activeAudio) {
+      activeAudio.pause();
+      activeAudio.currentTime = 0;
+      harnessSpeechAudioRef.current = null;
+    }
+    if (harnessSpeechUrlRef.current) {
+      URL.revokeObjectURL(harnessSpeechUrlRef.current);
+      harnessSpeechUrlRef.current = null;
+    }
+    setHarnessSpeaking(false);
+  }
+
+  async function playAudioPayload(payload: { audioBase64: string; mimeType: string }, trackAsHarnessSpeech = false) {
     const byteChars = atob(payload.audioBase64);
     const bytes = new Uint8Array(byteChars.length);
     for (let index = 0; index < byteChars.length; index += 1) {
@@ -440,23 +460,49 @@ function App() {
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
 
+    if (trackAsHarnessSpeech) {
+      stopHarnessSpeech();
+      harnessSpeechAudioRef.current = audio;
+      harnessSpeechUrlRef.current = url;
+      setHarnessSpeaking(true);
+    }
+
     await new Promise<void>((resolve) => {
       audio.onended = () => {
         URL.revokeObjectURL(url);
+        if (trackAsHarnessSpeech) {
+          harnessSpeechAudioRef.current = null;
+          harnessSpeechUrlRef.current = null;
+          setHarnessSpeaking(false);
+        }
         resolve();
       };
       audio.onerror = () => {
         URL.revokeObjectURL(url);
+        if (trackAsHarnessSpeech) {
+          harnessSpeechAudioRef.current = null;
+          harnessSpeechUrlRef.current = null;
+          setHarnessSpeaking(false);
+        }
         resolve();
       };
       void audio.play().catch(() => {
         URL.revokeObjectURL(url);
+        if (trackAsHarnessSpeech) {
+          harnessSpeechAudioRef.current = null;
+          harnessSpeechUrlRef.current = null;
+          setHarnessSpeaking(false);
+        }
         resolve();
       });
     });
   }
 
   async function speakHarnessReplyIfAssigned(harnessId: string, text: string) {
+    if (!autoSpeakHarnessReplies) {
+      return;
+    }
+
     const voiceId = voiceAssignments[harnessId];
     if (!voiceId || !text.trim()) {
       return;
@@ -475,7 +521,7 @@ function App() {
     }
 
     const payload = (await response.json()) as { audioBase64: string; mimeType: string };
-    await playAudioPayload(payload);
+    await playAudioPayload(payload, true);
   }
 
   async function saveVoiceAssignments(next: Record<string, string>) {
@@ -1495,6 +1541,8 @@ function App() {
     upsertThread(harnessId, threadId, () => threadSnapshot);
     await saveHarnessThread(harnessId, threadSnapshot);
     setComposer("");
+    setStreamTrace("");
+    setStreamTraceOpen(false);
     setChatBusy(true);
     setStatusMessage(`Routing ${activeHarness.name} via Nexus Router...`);
     const requestId = crypto.randomUUID();
@@ -1576,6 +1624,7 @@ function App() {
         }
 
         if (envelope.type === "delta") {
+          setStreamTrace((current) => `${current}${envelope.text}`.slice(-8000));
           threadSnapshot = {
             ...threadSnapshot,
             messages: threadSnapshot.messages.map((entry) =>
@@ -1591,6 +1640,7 @@ function App() {
 
         if (envelope.type === "error") {
           setStatusMessage(envelope.message);
+          setStreamTrace((current) => `${current}\n[error] ${envelope.message}`.slice(-8000));
           continue;
         }
 
@@ -2799,7 +2849,28 @@ function App() {
                       <strong>{activeHarness?.name ?? "Harness"}</strong>
                     </div>
                     <div className="status-chip-row">
+                      <span className="chip">{chatBusy ? "thinking..." : "ready"}</span>
                       <span className="chip">fallback: {chatMeta?.fallbackUsed ? "yes" : "no"}</span>
+                      <button
+                        type="button"
+                        className="ghost chip-button"
+                        onClick={() => {
+                          if (autoSpeakHarnessReplies) {
+                            stopHarnessSpeech();
+                          }
+                          setAutoSpeakHarnessReplies((current) => !current);
+                        }}
+                      >
+                        voice: {autoSpeakHarnessReplies ? "on" : "off"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost chip-button"
+                        onClick={stopHarnessSpeech}
+                        disabled={!harnessSpeaking}
+                      >
+                        stop voice
+                      </button>
                       <button
                         type="button"
                         className="ghost chip-button"
@@ -2814,6 +2885,11 @@ function App() {
                     </div>
                   </header>
 
+                  <details className="stream-trace" open={streamTraceOpen} onToggle={(event) => setStreamTraceOpen((event.target as HTMLDetailsElement).open)}>
+                    <summary>{chatBusy ? "Live stream" : "Last stream"}</summary>
+                    <pre>{streamTrace || (chatBusy ? "Waiting for first token..." : "No recent stream content.")}</pre>
+                  </details>
+
                   <section className="chat-log" aria-live="polite">
                     {messages.length === 0 ? (
                       <article className="message assistant">
@@ -2824,7 +2900,15 @@ function App() {
                     {messages.map((message) => (
                       <article key={message.id} className={`message ${message.role}`}>
                         <header>{message.role}</header>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                        {message.role === "assistant" && chatBusy && !message.content ? (
+                          <p className="typing-indicator">
+                            <span className="typing-dot" />
+                            <span className="typing-dot" />
+                            <span className="typing-dot" />
+                          </p>
+                        ) : (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                        )}
                         {message.role === "assistant" && message.id === lastAssistantMessageId && chatMeta ? (
                           <small className="message-meta">
                             {chatMeta.provider} | {chatMeta.model} | {chatMeta.elapsedMs} ms | tokens {(chatMeta.tokenUsage.input ?? 0) + (chatMeta.tokenUsage.output ?? 0)}
@@ -2853,6 +2937,22 @@ function App() {
                             >
                               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
                                 <path d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16h-9V7h9v14z" fill="currentColor" />
+                              </svg>
+                            </button>
+                          </div>
+                        ) : null}
+                        {message.role === "assistant" ? (
+                          <div className="message-actions">
+                            <button
+                              type="button"
+                              className="ghost icon-btn"
+                              onClick={stopHarnessSpeech}
+                              title="Stop voice playback"
+                              aria-label="Stop voice playback"
+                              disabled={!harnessSpeaking}
+                            >
+                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                                <path d="M5 9v6h4l5 5V4L9 9H5zm12.5 3a4.5 4.5 0 0 0-2.2-3.85v7.7A4.5 4.5 0 0 0 17.5 12z" fill="currentColor" />
                               </svg>
                             </button>
                           </div>

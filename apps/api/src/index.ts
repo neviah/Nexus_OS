@@ -102,6 +102,11 @@ const piperAssignmentsPath = path.join(getRootDir(), "data", "piper-voice-assign
 let runtimeJobsLoaded = false;
 let runtimeJobPersistQueue: Promise<void> = Promise.resolve();
 
+type WorkspaceWriteAction = {
+  path: string;
+  content: string;
+};
+
 function toRuntimeJobPayload(limit = 80): RuntimeJob[] {
   return Array.from(runtimeJobs.values())
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
@@ -433,6 +438,160 @@ function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: numbe
     totalHarnesses,
     checkedAt: new Date().toISOString(),
   };
+}
+
+async function applyWorkspaceActionsFromHarnessOutput(output: string, workspacePath: string): Promise<{ output: string; applied: number }> {
+  const actions = extractWorkspaceWriteActions(output);
+  if (!actions.length || !workspacePath) {
+    return { output, applied: 0 };
+  }
+
+  const appliedPaths: string[] = [];
+  for (const action of actions) {
+    const targetPath = resolveWorkspaceTargetPath(workspacePath, action.path);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, action.content, "utf-8");
+    appliedPaths.push(path.relative(workspacePath, targetPath).replace(/\\/g, "/"));
+  }
+
+  const footer = [
+    "",
+    "[workspace actions applied]",
+    ...appliedPaths.map((relativePath) => `- wrote ${relativePath}`),
+  ].join("\n");
+
+  return {
+    output: `${output}${footer}`,
+    applied: appliedPaths.length,
+  };
+}
+
+function extractWorkspaceWriteActions(output: string): WorkspaceWriteAction[] {
+  const candidates = extractJsonCandidates(output);
+  const actions: WorkspaceWriteAction[] = [];
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      collectWorkspaceWriteActions(parsed, actions);
+    } catch {
+      // Ignore malformed snippets.
+    }
+  }
+
+  const unique = new Map<string, WorkspaceWriteAction>();
+  for (const action of actions) {
+    const key = `${action.path}::${action.content}`;
+    unique.set(key, action);
+  }
+  return Array.from(unique.values());
+}
+
+function extractJsonCandidates(output: string): string[] {
+  const candidates: string[] = [];
+  const trimmed = output.trim();
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    candidates.push(trimmed);
+  }
+
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let fencedMatch = fenced.exec(output);
+  while (fencedMatch) {
+    const snippet = fencedMatch[1]?.trim();
+    if (snippet) {
+      candidates.push(snippet);
+    }
+    fencedMatch = fenced.exec(output);
+  }
+
+  const inlineObject = /(\{[\s\S]*?"(?:action|name)"\s*:\s*"write_file"[\s\S]*?\})/gi;
+  let inlineMatch = inlineObject.exec(output);
+  while (inlineMatch) {
+    const snippet = inlineMatch[1]?.trim();
+    if (snippet) {
+      candidates.push(snippet);
+    }
+    inlineMatch = inlineObject.exec(output);
+  }
+
+  return candidates;
+}
+
+function collectWorkspaceWriteActions(value: unknown, bucket: WorkspaceWriteAction[]): void {
+  if (!value) {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectWorkspaceWriteActions(entry, bucket);
+    }
+    return;
+  }
+
+  if (typeof value !== "object") {
+    return;
+  }
+
+  const obj = value as Record<string, unknown>;
+
+  const actionName = typeof obj.action === "string" ? obj.action : (typeof obj.name === "string" ? obj.name : "");
+  if (actionName === "write_file") {
+    const pathValue = typeof obj.path === "string" ? obj.path : undefined;
+    const contentValue = typeof obj.content === "string" ? obj.content : undefined;
+    if (pathValue && contentValue !== undefined) {
+      bucket.push({ path: pathValue.trim(), content: contentValue });
+    }
+  }
+
+  if (actionName === "write_file" && obj.arguments) {
+    if (typeof obj.arguments === "string") {
+      try {
+        const parsedArgs = JSON.parse(obj.arguments) as Record<string, unknown>;
+        const pathValue = typeof parsedArgs.path === "string" ? parsedArgs.path : undefined;
+        const contentValue = typeof parsedArgs.content === "string" ? parsedArgs.content : undefined;
+        if (pathValue && contentValue !== undefined) {
+          bucket.push({ path: pathValue.trim(), content: contentValue });
+        }
+      } catch {
+        // ignore invalid arguments payload
+      }
+    } else if (typeof obj.arguments === "object") {
+      const args = obj.arguments as Record<string, unknown>;
+      const pathValue = typeof args.path === "string" ? args.path : undefined;
+      const contentValue = typeof args.content === "string" ? args.content : undefined;
+      if (pathValue && contentValue !== undefined) {
+        bucket.push({ path: pathValue.trim(), content: contentValue });
+      }
+    }
+  }
+
+  if (Array.isArray(obj.actions)) {
+    collectWorkspaceWriteActions(obj.actions, bucket);
+  }
+
+  if (Array.isArray(obj.tool_calls)) {
+    collectWorkspaceWriteActions(obj.tool_calls, bucket);
+  }
+
+  if (obj.function && typeof obj.function === "object") {
+    collectWorkspaceWriteActions(obj.function, bucket);
+  }
+}
+
+function resolveWorkspaceTargetPath(workspacePath: string, requestedPath: string): string {
+  const root = path.resolve(workspacePath);
+  const normalizedRequest = requestedPath.replace(/^\.?[\\/]+/, "").trim();
+  if (!normalizedRequest) {
+    throw new Error("write_file action provided an empty path");
+  }
+
+  const resolved = path.resolve(root, normalizedRequest);
+  const rootWithSep = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (resolved !== root && !resolved.startsWith(rootWithSep)) {
+    throw new Error(`write_file path is outside workspace: ${requestedPath}`);
+  }
+  return resolved;
 }
 
 function isNexusRouterConfigured(state: SystemState): boolean {
@@ -1413,6 +1572,14 @@ app.post("/api/chat", async (req, res) => {
       state,
       workspace,
     });
+
+    if (workspace.path) {
+      const actionResult = await applyWorkspaceActionsFromHarnessOutput(adapterResult.content, workspace.path);
+      adapterResult = {
+        ...adapterResult,
+        content: actionResult.output,
+      };
+    }
   } catch (error) {
     await updateTaskStatus(taskId, "failed", { error: String(error) });
     return res.status(502).json({ error: String(error), requestId: taskId });
@@ -1500,15 +1667,19 @@ app.post("/api/chat/tasks/:requestId/resume", async (req, res) => {
     workspace,
   });
 
+  const resumedContent = workspace.path
+    ? (await applyWorkspaceActionsFromHarnessOutput(resumed.content, workspace.path)).output
+    : resumed.content;
+
   await updateTaskStatus(requestId, "completed", {
-    finalOutput: `${task.partialOutput}${resumed.content}`,
+    finalOutput: `${task.partialOutput}${resumedContent}`,
     meta: resumed.meta,
   });
 
   return res.json({
     requestId,
     resumed: true,
-    content: resumed.content,
+    content: resumedContent,
     meta: resumed.meta,
   });
 });
@@ -1611,8 +1782,20 @@ app.post("/api/chat/stream", async (req, res) => {
     }
     await writeSystemState(state);
 
+    let finalOutput = output;
+    if (!controller.signal.aborted && workspace.path) {
+      const actionResult = await applyWorkspaceActionsFromHarnessOutput(output, workspace.path);
+      finalOutput = actionResult.output;
+      if (actionResult.applied > 0) {
+        const suffix = finalOutput.slice(output.length);
+        if (suffix.trim()) {
+          res.write(`data: ${JSON.stringify({ type: "delta", text: suffix })}\n\n`);
+        }
+      }
+    }
+
     await updateTaskStatus(requestId, controller.signal.aborted ? "aborted" : "completed", {
-      finalOutput: output,
+      finalOutput,
       meta: latestMeta,
       error: controller.signal.aborted ? "Stopped by user" : undefined,
     });
@@ -1635,14 +1818,18 @@ app.post("/api/chat/stream", async (req, res) => {
           workspace,
         });
 
-        await appendTaskOutput(requestId, resumed.content);
+        const resumedContent = workspace.path
+          ? (await applyWorkspaceActionsFromHarnessOutput(resumed.content, workspace.path)).output
+          : resumed.content;
+
+        await appendTaskOutput(requestId, resumedContent);
         await updateTaskStatus(requestId, "completed", {
-          finalOutput: `${replayTask.partialOutput}${resumed.content}`,
+          finalOutput: `${replayTask.partialOutput}${resumedContent}`,
           meta: resumed.meta,
         });
 
         res.write(`data: ${JSON.stringify({ type: "meta", meta: { ...resumed.meta, fallbackUsed: true } })}\n\n`);
-        res.write(`data: ${JSON.stringify({ type: "delta", text: resumed.content })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "delta", text: resumedContent })}\n\n`);
         res.write("data: {\"type\":\"done\"}\n\n");
         res.end();
       } catch (replayError) {

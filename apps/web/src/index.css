@@ -29,6 +29,8 @@
 body {
   margin: 0;
   min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   background:
     radial-gradient(1200px 700px at 10% -20%, rgba(255, 122, 24, 0.22), transparent 60%),
     radial-gradient(1400px 800px at 100% 120%, rgba(86, 179, 255, 0.15), transparent 55%),
@@ -37,11 +39,14 @@ body {
 
 #root {
   min-height: 100vh;
+  height: 100vh;
 }
 
 .app-shell {
   width: min(1440px, 86vw);
   margin: 20px auto;
+  height: calc(100vh - 40px);
+  max-height: calc(100vh - 40px);
   padding: 14px;
   border-radius: 14px;
   background: rgba(9, 17, 22, 0.74);
@@ -127,13 +132,15 @@ h3 {
   display: grid;
   gap: 10px;
   grid-template-columns: minmax(170px, 0.68fr) minmax(460px, 2.06fr) minmax(260px, 1fr);
+  height: 100%;
 }
 
 .pane {
   border-radius: 10px;
   padding: 10px;
   background: rgba(13, 23, 29, 0.36);
-  min-height: 620px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .pane-left,
@@ -297,6 +304,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-height: 0;
 }
 
 .chat-thread-header {
@@ -409,6 +417,7 @@ button:disabled {
   flex-direction: column;
   gap: 10px;
   min-width: 0;
+  min-height: 0;
 }
 
 .tool-console {
@@ -907,6 +916,29 @@ textarea {
   padding-right: 6px;
 }
 
+.stream-trace {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 10px;
+  background: rgba(12, 22, 27, 0.6);
+  padding: 6px 8px;
+}
+
+.stream-trace summary {
+  cursor: pointer;
+  font-size: 0.76rem;
+  color: var(--ink-3);
+  user-select: none;
+}
+
+.stream-trace pre {
+  margin: 8px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 0.74rem;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+
 .message {
   border-radius: 14px;
   padding: 10px 12px;
@@ -944,6 +976,42 @@ textarea {
 
 .message p:last-child {
   margin-bottom: 0;
+}
+
+.typing-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+}
+
+.typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ink-3);
+  animation: typingPulse 1s infinite ease-in-out;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes typingPulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
 }
 
 .chat-composer {
