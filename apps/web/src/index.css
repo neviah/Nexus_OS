@@ -22,8 +22,80 @@
   font-size: 0.87rem;
 }
 
+:root[data-theme="ocean"] {
+  --ink-1: #f0f9ff;
+  --ink-2: #c2dff0;
+  --ink-3: #85a4b8;
+  --bg-1: #091722;
+  --bg-2: #102739;
+  --bg-3: #15394b;
+  --line: #25506a;
+  --signal: #1ab8ff;
+  --signal-soft: #bdefff;
+  --ok: #66dbbe;
+  --warn: #f0bc5a;
+  --bad: #f17a79;
+}
+
+:root[data-theme="forest"] {
+  --ink-1: #f2f8ed;
+  --ink-2: #c7d9b8;
+  --ink-3: #8ca184;
+  --bg-1: #10190f;
+  --bg-2: #1c2d1a;
+  --bg-3: #243d20;
+  --line: #335432;
+  --signal: #7ed957;
+  --signal-soft: #d8f9c2;
+  --ok: #61d993;
+  --warn: #f0be55;
+  --bad: #ee7974;
+}
+
+:root[data-theme="sunset"] {
+  --ink-1: #fff3e4;
+  --ink-2: #f2d1b1;
+  --ink-3: #c9a27f;
+  --bg-1: #1d1212;
+  --bg-2: #2e1d1a;
+  --bg-3: #422920;
+  --line: #674236;
+  --signal: #ff9f43;
+  --signal-soft: #ffe0b9;
+  --ok: #77d89f;
+  --warn: #ffbf66;
+  --bad: #f18484;
+}
+
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 122, 24, 0.45) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(255, 122, 24, 0.52), rgba(82, 173, 210, 0.42));
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(255, 122, 24, 0.72), rgba(82, 173, 210, 0.58));
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 body {
@@ -475,6 +547,78 @@ button:disabled {
 .tool-section {
   display: grid;
   gap: 8px;
+}
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.theme-card {
+  text-align: left;
+  border: 1px solid rgba(47, 71, 79, 0.45);
+  background: rgba(18, 29, 35, 0.52);
+  padding: 10px;
+  display: grid;
+  gap: 3px;
+}
+
+.theme-card.active {
+  border-color: rgba(255, 122, 24, 0.8);
+  box-shadow: inset 2px 0 0 var(--signal);
+}
+
+.theme-card small {
+  color: var(--ink-3);
+  font-size: 0.76rem;
+}
+
+.git-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 6px;
+}
+
+.git-status-grid span {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 8px;
+  padding: 4px 7px;
+  font-size: 0.75rem;
+  background: rgba(17, 27, 33, 0.5);
+}
+
+.git-entry-list {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 8px;
+  background: rgba(12, 22, 27, 0.5);
+  padding: 6px 8px;
+}
+
+.git-entry-list summary {
+  cursor: pointer;
+  color: var(--ink-3);
+  font-size: 0.8rem;
+}
+
+.git-entry-list ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.git-entry-list li {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 8px;
+  font-size: 0.76rem;
+}
+
+.git-entry-list li span:first-child {
+  color: var(--signal-soft);
+  font-family: "IBM Plex Mono", Consolas, monospace;
 }
 
 .tool-list,

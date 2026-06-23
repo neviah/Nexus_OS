@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   buildWorkspaceTree,
   createWorkspace,
@@ -72,6 +74,7 @@ const app = express();
 const port = Number(process.env.PORT ?? 8080);
 const activeStreams = new Map<string, AbortController>();
 const activeScheduleRuns = new Set<string>();
+const execFileAsync = promisify(execFile);
 
 type RuntimeJobAction =
   | "install-ollama"
@@ -440,6 +443,90 @@ function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: numbe
   };
 }
 
+async function runGit(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  try {
+    const result = await execFileAsync("git", args, {
+      cwd: getRootDir(),
+      windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return {
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+    };
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function getGitStatusSnapshot(): Promise<{
+  branch: string;
+  ahead: number;
+  behind: number;
+  clean: boolean;
+  counts: { staged: number; unstaged: number; untracked: number; total: number };
+  entries: Array<{ x: string; y: string; path: string }>;
+  remotes: string[];
+  rootDir: string;
+}> {
+  const [{ stdout: statusRaw }, { stdout: remotesRaw }] = await Promise.all([
+    runGit(["status", "--porcelain=v1", "--branch"]),
+    runGit(["remote"]),
+  ]);
+
+  const lines = statusRaw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const branchLine = lines.find((line) => line.startsWith("## ")) ?? "## detached";
+  const branchMeta = branchLine.slice(3).trim();
+  const branch = branchMeta.split("...")[0]?.trim() || "detached";
+  const aheadMatch = branchMeta.match(/ahead\s+(\d+)/);
+  const behindMatch = branchMeta.match(/behind\s+(\d+)/);
+
+  const entries = lines
+    .filter((line) => !line.startsWith("## "))
+    .map((line) => ({
+      x: line[0] ?? " ",
+      y: line[1] ?? " ",
+      path: line.slice(3).trim().replace(/^"|"$/g, ""),
+    }));
+
+  let staged = 0;
+  let unstaged = 0;
+  let untracked = 0;
+  for (const entry of entries) {
+    if (entry.x === "?" && entry.y === "?") {
+      untracked += 1;
+      continue;
+    }
+    if (entry.x !== " " && entry.x !== "?") {
+      staged += 1;
+    }
+    if (entry.y !== " ") {
+      unstaged += 1;
+    }
+  }
+
+  const remotes = remotesRaw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  return {
+    branch,
+    ahead: aheadMatch ? Number(aheadMatch[1]) : 0,
+    behind: behindMatch ? Number(behindMatch[1]) : 0,
+    clean: entries.length === 0,
+    counts: {
+      staged,
+      unstaged,
+      untracked,
+      total: entries.length,
+    },
+    entries,
+    remotes,
+    rootDir: getRootDir(),
+  };
+}
+
 async function applyWorkspaceActionsFromHarnessOutput(output: string, workspacePath: string): Promise<{ output: string; applied: number }> {
   const actions = extractWorkspaceWriteActions(output);
   if (!actions.length || !workspacePath) {
@@ -795,6 +882,7 @@ app.get("/api/bootstrap", async (_req, res) => {
       },
       { id: "image-generator", name: "Image Generator", status: "online" },
       { id: "video-generator", name: "Video Generator", status: "offline" },
+      { id: "settings", name: "Settings", status: "online" },
     ],
     router9: getRouterSummary(state),
     workspaces,
@@ -1087,6 +1175,55 @@ app.post("/api/tools/music/save", async (req, res) => {
       bytes,
     });
     return res.json({ ok: true, ...saved });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/tools/git/status", async (_req, res) => {
+  try {
+    const snapshot = await getGitStatusSnapshot();
+    return res.json(snapshot);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/git/commit", async (req, res) => {
+  const { message } = req.body as { message?: string };
+  const commitMessage = message?.trim() ?? "";
+  if (commitMessage.length < 3) {
+    return res.status(400).json({ error: "Commit message must be at least 3 characters." });
+  }
+
+  try {
+    await runGit(["add", "-A"]);
+    const commitResult = await runGit(["commit", "-m", commitMessage]);
+    const status = await getGitStatusSnapshot();
+    return res.json({ ok: true, output: commitResult.stdout || commitResult.stderr, status });
+  } catch (error) {
+    const messageText = String(error);
+    if (messageText.includes("nothing to commit") || messageText.includes("no changes added to commit")) {
+      return res.status(400).json({ error: "Nothing to commit. No changes detected." });
+    }
+    return res.status(500).json({ error: messageText });
+  }
+});
+
+app.post("/api/tools/git/push", async (req, res) => {
+  const { remote, branch } = req.body as { remote?: string; branch?: string };
+  const remoteName = remote?.trim() || "origin";
+
+  try {
+    const snapshot = await getGitStatusSnapshot();
+    const branchName = branch?.trim() || snapshot.branch;
+    if (!branchName || branchName === "detached") {
+      return res.status(400).json({ error: "Cannot push from detached HEAD. Checkout a branch first." });
+    }
+
+    const pushResult = await runGit(["push", remoteName, branchName]);
+    const status = await getGitStatusSnapshot();
+    return res.json({ ok: true, output: pushResult.stdout || pushResult.stderr, status });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
   }

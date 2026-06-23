@@ -244,6 +244,28 @@ type RuntimeJob = {
   retryOfId?: string;
 };
 
+type ThemePreset = {
+  id: string;
+  name: string;
+  hint: string;
+};
+
+type GitStatusPayload = {
+  branch: string;
+  ahead: number;
+  behind: number;
+  clean: boolean;
+  counts: {
+    staged: number;
+    unstaged: number;
+    untracked: number;
+    total: number;
+  };
+  entries: Array<{ x: string; y: string; path: string }>;
+  remotes: string[];
+  rootDir: string;
+};
+
 // ── Nexus Router types ──────────────────────────────────────────────────────
 type NxProvider = {
   id: string;
@@ -315,7 +337,20 @@ const PROVIDER_API_KEY_LINKS: Record<string, string> = {
   google: "https://aistudio.google.com/app/apikey",
 };
 
+const THEME_PRESETS: ThemePreset[] = [
+  { id: "ember", name: "Ember Ops", hint: "default warm cyber theme" },
+  { id: "ocean", name: "Ocean Grid", hint: "cool steel + cyan accents" },
+  { id: "forest", name: "Forest Signal", hint: "green tactical terminal tone" },
+  { id: "sunset", name: "Sunset Neon", hint: "gold + coral high contrast" },
+];
+
 function App() {
+  const [themeId, setThemeId] = useState<string>(() => {
+    if (typeof window === "undefined") {
+      return "ember";
+    }
+    return window.localStorage.getItem("nexus-theme") || "ember";
+  });
   const [boot, setBoot] = useState<BootstrapPayload | null>(null);
   const [selectedPane, setSelectedPane] = useState<PaneSelection>({ type: "tool", id: "nexus-router" });
   const [composer, setComposer] = useState("");
@@ -366,6 +401,9 @@ function App() {
   const [musicSaveBusy, setMusicSaveBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toolsOpen, setToolsOpen] = useState(true);
+  const [gitStatus, setGitStatus] = useState<GitStatusPayload | null>(null);
+  const [gitBusyAction, setGitBusyAction] = useState<"refresh" | "commit" | "push" | null>(null);
+  const [gitCommitMessage, setGitCommitMessage] = useState("Update NexusOS workspace changes");
   const [startupChecking, setStartupChecking] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
@@ -1287,6 +1325,11 @@ function App() {
   }, [loadBootstrap]);
 
   useEffect(() => {
+    document.documentElement.setAttribute("data-theme", themeId);
+    window.localStorage.setItem("nexus-theme", themeId);
+  }, [themeId]);
+
+  useEffect(() => {
     if (selectedPane.type === "agent") {
       void loadHarnessThreads(selectedPane.id);
       void loadHarnessSchedules(selectedPane.id);
@@ -1303,6 +1346,9 @@ function App() {
     if (selectedPane.type === "tool" && selectedPane.id === "music-generator") {
       void loadRuntimeStatus();
       void loadRuntimeJobs();
+    }
+    if (selectedPane.type === "tool" && selectedPane.id === "settings") {
+      void loadGitStatus();
     }
   }, [selectedPane, boot?.activeWorkspaceId]);
 
@@ -1491,6 +1537,69 @@ function App() {
     } catch {
       // Keep chat flow resilient even if tree refresh fails.
     }
+  }
+
+  async function loadGitStatus() {
+    setGitBusyAction("refresh");
+    const response = await fetch("/api/tools/git/status");
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to load Git status.");
+      setGitBusyAction(null);
+      return;
+    }
+
+    const payload = (await response.json()) as GitStatusPayload;
+    setGitStatus(payload);
+    setGitBusyAction(null);
+  }
+
+  async function runGitCommit() {
+    const message = gitCommitMessage.trim();
+    if (message.length < 3) {
+      setStatusMessage("Commit message must be at least 3 characters.");
+      return;
+    }
+
+    setGitBusyAction("commit");
+    const response = await fetch("/api/tools/git/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Git commit failed.");
+      setGitBusyAction(null);
+      return;
+    }
+
+    const payload = (await response.json()) as { status: GitStatusPayload };
+    setGitStatus(payload.status);
+    setStatusMessage("Committed workspace changes.");
+    setGitBusyAction(null);
+  }
+
+  async function runGitPush() {
+    setGitBusyAction("push");
+    const response = await fetch("/api/tools/git/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Git push failed.");
+      setGitBusyAction(null);
+      return;
+    }
+
+    const payload = (await response.json()) as { status: GitStatusPayload };
+    setGitStatus(payload.status);
+    setStatusMessage("Pushed current branch to origin.");
+    setGitBusyAction(null);
   }
 
   async function onRunStartupCheck() {
@@ -1956,7 +2065,7 @@ function App() {
 
           {toolsOpen ? (
             <ul className="nav-list">
-              {boot?.tools.filter((tool) => tool.id !== "9router").map((tool) => {
+              {boot?.tools.filter((tool) => tool.id !== "9router" && tool.id !== "settings").map((tool) => {
                 const isActive = selectedPane.type === "tool" && selectedPane.id === tool.id;
                 return (
                   <li key={tool.id}>
@@ -1974,6 +2083,19 @@ function App() {
                   </li>
                 );
               })}
+              <li>
+                <button
+                  type="button"
+                  className={`nav-item ${selectedPane.type === "tool" && selectedPane.id === "settings" ? "active" : ""}`}
+                  onClick={() => setSelectedPane({ type: "tool", id: "settings" })}
+                >
+                  <span className="health healthy" />
+                  <span className="meta-block">
+                    <strong>⚙ Settings</strong>
+                    <small>theme + git</small>
+                  </span>
+                </button>
+              </li>
             </ul>
           ) : null}
         </aside>
@@ -2605,7 +2727,90 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator", "image-generator"].includes(selectedPane.id) ? (
+          {selectedPane.type === "tool" && selectedPane.id === "settings" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Settings</h2>
+                  <p className="subtitle">Personalize NexusOS visuals and run repository Git actions from one place.</p>
+                </div>
+              </div>
+
+              <section className="tool-section">
+                <h3>Theme Colors</h3>
+                <div className="theme-grid" role="radiogroup" aria-label="Theme presets">
+                  {THEME_PRESETS.map((theme) => (
+                    <button
+                      key={theme.id}
+                      type="button"
+                      className={`theme-card ${themeId === theme.id ? "active" : ""}`}
+                      onClick={() => setThemeId(theme.id)}
+                    >
+                      <strong>{theme.name}</strong>
+                      <small>{theme.hint}</small>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="tool-section">
+                <div className="tool-header-row">
+                  <h3>Git Workspace</h3>
+                  <button type="button" className="ghost" onClick={() => void loadGitStatus()} disabled={gitBusyAction !== null}>
+                    {gitBusyAction === "refresh" ? "Refreshing..." : "Refresh"}
+                  </button>
+                </div>
+
+                {gitStatus ? (
+                  <div className="git-status-grid">
+                    <span>branch: {gitStatus.branch}</span>
+                    <span>ahead: {gitStatus.ahead}</span>
+                    <span>behind: {gitStatus.behind}</span>
+                    <span>staged: {gitStatus.counts.staged}</span>
+                    <span>unstaged: {gitStatus.counts.unstaged}</span>
+                    <span>untracked: {gitStatus.counts.untracked}</span>
+                  </div>
+                ) : (
+                  <small>Git status not loaded yet.</small>
+                )}
+
+                <label>
+                  Commit Message
+                  <input
+                    type="text"
+                    value={gitCommitMessage}
+                    onChange={(event) => setGitCommitMessage(event.target.value)}
+                    placeholder="Describe this change"
+                  />
+                </label>
+
+                <div className="tool-action-row">
+                  <button type="button" onClick={() => void runGitCommit()} disabled={gitBusyAction !== null}>
+                    {gitBusyAction === "commit" ? "Committing..." : "Commit All Changes"}
+                  </button>
+                  <button type="button" className="ghost" onClick={() => void runGitPush()} disabled={gitBusyAction !== null}>
+                    {gitBusyAction === "push" ? "Pushing..." : "Push Branch"}
+                  </button>
+                </div>
+
+                {gitStatus?.entries.length ? (
+                  <details className="git-entry-list">
+                    <summary>Changed files ({gitStatus.entries.length})</summary>
+                    <ul>
+                      {gitStatus.entries.slice(0, 40).map((entry) => (
+                        <li key={`${entry.x}${entry.y}-${entry.path}`}>
+                          <span>{entry.x}{entry.y}</span>
+                          <span>{entry.path}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
+              </section>
+            </div>
+          ) : null}
+
+          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator", "image-generator", "settings"].includes(selectedPane.id) ? (
             <div className="placeholder-view">
               <h2>{boot?.tools.find((tool) => tool.id === selectedPane.id)?.name ?? "Tool"}</h2>
               <p>Tool plugin slot ready. Hook this panel to a future backend module.</p>
