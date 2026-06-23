@@ -1484,6 +1484,15 @@ function App() {
     setWorkspaceTree(payload.tree);
   }
 
+  async function refreshActiveWorkspaceTree(workspaceId?: string) {
+    const resolvedWorkspaceId = workspaceId ?? boot?.activeWorkspaceId ?? "default";
+    try {
+      await loadWorkspaceTree(resolvedWorkspaceId);
+    } catch {
+      // Keep chat flow resilient even if tree refresh fails.
+    }
+  }
+
   async function onRunStartupCheck() {
     setStartupChecking(true);
     setStatusMessage("Running startup check...");
@@ -1512,6 +1521,7 @@ function App() {
     }
 
     const harnessId = activeHarness.id;
+    const workspaceIdForRequest = boot?.activeWorkspaceId ?? "default";
     const threadId = ensureHarnessThread(harnessId);
     const threadMessages = (chatThreadsByHarness[harnessId] ?? []).find((thread) => thread.id === threadId)?.messages ?? [];
 
@@ -1565,6 +1575,7 @@ function App() {
       setChatBusy(false);
       setActiveRequestId(null);
       await saveHarnessThread(harnessId, threadSnapshot);
+      await refreshActiveWorkspaceTree(workspaceIdForRequest);
       return;
     }
 
@@ -1574,6 +1585,7 @@ function App() {
       setChatBusy(false);
       setActiveRequestId(null);
       await saveHarnessThread(harnessId, threadSnapshot);
+      await refreshActiveWorkspaceTree(workspaceIdForRequest);
       return;
     }
 
@@ -1649,6 +1661,7 @@ function App() {
           setChatBusy(false);
           setActiveRequestId(null);
           setStatusMessage("Ready");
+          await refreshActiveWorkspaceTree(workspaceIdForRequest);
         }
       }
     }
@@ -1660,6 +1673,7 @@ function App() {
     if (finalAssistant.trim()) {
       void speakHarnessReplyIfAssigned(harnessId, finalAssistant);
     }
+    await refreshActiveWorkspaceTree(workspaceIdForRequest);
     setStatusMessage("Ready");
   }
 
