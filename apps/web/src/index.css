@@ -648,6 +648,12 @@ button:disabled {
   gap: 8px;
 }
 
+.settings-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+
 .tool-tabs {
   display: flex;
   gap: 8px;
@@ -666,6 +672,26 @@ button:disabled {
   border-color: rgba(93, 169, 199, 0.8);
   color: var(--ink-1);
   background: rgba(54, 103, 117, 0.4);
+}
+
+.connector-placeholder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.connector-placeholder-card {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 8px;
+  background: rgba(17, 27, 33, 0.5);
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.connector-placeholder-card small {
+  color: var(--ink-3);
+  font-size: 0.75rem;
 }
 
 .runtime-jobs-list {

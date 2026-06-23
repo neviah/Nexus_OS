@@ -102,8 +102,17 @@ type RuntimeJob = {
 const runtimeJobs = new Map<string, RuntimeJob>();
 const runtimeJobsPath = path.join(getRootDir(), "data", "runtime-jobs.local.json");
 const piperAssignmentsPath = path.join(getRootDir(), "data", "piper-voice-assignments.local.json");
+const githubConnectorPath = path.join(getRootDir(), "data", "connectors.github.local.json");
 let runtimeJobsLoaded = false;
 let runtimeJobPersistQueue: Promise<void> = Promise.resolve();
+
+type GitHubConnectorState = {
+  token: string;
+  login?: string;
+  scopes?: string[];
+  connectedAt?: string;
+  lastVerifiedAt?: string;
+};
 
 type WorkspaceWriteAction = {
   path: string;
@@ -443,9 +452,21 @@ function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: numbe
   };
 }
 
-async function runGit(args: string[]): Promise<{ stdout: string; stderr: string }> {
+async function runGit(
+  args: string[],
+  options?: { githubToken?: string; remoteUrl?: string },
+): Promise<{ stdout: string; stderr: string }> {
+  const finalArgs = [...args];
+  const remoteUrl = options?.remoteUrl?.trim() ?? "";
+  const githubToken = options?.githubToken?.trim() ?? "";
+  const isHttpsGitHubRemote = /^https?:\/\//i.test(remoteUrl) && /github\.com/i.test(remoteUrl);
+  if (githubToken && isHttpsGitHubRemote) {
+    const auth = Buffer.from(`x-access-token:${githubToken}`, "utf-8").toString("base64");
+    finalArgs.unshift("-c", `http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}`);
+  }
+
   try {
-    const result = await execFileAsync("git", args, {
+    const result = await execFileAsync("git", finalArgs, {
       cwd: getRootDir(),
       windowsHide: true,
       maxBuffer: 2 * 1024 * 1024,
@@ -457,6 +478,98 @@ async function runGit(args: string[]): Promise<{ stdout: string; stderr: string 
   } catch (error) {
     throw new Error(error instanceof Error ? error.message : String(error));
   }
+}
+
+async function readGitHubConnectorState(): Promise<GitHubConnectorState | null> {
+  try {
+    const raw = await fs.readFile(githubConnectorPath, "utf-8");
+    const parsed = JSON.parse(raw) as GitHubConnectorState;
+    if (!parsed || typeof parsed.token !== "string" || !parsed.token.trim()) {
+      return null;
+    }
+    return {
+      ...parsed,
+      token: parsed.token.trim(),
+      scopes: Array.isArray(parsed.scopes) ? parsed.scopes : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeGitHubConnectorState(next: GitHubConnectorState): Promise<void> {
+  await fs.mkdir(path.dirname(githubConnectorPath), { recursive: true });
+  await fs.writeFile(githubConnectorPath, JSON.stringify(next, null, 2), "utf-8");
+}
+
+async function clearGitHubConnectorState(): Promise<void> {
+  await fs.rm(githubConnectorPath, { force: true });
+}
+
+function maskToken(token: string): string {
+  if (token.length <= 8) {
+    return "****";
+  }
+  return `${token.slice(0, 4)}...${token.slice(-4)}`;
+}
+
+async function verifyGitHubToken(token: string): Promise<{ login: string; scopes: string[] }> {
+  const response = await fetch("https://api.github.com/user", {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "NexusOS",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub auth failed: ${response.status} ${response.statusText}`);
+  }
+
+  const payload = await response.json() as { login?: string };
+  if (!payload.login) {
+    throw new Error("GitHub auth response did not include login.");
+  }
+
+  const scopesRaw = response.headers.get("x-oauth-scopes") ?? "";
+  const scopes = scopesRaw
+    .split(",")
+    .map((scope) => scope.trim())
+    .filter((scope) => scope.length > 0);
+
+  return {
+    login: payload.login,
+    scopes,
+  };
+}
+
+function toGitHubConnectorStatus(state: GitHubConnectorState | null): {
+  connected: boolean;
+  login: string | null;
+  maskedToken: string | null;
+  scopes: string[];
+  connectedAt: string | null;
+  lastVerifiedAt: string | null;
+} {
+  if (!state) {
+    return {
+      connected: false,
+      login: null,
+      maskedToken: null,
+      scopes: [],
+      connectedAt: null,
+      lastVerifiedAt: null,
+    };
+  }
+
+  return {
+    connected: true,
+    login: state.login ?? null,
+    maskedToken: maskToken(state.token),
+    scopes: state.scopes ?? [],
+    connectedAt: state.connectedAt ?? null,
+    lastVerifiedAt: state.lastVerifiedAt ?? null,
+  };
 }
 
 async function getGitStatusSnapshot(): Promise<{
@@ -1189,6 +1302,40 @@ app.get("/api/tools/git/status", async (_req, res) => {
   }
 });
 
+app.get("/api/tools/connectors/github/status", async (_req, res) => {
+  const connector = await readGitHubConnectorState();
+  return res.json(toGitHubConnectorStatus(connector));
+});
+
+app.post("/api/tools/connectors/github/connect", async (req, res) => {
+  const { token } = req.body as { token?: string };
+  const trimmedToken = token?.trim() ?? "";
+  if (!trimmedToken) {
+    return res.status(400).json({ error: "GitHub token is required." });
+  }
+
+  try {
+    const verified = await verifyGitHubToken(trimmedToken);
+    const now = new Date().toISOString();
+    const connector: GitHubConnectorState = {
+      token: trimmedToken,
+      login: verified.login,
+      scopes: verified.scopes,
+      connectedAt: now,
+      lastVerifiedAt: now,
+    };
+    await writeGitHubConnectorState(connector);
+    return res.json({ ok: true, connector: toGitHubConnectorStatus(connector) });
+  } catch (error) {
+    return res.status(401).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/connectors/github/disconnect", async (_req, res) => {
+  await clearGitHubConnectorState();
+  return res.json({ ok: true, connector: toGitHubConnectorStatus(null) });
+});
+
 app.post("/api/tools/git/commit", async (req, res) => {
   const { message } = req.body as { message?: string };
   const commitMessage = message?.trim() ?? "";
@@ -1221,9 +1368,27 @@ app.post("/api/tools/git/push", async (req, res) => {
       return res.status(400).json({ error: "Cannot push from detached HEAD. Checkout a branch first." });
     }
 
-    const pushResult = await runGit(["push", remoteName, branchName]);
+    const remoteUrlResult = await runGit(["remote", "get-url", remoteName]);
+    const remoteUrl = remoteUrlResult.stdout.trim();
+    const connector = await readGitHubConnectorState();
+    const canUseConnector = Boolean(
+      connector?.token
+      && /^https?:\/\//i.test(remoteUrl)
+      && /github\.com/i.test(remoteUrl),
+    );
+
+    const pushResult = await runGit(
+      ["push", remoteName, branchName],
+      canUseConnector ? { githubToken: connector?.token, remoteUrl } : undefined,
+    );
     const status = await getGitStatusSnapshot();
-    return res.json({ ok: true, output: pushResult.stdout || pushResult.stderr, status });
+    return res.json({
+      ok: true,
+      output: pushResult.stdout || pushResult.stderr,
+      status,
+      usedGithubConnector: canUseConnector,
+      remoteUrl,
+    });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
   }

@@ -266,6 +266,17 @@ type GitStatusPayload = {
   rootDir: string;
 };
 
+type GitHubConnectorStatus = {
+  connected: boolean;
+  login: string | null;
+  maskedToken: string | null;
+  scopes: string[];
+  connectedAt: string | null;
+  lastVerifiedAt: string | null;
+};
+
+type SettingsTab = "connectors" | "appearance" | "automation";
+
 // ── Nexus Router types ──────────────────────────────────────────────────────
 type NxProvider = {
   id: string;
@@ -404,6 +415,10 @@ function App() {
   const [gitStatus, setGitStatus] = useState<GitStatusPayload | null>(null);
   const [gitBusyAction, setGitBusyAction] = useState<"refresh" | "commit" | "push" | null>(null);
   const [gitCommitMessage, setGitCommitMessage] = useState("Update NexusOS workspace changes");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("connectors");
+  const [githubConnector, setGithubConnector] = useState<GitHubConnectorStatus | null>(null);
+  const [githubTokenDraft, setGithubTokenDraft] = useState("");
+  const [githubBusy, setGithubBusy] = useState<"connect" | "disconnect" | "refresh" | null>(null);
   const [startupChecking, setStartupChecking] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
@@ -1349,6 +1364,7 @@ function App() {
     }
     if (selectedPane.type === "tool" && selectedPane.id === "settings") {
       void loadGitStatus();
+      void loadGitHubConnectorStatus();
     }
   }, [selectedPane, boot?.activeWorkspaceId]);
 
@@ -1554,6 +1570,67 @@ function App() {
     setGitBusyAction(null);
   }
 
+  async function loadGitHubConnectorStatus() {
+    setGithubBusy("refresh");
+    const response = await fetch("/api/tools/connectors/github/status");
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to load GitHub connector status.");
+      setGithubBusy(null);
+      return;
+    }
+    const payload = (await response.json()) as GitHubConnectorStatus;
+    setGithubConnector(payload);
+    setGithubBusy(null);
+  }
+
+  async function connectGitHubConnector() {
+    const token = githubTokenDraft.trim();
+    if (!token) {
+      setStatusMessage("Paste a GitHub token to connect.");
+      return;
+    }
+
+    setGithubBusy("connect");
+    const response = await fetch("/api/tools/connectors/github/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "GitHub connector login failed.");
+      setGithubBusy(null);
+      return;
+    }
+
+    const payload = (await response.json()) as { connector: GitHubConnectorStatus };
+    setGithubConnector(payload.connector);
+    setGithubTokenDraft("");
+    setStatusMessage("GitHub connected.");
+    setGithubBusy(null);
+  }
+
+  async function disconnectGitHubConnector() {
+    setGithubBusy("disconnect");
+    const response = await fetch("/api/tools/connectors/github/disconnect", {
+      method: "POST",
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to disconnect GitHub.");
+      setGithubBusy(null);
+      return;
+    }
+
+    const payload = (await response.json()) as { connector: GitHubConnectorStatus };
+    setGithubConnector(payload.connector);
+    setStatusMessage("GitHub disconnected.");
+    setGithubBusy(null);
+  }
+
   async function runGitCommit() {
     const message = gitCommitMessage.trim();
     if (message.length < 3) {
@@ -1596,9 +1673,9 @@ function App() {
       return;
     }
 
-    const payload = (await response.json()) as { status: GitStatusPayload };
+    const payload = (await response.json()) as { status: GitStatusPayload; usedGithubConnector?: boolean };
     setGitStatus(payload.status);
-    setStatusMessage("Pushed current branch to origin.");
+    setStatusMessage(payload.usedGithubConnector ? "Pushed via GitHub connector." : "Pushed current branch to origin.");
     setGitBusyAction(null);
   }
 
@@ -2732,81 +2809,178 @@ function App() {
               <div className="tool-header-row">
                 <div>
                   <h2>Settings</h2>
-                  <p className="subtitle">Personalize NexusOS visuals and run repository Git actions from one place.</p>
+                  <p className="subtitle">Connect services, tune appearance, and control repository automation.</p>
                 </div>
               </div>
 
-              <section className="tool-section">
-                <h3>Theme Colors</h3>
-                <div className="theme-grid" role="radiogroup" aria-label="Theme presets">
-                  {THEME_PRESETS.map((theme) => (
-                    <button
-                      key={theme.id}
-                      type="button"
-                      className={`theme-card ${themeId === theme.id ? "active" : ""}`}
-                      onClick={() => setThemeId(theme.id)}
-                    >
-                      <strong>{theme.name}</strong>
-                      <small>{theme.hint}</small>
-                    </button>
-                  ))}
-                </div>
-              </section>
+              <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+                <button
+                  type="button"
+                  className={`tool-tab ${settingsTab === "connectors" ? "active" : ""}`}
+                  onClick={() => setSettingsTab("connectors")}
+                >
+                  Connectors
+                </button>
+                <button
+                  type="button"
+                  className={`tool-tab ${settingsTab === "appearance" ? "active" : ""}`}
+                  onClick={() => setSettingsTab("appearance")}
+                >
+                  Appearance
+                </button>
+                <button
+                  type="button"
+                  className={`tool-tab ${settingsTab === "automation" ? "active" : ""}`}
+                  onClick={() => setSettingsTab("automation")}
+                >
+                  Automation
+                </button>
+              </div>
 
-              <section className="tool-section">
-                <div className="tool-header-row">
-                  <h3>Git Workspace</h3>
-                  <button type="button" className="ghost" onClick={() => void loadGitStatus()} disabled={gitBusyAction !== null}>
-                    {gitBusyAction === "refresh" ? "Refreshing..." : "Refresh"}
-                  </button>
-                </div>
+              {settingsTab === "connectors" ? (
+                <>
+                  <section className="tool-section">
+                    <div className="tool-header-row">
+                      <h3>GitHub Connector</h3>
+                      <button type="button" className="ghost" onClick={() => void loadGitHubConnectorStatus()} disabled={githubBusy !== null}>
+                        {githubBusy === "refresh" ? "Refreshing..." : "Refresh"}
+                      </button>
+                    </div>
 
-                {gitStatus ? (
-                  <div className="git-status-grid">
-                    <span>branch: {gitStatus.branch}</span>
-                    <span>ahead: {gitStatus.ahead}</span>
-                    <span>behind: {gitStatus.behind}</span>
-                    <span>staged: {gitStatus.counts.staged}</span>
-                    <span>unstaged: {gitStatus.counts.unstaged}</span>
-                    <span>untracked: {gitStatus.counts.untracked}</span>
+                    {githubConnector?.connected ? (
+                      <small>
+                        Connected as {githubConnector.login ?? "unknown"} ({githubConnector.maskedToken ?? "token"})
+                      </small>
+                    ) : (
+                      <small>Not connected. Add a GitHub fine-grained token to enable automatic authenticated push.</small>
+                    )}
+
+                    <label>
+                      GitHub Token
+                      <input
+                        type="password"
+                        value={githubTokenDraft}
+                        placeholder="github_pat_..."
+                        onChange={(event) => setGithubTokenDraft(event.target.value)}
+                      />
+                    </label>
+
+                    <div className="tool-action-row">
+                      <button type="button" onClick={() => void connectGitHubConnector()} disabled={githubBusy !== null}>
+                        {githubBusy === "connect" ? "Connecting..." : "Connect GitHub"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => void disconnectGitHubConnector()}
+                        disabled={githubBusy !== null || !githubConnector?.connected}
+                      >
+                        {githubBusy === "disconnect" ? "Disconnecting..." : "Disconnect"}
+                      </button>
+                    </div>
+
+                    {githubConnector?.scopes.length ? (
+                      <small>Token scopes: {githubConnector.scopes.join(", ")}</small>
+                    ) : (
+                      <small>Recommended scopes: contents read/write (and pull_requests only if PR automation is needed).</small>
+                    )}
+                  </section>
+
+                  <section className="tool-section">
+                    <h3>Other Connectors</h3>
+                    <div className="connector-placeholder-grid">
+                      <article className="connector-placeholder-card">
+                        <strong>Gmail</strong>
+                        <small>placeholder</small>
+                      </article>
+                      <article className="connector-placeholder-card">
+                        <strong>Slack</strong>
+                        <small>placeholder</small>
+                      </article>
+                      <article className="connector-placeholder-card">
+                        <strong>Discord</strong>
+                        <small>placeholder</small>
+                      </article>
+                    </div>
+                  </section>
+                </>
+              ) : null}
+
+              {settingsTab === "appearance" ? (
+                <section className="tool-section">
+                  <h3>Theme Colors</h3>
+                  <div className="theme-grid" role="radiogroup" aria-label="Theme presets">
+                    {THEME_PRESETS.map((theme) => (
+                      <button
+                        key={theme.id}
+                        type="button"
+                        className={`theme-card ${themeId === theme.id ? "active" : ""}`}
+                        onClick={() => setThemeId(theme.id)}
+                      >
+                        <strong>{theme.name}</strong>
+                        <small>{theme.hint}</small>
+                      </button>
+                    ))}
                   </div>
-                ) : (
-                  <small>Git status not loaded yet.</small>
-                )}
+                </section>
+              ) : null}
 
-                <label>
-                  Commit Message
-                  <input
-                    type="text"
-                    value={gitCommitMessage}
-                    onChange={(event) => setGitCommitMessage(event.target.value)}
-                    placeholder="Describe this change"
-                  />
-                </label>
+              {settingsTab === "automation" ? (
+                <section className="tool-section">
+                  <div className="tool-header-row">
+                    <h3>Git Workspace</h3>
+                    <button type="button" className="ghost" onClick={() => void loadGitStatus()} disabled={gitBusyAction !== null}>
+                      {gitBusyAction === "refresh" ? "Refreshing..." : "Refresh"}
+                    </button>
+                  </div>
 
-                <div className="tool-action-row">
-                  <button type="button" onClick={() => void runGitCommit()} disabled={gitBusyAction !== null}>
-                    {gitBusyAction === "commit" ? "Committing..." : "Commit All Changes"}
-                  </button>
-                  <button type="button" className="ghost" onClick={() => void runGitPush()} disabled={gitBusyAction !== null}>
-                    {gitBusyAction === "push" ? "Pushing..." : "Push Branch"}
-                  </button>
-                </div>
+                  {gitStatus ? (
+                    <div className="git-status-grid">
+                      <span>branch: {gitStatus.branch}</span>
+                      <span>ahead: {gitStatus.ahead}</span>
+                      <span>behind: {gitStatus.behind}</span>
+                      <span>staged: {gitStatus.counts.staged}</span>
+                      <span>unstaged: {gitStatus.counts.unstaged}</span>
+                      <span>untracked: {gitStatus.counts.untracked}</span>
+                    </div>
+                  ) : (
+                    <small>Git status not loaded yet.</small>
+                  )}
 
-                {gitStatus?.entries.length ? (
-                  <details className="git-entry-list">
-                    <summary>Changed files ({gitStatus.entries.length})</summary>
-                    <ul>
-                      {gitStatus.entries.slice(0, 40).map((entry) => (
-                        <li key={`${entry.x}${entry.y}-${entry.path}`}>
-                          <span>{entry.x}{entry.y}</span>
-                          <span>{entry.path}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                ) : null}
-              </section>
+                  <label>
+                    Commit Message
+                    <input
+                      type="text"
+                      value={gitCommitMessage}
+                      onChange={(event) => setGitCommitMessage(event.target.value)}
+                      placeholder="Describe this change"
+                    />
+                  </label>
+
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => void runGitCommit()} disabled={gitBusyAction !== null}>
+                      {gitBusyAction === "commit" ? "Committing..." : "Commit All Changes"}
+                    </button>
+                    <button type="button" className="ghost" onClick={() => void runGitPush()} disabled={gitBusyAction !== null}>
+                      {gitBusyAction === "push" ? "Pushing..." : "Push Branch"}
+                    </button>
+                  </div>
+
+                  {gitStatus?.entries.length ? (
+                    <details className="git-entry-list">
+                      <summary>Changed files ({gitStatus.entries.length})</summary>
+                      <ul>
+                        {gitStatus.entries.slice(0, 40).map((entry) => (
+                          <li key={`${entry.x}${entry.y}-${entry.path}`}>
+                            <span>{entry.x}{entry.y}</span>
+                            <span>{entry.path}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  ) : null}
+                </section>
+              ) : null}
             </div>
           ) : null}
 
