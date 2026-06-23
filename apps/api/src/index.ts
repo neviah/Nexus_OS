@@ -490,6 +490,15 @@ function extractWorkspaceWriteActions(output: string): WorkspaceWriteAction[] {
   return Array.from(unique.values());
 }
 
+function isWriteActionName(name: unknown): boolean {
+  if (typeof name !== "string") {
+    return false;
+  }
+
+  const normalized = name.trim().toLowerCase();
+  return normalized === "write_file" || normalized === "write" || normalized === "create_file";
+}
+
 function extractJsonCandidates(output: string): string[] {
   const candidates: string[] = [];
   const trimmed = output.trim();
@@ -507,7 +516,7 @@ function extractJsonCandidates(output: string): string[] {
     fencedMatch = fenced.exec(output);
   }
 
-  const inlineObject = /(\{[\s\S]*?["'](?:action|name|type)["']\s*:\s*["']write_file["'][\s\S]*?\})/gi;
+  const inlineObject = /(\{[\s\S]*?["'](?:action|name|type|tool)["']\s*:\s*["'](?:write_file|write|create_file)["'][\s\S]*?\})/gi;
   let inlineMatch = inlineObject.exec(output);
   while (inlineMatch) {
     const snippet = inlineMatch[1]?.trim();
@@ -542,8 +551,10 @@ function collectWorkspaceWriteActions(value: unknown, bucket: WorkspaceWriteActi
     ? obj.action
     : (typeof obj.name === "string"
       ? obj.name
-      : (typeof obj.type === "string" ? obj.type : ""));
-  if (actionName === "write_file") {
+      : (typeof obj.type === "string"
+        ? obj.type
+        : (typeof obj.tool === "string" ? obj.tool : "")));
+  if (isWriteActionName(actionName)) {
     const pathValue = typeof obj.path === "string" ? obj.path : undefined;
     const contentValue = typeof obj.content === "string" ? obj.content : undefined;
     if (pathValue && contentValue !== undefined) {
@@ -551,7 +562,7 @@ function collectWorkspaceWriteActions(value: unknown, bucket: WorkspaceWriteActi
     }
   }
 
-  if (actionName === "write_file" && obj.arguments) {
+  if (isWriteActionName(actionName) && obj.arguments) {
     if (typeof obj.arguments === "string") {
       try {
         const parsedArgs = tryParseMaybeJson(obj.arguments);
@@ -599,7 +610,7 @@ function tryParseMaybeJson(input: string): Record<string, unknown> {
 
 function collectLooseWriteActions(output: string, bucket: WorkspaceWriteAction[]): void {
   const patterns = [
-    /["'](?:action|name|type)["']\s*:\s*["']write_file["'][\s\S]*?["']path["']\s*:\s*["']([^"'\n]+)["'][\s\S]*?["']content["']\s*:\s*["']([\s\S]*?)["']/gi,
+    /["'](?:action|name|type|tool)["']\s*:\s*["'](?:write_file|write|create_file)["'][\s\S]*?["']path["']\s*:\s*["']([^"'\n]+)["'][\s\S]*?["']content["']\s*:\s*["']([\s\S]*?)["']/gi,
   ];
 
   for (const pattern of patterns) {
