@@ -755,7 +755,7 @@ button:disabled {
 
 .connector-placeholder-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -771,6 +771,86 @@ button:disabled {
 .connector-placeholder-card small {
   color: var(--ink-3);
   font-size: 0.75rem;
+}
+
+.connector-card-button {
+  width: 100%;
+  text-align: left;
+}
+
+.connector-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 12, 16, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 8000;
+  padding: 24px;
+}
+
+.connector-modal {
+  width: min(560px, 100%);
+  border: 1px solid rgba(47, 71, 79, 0.45);
+  border-radius: 14px;
+  background: rgba(12, 22, 27, 0.96);
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
+}
+
+.coming-soon-panel {
+  height: 100%;
+  min-height: 340px;
+  border: 1px dashed rgba(47, 71, 79, 0.45);
+  border-radius: 14px;
+  background: rgba(14, 24, 30, 0.55);
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 28px;
+}
+
+.coming-soon-panel p {
+  margin: 0;
+  font-size: 1.35rem;
+  color: var(--ink-1);
+}
+
+.coming-soon-panel small {
+  max-width: 480px;
+}
+
+.stable-audio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.stable-audio-card {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 10px;
+  background: rgba(18, 29, 35, 0.48);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.stable-audio-card small {
+  color: var(--ink-3);
+}
+
+.stable-audio-embed-section {
+  min-height: 520px;
+}
+
+.stable-audio-embed {
+  width: 100%;
+  min-height: 520px;
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 12px;
+  background: rgba(9, 15, 20, 0.7);
 }
 
 .runtime-jobs-list {

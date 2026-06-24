@@ -231,6 +231,24 @@ type RuntimeStatus = {
   defaultVoiceInstalled: boolean;
 };
 
+type StableAudioStatus = {
+  installed: boolean;
+  running: boolean;
+  ready: boolean;
+  readyUrl: string | null;
+  state: string;
+  appId: string;
+  ref: string | null;
+  supportsMedium: boolean;
+  modes: Array<{
+    id: "small-music" | "small-sfx" | "medium";
+    label: string;
+    description: string;
+    recommendedPrompt: string;
+    available: boolean;
+  }>;
+};
+
 type RuntimeJob = {
   id: string;
   action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam";
@@ -287,6 +305,13 @@ type GitHubDeviceFlow = {
 };
 
 type SettingsTab = "connectors" | "appearance" | "automation";
+
+type ConnectorCard = {
+  id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox";
+  name: string;
+  connected: boolean;
+  kind: "oauth" | "token" | "placeholder";
+};
 
 // ── Nexus Router types ──────────────────────────────────────────────────────
 type NxProvider = {
@@ -415,12 +440,8 @@ function App() {
   const [runtimeBusyAction, setRuntimeBusyAction] = useState<string | null>(null);
   const [runtimeJobs, setRuntimeJobs] = useState<RuntimeJob[]>([]);
   const [expandedRuntimeJobIds, setExpandedRuntimeJobIds] = useState<Record<string, boolean>>({});
-  const [imagePrompt, setImagePrompt] = useState("Cinematic cyberpunk skyline at sunrise, ultra detailed, volumetric light");
-  const [imageBusy, setImageBusy] = useState(false);
-  const [imageSaveBusy, setImageSaveBusy] = useState(false);
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [musicSourceUrl, setMusicSourceUrl] = useState("");
-  const [musicSaveBusy, setMusicSaveBusy] = useState(false);
+  const [stableAudioStatus, setStableAudioStatus] = useState<StableAudioStatus | null>(null);
+  const [stableAudioBusyMode, setStableAudioBusyMode] = useState<"small-music" | "small-sfx" | "medium" | "refresh" | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -428,6 +449,7 @@ function App() {
   const [gitBusyAction, setGitBusyAction] = useState<"refresh" | "commit" | "push" | null>(null);
   const [gitCommitMessage, setGitCommitMessage] = useState("Update NexusOS workspace changes");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("connectors");
+  const [activeConnectorId, setActiveConnectorId] = useState<ConnectorCard["id"] | null>(null);
   const [githubConnector, setGithubConnector] = useState<GitHubConnectorStatus | null>(null);
   const [githubClientId, setGithubClientId] = useState<string>(() => {
     if (typeof window === "undefined") {
@@ -752,57 +774,6 @@ function App() {
     })();
   }
 
-  async function generateImage() {
-    const prompt = imagePrompt.trim();
-    if (!prompt) {
-      setStatusMessage("Type an image prompt first.");
-      return;
-    }
-
-    setImageBusy(true);
-    const response = await fetch("/api/tools/image/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
-    });
-
-    if (!response.ok) {
-      const payload = (await response.json()) as { error?: string };
-      setStatusMessage(payload.error ?? "Image generation failed.");
-      setImageBusy(false);
-      return;
-    }
-
-    const payload = (await response.json()) as { imageUrl: string };
-    setImageUrl(payload.imageUrl);
-    setStatusMessage("Image generated.");
-    setImageBusy(false);
-  }
-
-  async function saveGeneratedImage() {
-    if (!imageUrl) {
-      return;
-    }
-
-    setImageSaveBusy(true);
-    const response = await fetch("/api/tools/image/save", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ imageUrl, prompt: imagePrompt, workspaceId: boot?.activeWorkspaceId }),
-    });
-
-    if (!response.ok) {
-      const payload = (await response.json()) as { error?: string };
-      setStatusMessage(payload.error ?? "Image save failed.");
-      setImageSaveBusy(false);
-      return;
-    }
-
-    const payload = (await response.json()) as { relativePath: string };
-    setStatusMessage(`Saved image to ${payload.relativePath}`);
-    setImageSaveBusy(false);
-  }
-
   async function saveVoiceGeneration() {
     const text = voiceText.trim();
     if (!text) {
@@ -828,30 +799,49 @@ function App() {
     setVoiceSaveBusy(false);
   }
 
-  async function saveMusicFromUrl() {
-    const sourceUrl = musicSourceUrl.trim();
-    if (!sourceUrl) {
-      setStatusMessage("Paste a music file URL first.");
+  async function loadStableAudioStatus() {
+    setStableAudioBusyMode("refresh");
+    const response = await fetch("/api/tools/music/stable-audio/status");
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to load Stable Audio status.");
+      pushToast(payload.error ?? "Failed to load Stable Audio status.", "err");
+      setStableAudioBusyMode(null);
       return;
     }
+    const payload = (await response.json()) as StableAudioStatus;
+    setStableAudioStatus(payload);
+    setStableAudioBusyMode(null);
+  }
 
-    setMusicSaveBusy(true);
-    const response = await fetch("/api/tools/music/save", {
+  async function launchStableAudioMode(mode: "small-music" | "small-sfx" | "medium") {
+    setStableAudioBusyMode(mode);
+    const response = await fetch("/api/tools/music/stable-audio/launch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceUrl, workspaceId: boot?.activeWorkspaceId }),
+      body: JSON.stringify({ mode }),
     });
 
     if (!response.ok) {
       const payload = (await response.json()) as { error?: string };
-      setStatusMessage(payload.error ?? "Music save failed.");
-      setMusicSaveBusy(false);
+      const message = payload.error ?? "Stable Audio launch failed.";
+      setStatusMessage(message);
+      pushToast(message, "err");
+      setStableAudioBusyMode(null);
       return;
     }
 
-    const payload = (await response.json()) as { relativePath: string };
-    setStatusMessage(`Saved music to ${payload.relativePath}`);
-    setMusicSaveBusy(false);
+    const payload = (await response.json()) as { status: StableAudioStatus; notice?: string };
+    setStableAudioStatus(payload.status);
+    if (payload.notice) {
+      setStatusMessage(payload.notice);
+      pushToast(payload.notice, "warn");
+    } else {
+      const message = `Stable Audio ${mode} launch requested.`;
+      setStatusMessage(message);
+      pushToast(message, "ok");
+    }
+    setStableAudioBusyMode(null);
   }
 
   // Nexus Router state
@@ -1397,8 +1387,7 @@ function App() {
       void loadRuntimeJobs();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "music-generator") {
-      void loadRuntimeStatus();
-      void loadRuntimeJobs();
+      void loadStableAudioStatus();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "settings") {
       void loadGitStatus();
@@ -2230,6 +2219,14 @@ function App() {
   const onboardingRequired = boot?.onboardingRequired ?? true;
   const startupReady = boot?.startup.ready ?? false;
   const startupBlockers = boot?.startup.blockers ?? [];
+  const connectorCards: ConnectorCard[] = [
+    { id: "github", name: "GitHub", connected: Boolean(githubConnector?.connected), kind: "oauth" },
+    { id: "gmail", name: "Gmail", connected: false, kind: "oauth" },
+    { id: "slack", name: "Slack", connected: false, kind: "token" },
+    { id: "discord", name: "Discord", connected: false, kind: "token" },
+    { id: "notion", name: "Notion", connected: false, kind: "token" },
+    { id: "dropbox", name: "Dropbox", connected: false, kind: "oauth" },
+  ];
   const diagnosticsAlertCount = failedTasks.length + (startupReady ? 0 : Math.max(1, startupBlockers.length));
   const harnessThreads = selectedPane.type === "agent" ? (chatThreadsByHarness[selectedPane.id] ?? []) : [];
   const activeHarnessThreadId = selectedPane.type === "agent" ? activeThreadByHarness[selectedPane.id] ?? harnessThreads[0]?.id : undefined;
@@ -2866,113 +2863,76 @@ function App() {
               <div className="tool-header-row">
                 <div>
                   <h2>Music Generator</h2>
-                  <p className="subtitle">AceJAM local music generation runtime with install/start controls.</p>
+                  <p className="subtitle">Stable Audio 3 via Pinokio for small music, small SFX, and medium GPU generation.</p>
                 </div>
-                <button type="button" onClick={() => void loadRuntimeStatus()} disabled={runtimeBusyAction !== null}>
-                  Refresh
+                <button type="button" onClick={() => void loadStableAudioStatus()} disabled={stableAudioBusyMode !== null}>
+                  {stableAudioBusyMode === "refresh" ? "Refreshing..." : "Refresh"}
                 </button>
               </div>
 
               <section className="tool-section">
-                <h3>AceJAM runtime</h3>
-                <div className="tool-action-row tool-wrap-row">
-                  <button
-                    type="button"
-                    onClick={() => void runRuntimeJob(
-                      "install-acejam",
-                      "install-acejam",
-                      "AceJAM installed.",
-                    )}
-                    disabled={runtimeBusyAction !== null || runtimeStatus?.acejamInstalled}
-                  >
-                    {runtimeStatus?.acejamInstalled ? "AceJAM Installed" : runtimeBusyAction === "install-acejam" ? "Installing AceJAM..." : "Install AceJAM"}
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => void runRuntimeJob(
-                      "start-acejam",
-                      "start-acejam",
-                      "AceJAM started.",
-                    )}
-                    disabled={runtimeBusyAction !== null || !runtimeStatus?.acejamInstalled || runtimeStatus?.acejamRunning}
-                  >
-                    {runtimeStatus?.acejamRunning ? "AceJAM Running" : runtimeBusyAction === "start-acejam" ? "Starting AceJAM..." : "Start AceJAM"}
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => window.open(runtimeStatus?.acejamUrl ?? "http://127.0.0.1:7860", "_blank", "noopener,noreferrer")}
-                    disabled={!runtimeStatus?.acejamRunning}
-                  >
-                    Open AceJAM UI
-                  </button>
+                <h3>Stable Audio Launcher</h3>
+                <div className="stable-audio-grid">
+                  {(stableAudioStatus?.modes ?? []).map((mode) => (
+                    <article key={mode.id} className="stable-audio-card">
+                      <strong>{mode.label}</strong>
+                      <small>{mode.description}</small>
+                      <small>Prompt seed: {mode.recommendedPrompt}</small>
+                      <button
+                        type="button"
+                        onClick={() => void launchStableAudioMode(mode.id)}
+                        disabled={stableAudioBusyMode !== null || !mode.available}
+                      >
+                        {stableAudioBusyMode === mode.id ? "Starting..." : `Start ${mode.label}`}
+                      </button>
+                    </article>
+                  ))}
                 </div>
-                <small>Status: {runtimeStatus?.acejamInstalled ? "installed" : "not installed"} · {runtimeStatus?.acejamRunning ? "running" : "stopped"}</small>
-                <small>URL: {runtimeStatus?.acejamUrl ?? "http://127.0.0.1:7860"}</small>
+                <small>Status: {stableAudioStatus?.installed ? "installed" : "not installed"} · {stableAudioStatus?.running ? "running" : "stopped"} · {stableAudioStatus?.ready ? "web ui ready" : "web ui offline"}</small>
+                <small>Medium requires the Stable Audio Medium path. If it is missing or incompatible, check Cookbook recommendations before retrying.</small>
               </section>
 
-              <section className="tool-section">
-                <h3>Notes</h3>
-                <ul className="tool-list">
-                  <li>First startup may be slow while models and runtime dependencies are downloaded.</li>
-                  <li>AceJAM runs locally and is intended for offline or low-cost music generation flows.</li>
-                  <li>If install fails, ensure Python 3.10+ is installed and available in PATH.</li>
-                </ul>
-              </section>
-
-              <section className="tool-section">
-                <h3>Save Generated Track</h3>
-                <input
-                  type="url"
-                  value={musicSourceUrl}
-                  onChange={(event) => setMusicSourceUrl(event.target.value)}
-                  placeholder="Paste a direct music file URL from AceJAM output"
-                />
-                <div className="tool-action-row">
-                  <button type="button" onClick={() => void saveMusicFromUrl()} disabled={musicSaveBusy || !musicSourceUrl.trim()}>
-                    {musicSaveBusy ? "Saving..." : "Save To Assets"}
-                  </button>
-                </div>
-                <small>Saved tracks are written into the active workspace Assets/music folder.</small>
-              </section>
+              {stableAudioStatus?.readyUrl ? (
+                <section className="tool-section stable-audio-embed-section">
+                  <div className="tool-header-row">
+                    <h3>Stable Audio Web UI</h3>
+                    <button type="button" className="ghost" onClick={() => window.open(stableAudioStatus.readyUrl ?? "", "_blank", "noopener,noreferrer")}>
+                      Open In Browser
+                    </button>
+                  </div>
+                  <iframe
+                    title="Stable Audio Web UI"
+                    src={stableAudioStatus.readyUrl}
+                    className="stable-audio-embed"
+                  />
+                </section>
+              ) : (
+                <section className="tool-section coming-soon-panel">
+                  <h3>Stable Audio Web UI</h3>
+                  <p>Launch one of the Stable Audio modes above to open the built-in Gradio interface here.</p>
+                </section>
+              )}
 
             </div>
           ) : null}
 
           {selectedPane.type === "tool" && selectedPane.id === "image-generator" ? (
             <div className="tool-view tool-console">
-              <div className="tool-header-row">
-                <div>
-                  <h2>Image Generator</h2>
-                  <p className="subtitle">FLUX-style generation using a free hosted image endpoint.</p>
-                </div>
-              </div>
-
-              <section className="tool-section">
-                <textarea
-                  value={imagePrompt}
-                  onChange={(event) => setImagePrompt(event.target.value)}
-                  rows={4}
-                  placeholder="Describe the image you want..."
-                />
-                <div className="tool-action-row">
-                  <button type="button" onClick={() => void generateImage()} disabled={imageBusy}>
-                    {imageBusy ? "Generating..." : "Generate Image"}
-                  </button>
-                  <button type="button" onClick={() => void saveGeneratedImage()} disabled={imageSaveBusy || !imageUrl}>
-                    {imageSaveBusy ? "Saving..." : "Save To Assets"}
-                  </button>
-                </div>
+              <section className="coming-soon-panel">
+                <h2>Image Generator</h2>
+                <p>Coming Soon</p>
+                <small>This pane is being held until a stronger local or repo-backed image generator replaces the current implementation.</small>
               </section>
+            </div>
+          ) : null}
 
-              {imageUrl ? (
-                <section className="tool-section">
-                  <h3>Preview</h3>
-                  <img src={imageUrl} alt="Generated result" style={{ width: "100%", borderRadius: 10, border: "1px solid rgba(47, 71, 79, 0.35)" }} />
-                  <small>Tip: generate again to iterate quickly on style and composition.</small>
-                </section>
-              ) : null}
+          {selectedPane.type === "tool" && selectedPane.id === "video-generator" ? (
+            <div className="tool-view tool-console">
+              <section className="coming-soon-panel">
+                <h2>Video Generator</h2>
+                <p>Coming Soon</p>
+                <small>This pane is reserved for a future repo-backed local video generator.</small>
+              </section>
             </div>
           ) : null}
 
@@ -3012,100 +2972,98 @@ function App() {
               {settingsTab === "connectors" ? (
                 <>
                   <section className="tool-section">
-                    <div className="tool-header-row">
-                      <h3>GitHub Connector</h3>
-                      <button type="button" className="ghost" onClick={() => void loadGitHubConnectorStatus()} disabled={githubBusy !== null}>
-                        {githubBusy === "refresh" ? "Refreshing..." : "Refresh"}
-                      </button>
-                    </div>
-
-                    {githubInlineError ? (
-                      <p className="connector-inline-error">{githubInlineError}</p>
-                    ) : null}
-
-                    {githubConnector?.connected ? (
-                      <small>
-                        Connected as {githubConnector.login ?? "unknown"} ({githubConnector.maskedToken ?? "token"})
-                      </small>
-                    ) : (
-                      <small>Not connected. Start GitHub device flow to connect without pasting a token.</small>
-                    )}
-
-                    <label>
-                      GitHub OAuth Client ID
-                      <input
-                        type="text"
-                        value={githubClientId}
-                        placeholder="GitHub OAuth app client ID"
-                        onChange={(event) => setGithubClientId(event.target.value)}
-                      />
-                    </label>
-
-                    <div className="tool-action-row">
-                      <button type="button" onClick={() => void startGitHubDeviceFlow()} disabled={githubBusy !== null}>
-                        {githubBusy === "device-start" || githubBusy === "device-poll" ? "Connecting..." : "Connect GitHub"}
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost"
-                        onClick={() => void disconnectGitHubConnector()}
-                        disabled={githubBusy !== null || !githubConnector?.connected}
-                      >
-                        {githubBusy === "disconnect" ? "Disconnecting..." : "Disconnect"}
-                      </button>
-                    </div>
-
-                    {githubDeviceFlow ? (
-                      <div className="github-device-card">
-                        <strong>Device Code: {githubDeviceFlow.userCode}</strong>
-                        <small>Go to {githubDeviceFlow.verificationUri} and enter the code above.</small>
-                        <small>Scopes: {githubDeviceFlow.scopes.join(", ")}</small>
-                        <small>Expires: {new Date(githubDeviceFlow.expiresAt).toLocaleTimeString()}</small>
-                      </div>
-                    ) : null}
-
-                    <details className="github-advanced-details">
-                      <summary>Advanced token fallback</summary>
-                      <label>
-                        GitHub Token
-                      <input
-                        type="password"
-                        value={githubTokenDraft}
-                        placeholder="github_pat_..."
-                        onChange={(event) => setGithubTokenDraft(event.target.value)}
-                      />
-                      </label>
-                      <div className="tool-action-row">
-                        <button type="button" onClick={() => void connectGitHubConnector()} disabled={githubBusy !== null || !githubTokenDraft.trim()}>
-                          {githubBusy === "connect" ? "Connecting..." : "Use Token Instead"}
-                        </button>
-                      </div>
-                    </details>
-
-                    {githubConnector?.scopes.length ? (
-                      <small>Token scopes: {githubConnector.scopes.join(", ")}</small>
-                    ) : (
-                      <small>Recommended scopes: contents read/write, plus pull_requests only if PR automation is needed.</small>
-                    )}
-                  </section>
-
-                  <section className="tool-section">
-                    <h3>Other Connectors</h3>
                     <div className="connector-placeholder-grid">
-                      <article className="connector-placeholder-card">
-                        <strong>Gmail</strong>
-                        <small>placeholder</small>
-                      </article>
-                      <article className="connector-placeholder-card">
-                        <strong>Slack</strong>
-                        <small>placeholder</small>
-                      </article>
-                      <article className="connector-placeholder-card">
-                        <strong>Discord</strong>
-                        <small>placeholder</small>
-                      </article>
+                      {connectorCards.map((connector) => (
+                        <button
+                          key={connector.id}
+                          type="button"
+                          className="connector-placeholder-card connector-card-button"
+                          onClick={() => setActiveConnectorId(connector.id)}
+                        >
+                          <strong>{connector.name}</strong>
+                          <small>{connector.connected ? "connected" : "not connected"}</small>
+                        </button>
+                      ))}
                     </div>
                   </section>
+
+                  {activeConnectorId ? (
+                    <div className="connector-modal-backdrop" onClick={() => setActiveConnectorId(null)}>
+                      <div className="connector-modal" onClick={(event) => event.stopPropagation()}>
+                        <div className="tool-header-row">
+                          <h3>{connectorCards.find((connector) => connector.id === activeConnectorId)?.name ?? "Connector"}</h3>
+                          <button type="button" className="ghost" onClick={() => setActiveConnectorId(null)}>Close</button>
+                        </div>
+
+                        {activeConnectorId === "github" ? (
+                          <>
+                            {githubInlineError ? <p className="connector-inline-error">{githubInlineError}</p> : null}
+                            {githubConnector?.connected ? (
+                              <small>Connected as {githubConnector.login ?? "unknown"} ({githubConnector.maskedToken ?? "token"})</small>
+                            ) : (
+                              <small>Start GitHub device flow to connect without pasting a token.</small>
+                            )}
+                            <label>
+                              GitHub OAuth Client ID
+                              <input
+                                type="text"
+                                value={githubClientId}
+                                placeholder="GitHub OAuth app client ID"
+                                onChange={(event) => setGithubClientId(event.target.value)}
+                              />
+                            </label>
+                            <div className="tool-action-row">
+                              <button type="button" onClick={() => void startGitHubDeviceFlow()} disabled={githubBusy !== null}>
+                                {githubBusy === "device-start" || githubBusy === "device-poll" ? "Connecting..." : "Connect GitHub"}
+                              </button>
+                              <button type="button" className="ghost" onClick={() => void disconnectGitHubConnector()} disabled={githubBusy !== null || !githubConnector?.connected}>
+                                {githubBusy === "disconnect" ? "Disconnecting..." : "Disconnect"}
+                              </button>
+                            </div>
+                            {githubDeviceFlow ? (
+                              <div className="github-device-card">
+                                <strong>Device Code: {githubDeviceFlow.userCode}</strong>
+                                <small>Go to {githubDeviceFlow.verificationUri} and enter the code above.</small>
+                                <small>Scopes: {githubDeviceFlow.scopes.join(", ")}</small>
+                                <small>Expires: {new Date(githubDeviceFlow.expiresAt).toLocaleTimeString()}</small>
+                              </div>
+                            ) : null}
+                            <details className="github-advanced-details">
+                              <summary>Advanced token fallback</summary>
+                              <label>
+                                GitHub Token
+                                <input
+                                  type="password"
+                                  value={githubTokenDraft}
+                                  placeholder="github_pat_..."
+                                  onChange={(event) => setGithubTokenDraft(event.target.value)}
+                                />
+                              </label>
+                              <div className="tool-action-row">
+                                <button type="button" onClick={() => void connectGitHubConnector()} disabled={githubBusy !== null || !githubTokenDraft.trim()}>
+                                  {githubBusy === "connect" ? "Connecting..." : "Use Token Instead"}
+                                </button>
+                              </div>
+                            </details>
+                          </>
+                        ) : activeConnectorId === "gmail" ? (
+                          <>
+                            <small>Gmail will use a browser-based connect flow when implemented.</small>
+                            <div className="tool-action-row">
+                              <button type="button" onClick={() => pushToast("Gmail connector coming soon.", "warn")}>Connect Gmail</button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <small>This connector is reserved and not wired yet.</small>
+                            <div className="tool-action-row">
+                              <button type="button" onClick={() => pushToast(`${connectorCards.find((connector) => connector.id === activeConnectorId)?.name ?? "Connector"} is coming soon.`, "warn")}>Okay</button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
                 </>
               ) : null}
 

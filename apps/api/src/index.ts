@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -552,6 +553,212 @@ function normalizeGitHubRemoteUrl(remoteUrl: string): string {
   return trimmed;
 }
 
+type StableAudioMode = "small-music" | "small-sfx" | "medium";
+
+type StableAudioStatusPayload = {
+  installed: boolean;
+  running: boolean;
+  ready: boolean;
+  readyUrl: string | null;
+  state: string;
+  appId: string;
+  ref: string | null;
+  supportsMedium: boolean;
+  modes: Array<{ id: StableAudioMode; label: string; description: string; recommendedPrompt: string; available: boolean }>;
+};
+
+const STABLE_AUDIO_APP_ID = "stable-audio-3-small.pinokio.git";
+
+async function resolvePtermPath(): Promise<string> {
+  const candidates: string[] = [];
+  const pinokioConfigPath = path.join(os.homedir(), ".pinokio", "config.json");
+  try {
+    const raw = await fs.readFile(pinokioConfigPath, "utf-8");
+    const parsed = JSON.parse(raw) as { home?: string };
+    if (parsed.home?.trim()) {
+      candidates.push(path.join(parsed.home, "bin", "npm", "pterm.cmd"));
+      candidates.push(path.join(parsed.home, "bin", "npm", "pterm"));
+      candidates.push(path.join(parsed.home, "bin", "pterm"));
+    }
+  } catch {
+    // Fall through to PATH.
+  }
+
+  candidates.push("pterm");
+
+  for (const candidate of candidates) {
+    try {
+      if (candidate === "pterm") {
+        await execFileAsync("where", ["pterm"], { windowsHide: true, maxBuffer: 256 * 1024 });
+        return candidate;
+      }
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  throw new Error("Pinokio pterm executable not found.");
+}
+
+async function runPterm(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  const ptermPath = await resolvePtermPath();
+  try {
+    const result = await execFileAsync(ptermPath, args, {
+      cwd: getRootDir(),
+      windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return {
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+    };
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function stableAudioModeConfig(mode: StableAudioMode): { label: string; prompt: string; title: string } {
+  if (mode === "small-sfx") {
+    return {
+      label: "Small SFX",
+      prompt: "cinematic whoosh impact",
+      title: "Stable Audio 3 Small SFX",
+    };
+  }
+  if (mode === "medium") {
+    return {
+      label: "Medium",
+      prompt: "cinematic electronic track, melodic, 124 BPM",
+      title: "Stable Audio 3 Medium",
+    };
+  }
+  return {
+    label: "Small Music",
+    prompt: "lo-fi hip hop beat, 90 BPM",
+    title: "Stable Audio 3 Small Music",
+  };
+}
+
+function stableAudioDefaultTarget(mode: StableAudioMode): string {
+  const config = stableAudioModeConfig(mode);
+  const params = new URLSearchParams({
+    model: mode,
+    title: config.title,
+    prompt: config.prompt,
+  });
+  return `start.js?${params.toString()}`;
+}
+
+function parseStableAudioStatus(raw: string): StableAudioStatusPayload {
+  const parsed = JSON.parse(raw) as {
+    app_id?: string;
+    running?: boolean;
+    ready?: boolean;
+    ready_url?: string | null;
+    state?: string;
+    ref?: string | null;
+  };
+  const supportsMedium = process.platform === "win32" || process.platform === "linux";
+  return {
+    installed: true,
+    running: Boolean(parsed.running),
+    ready: Boolean(parsed.ready),
+    readyUrl: parsed.ready_url ?? null,
+    state: parsed.state ?? "offline",
+    appId: parsed.app_id ?? STABLE_AUDIO_APP_ID,
+    ref: parsed.ref ?? null,
+    supportsMedium,
+    modes: [
+      {
+        id: "small-music",
+        label: "Small Music",
+        description: "CPU-friendly music generation up to 120 seconds.",
+        recommendedPrompt: stableAudioModeConfig("small-music").prompt,
+        available: true,
+      },
+      {
+        id: "small-sfx",
+        label: "Small SFX",
+        description: "CPU-friendly sound-effect generation up to 120 seconds.",
+        recommendedPrompt: stableAudioModeConfig("small-sfx").prompt,
+        available: true,
+      },
+      {
+        id: "medium",
+        label: "Medium",
+        description: "Higher-quality music generation, GPU-oriented, up to 380 seconds.",
+        recommendedPrompt: stableAudioModeConfig("medium").prompt,
+        available: supportsMedium,
+      },
+    ],
+  };
+}
+
+async function getStableAudioStatus(): Promise<StableAudioStatusPayload> {
+  try {
+    const result = await runPterm(["status", STABLE_AUDIO_APP_ID]);
+    return parseStableAudioStatus(result.stdout);
+  } catch {
+    return {
+      installed: false,
+      running: false,
+      ready: false,
+      readyUrl: null,
+      state: "offline",
+      appId: STABLE_AUDIO_APP_ID,
+      ref: null,
+      supportsMedium: process.platform === "win32" || process.platform === "linux",
+      modes: [
+        {
+          id: "small-music",
+          label: "Small Music",
+          description: "CPU-friendly music generation up to 120 seconds.",
+          recommendedPrompt: stableAudioModeConfig("small-music").prompt,
+          available: true,
+        },
+        {
+          id: "small-sfx",
+          label: "Small SFX",
+          description: "CPU-friendly sound-effect generation up to 120 seconds.",
+          recommendedPrompt: stableAudioModeConfig("small-sfx").prompt,
+          available: true,
+        },
+        {
+          id: "medium",
+          label: "Medium",
+          description: "Higher-quality music generation, GPU-oriented, up to 380 seconds.",
+          recommendedPrompt: stableAudioModeConfig("medium").prompt,
+          available: process.platform === "win32" || process.platform === "linux",
+        },
+      ],
+    };
+  }
+}
+
+async function launchStableAudio(mode: StableAudioMode): Promise<{ status: StableAudioStatusPayload; notice?: string }> {
+  const status = await getStableAudioStatus();
+  if (!status.installed) {
+    await runPterm(["run", STABLE_AUDIO_APP_ID, "--default", "install.js"]);
+  }
+
+  if (mode === "medium" && !status.supportsMedium) {
+    return {
+      status: await getStableAudioStatus(),
+      notice: "Stable Audio Medium requires a supported GPU/runtime path. Check Cookbook for compatible music model guidance.",
+    };
+  }
+
+  await runPterm(["run", STABLE_AUDIO_APP_ID, "--default", stableAudioDefaultTarget(mode)]);
+  return {
+    status: await getStableAudioStatus(),
+    notice: mode === "medium"
+      ? "If Medium does not launch cleanly, install a compatible Stable Audio Medium setup from the Cookbook recommendations."
+      : undefined,
+  };
+}
+
 async function verifyGitHubToken(token: string): Promise<{ login: string; scopes: string[] }> {
   const response = await fetch("https://api.github.com/user", {
     headers: {
@@ -1060,6 +1267,7 @@ app.get("/api/bootstrap", async (_req, res) => {
   const harnesses = await readHarnessRegistry();
   const harnessStatus = await resolveHarnessHealth(harnesses);
   const runtimeStatus = await getRuntimeStatus();
+  const stableAudioStatus = await getStableAudioStatus();
   const workspaces = await listWorkspaces({
     [state.activeWorkspaceId]: harnessStatus.filter((h) => h.status === "online").map((h) => h.id),
   });
@@ -1095,7 +1303,7 @@ app.get("/api/bootstrap", async (_req, res) => {
       {
         id: "music-generator",
         name: "Music Generator",
-        status: runtimeStatus.acejamRunning ? "online" : (runtimeStatus.acejamInstalled ? "setup-required" : "offline"),
+        status: stableAudioStatus.ready ? "online" : (stableAudioStatus.installed ? "setup-required" : "offline"),
       },
       { id: "image-generator", name: "Image Generator", status: "online" },
       { id: "video-generator", name: "Video Generator", status: "offline" },
@@ -1392,6 +1600,29 @@ app.post("/api/tools/music/save", async (req, res) => {
       bytes,
     });
     return res.json({ ok: true, ...saved });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/tools/music/stable-audio/status", async (_req, res) => {
+  try {
+    const status = await getStableAudioStatus();
+    return res.json(status);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/music/stable-audio/launch", async (req, res) => {
+  const { mode } = req.body as { mode?: StableAudioMode };
+  if (mode !== "small-music" && mode !== "small-sfx" && mode !== "medium") {
+    return res.status(400).json({ error: "mode must be one of small-music, small-sfx, or medium." });
+  }
+
+  try {
+    const result = await launchStableAudio(mode);
+    return res.json({ ok: true, ...result });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
   }
