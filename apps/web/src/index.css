@@ -1539,6 +1539,18 @@ textarea {
   padding-top: 10px;
 }
 
+.tree-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.tree-panel-head h3 {
+  margin: 0;
+}
+
 .tree-root {
   max-height: 340px;
   overflow: auto;

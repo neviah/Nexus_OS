@@ -848,7 +848,7 @@ function App() {
       return;
     }
 
-    const payload = (await response.json()) as { mode: "small-music" | "small-sfx" | "medium"; duration: number; prompt: string; relativePath: string; playbackUrl: string };
+    const payload = (await response.json()) as { mode: "small-music" | "small-sfx" | "medium"; duration: number; prompt: string; relativePath: string; playbackUrl: string; workspaceId: string };
     setStableAudioGenerated((current) => [
       {
         mode: payload.mode,
@@ -862,7 +862,27 @@ function App() {
     setStatusMessage(`Saved generated audio to ${payload.relativePath}`);
     pushToast(`Generated ${payload.mode} clip saved to Assets.`, "ok");
     setStableAudioBusyAction(null);
+    await refreshActiveWorkspaceTree(payload.workspaceId);
     await loadStableAudioStatus();
+  }
+
+  async function openActiveWorkspaceFolder() {
+    const workspaceId = boot?.activeWorkspaceId ?? "default";
+    const response = await fetch("/api/workspaces/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      const message = payload.error ?? "Failed to open workspace folder.";
+      setStatusMessage(message);
+      pushToast(message, "err");
+      return;
+    }
+
+    setStatusMessage("Opened workspace folder in file explorer.");
   }
 
   // Nexus Router state
@@ -3717,7 +3737,12 @@ function App() {
               </ul>
 
               <section className="tree-panel">
-                <h3>File Tree</h3>
+                <div className="tree-panel-head">
+                  <h3>File Tree</h3>
+                  <button type="button" className="ghost" onClick={() => void openActiveWorkspaceFolder()}>
+                    Open Folder
+                  </button>
+                </div>
                 {workspaceTree ? <ul className="tree-root">{renderTree(workspaceTree)}</ul> : <p>Loading workspace tree...</p>}
               </section>
             </>

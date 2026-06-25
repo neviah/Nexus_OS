@@ -1421,6 +1421,18 @@ async function resolveWorkspaceContext(state: SystemState, workspaceId?: string)
   return { id: targetId, path: "" };
 }
 
+async function openPathInFileManager(targetPath: string): Promise<void> {
+  if (process.platform === "win32") {
+    await execFileAsync("explorer.exe", [targetPath], { windowsHide: true, maxBuffer: 256 * 1024 });
+    return;
+  }
+  if (process.platform === "darwin") {
+    await execFileAsync("open", [targetPath], { windowsHide: true, maxBuffer: 256 * 1024 });
+    return;
+  }
+  await execFileAsync("xdg-open", [targetPath], { windowsHide: true, maxBuffer: 256 * 1024 });
+}
+
 async function runScheduledHarnessTask(input: {
   harnessId: string;
   workspaceId: string;
@@ -2608,6 +2620,27 @@ app.post("/api/workspaces/switch", async (req, res) => {
   state.activeWorkspaceId = id;
   await writeSystemState(state);
   return res.json({ ok: true });
+});
+
+app.post("/api/workspaces/open", async (req, res) => {
+  const body = req.body as { workspaceId?: string; relativePath?: string };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId);
+  if (!workspace.path) {
+    return res.status(404).json({ error: "Workspace path is unavailable." });
+  }
+
+  try {
+    const targetPath = body.relativePath?.trim()
+      ? resolveWorkspaceTargetPath(workspace.path, body.relativePath)
+      : workspace.path;
+    const stats = await fs.stat(targetPath);
+    const openTarget = stats.isDirectory() ? targetPath : path.dirname(targetPath);
+    await openPathInFileManager(openTarget);
+    return res.json({ ok: true, openedPath: openTarget });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
 });
 
 app.get("/api/workspaces/:id/tree", async (req, res) => {
