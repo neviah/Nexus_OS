@@ -606,24 +606,11 @@ async function runPterm(args: string[]): Promise<{ stdout: string; stderr: strin
   const ptermPath = await resolvePtermPath();
   const useWindowsCmdShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(ptermPath);
 
-  const quoteForCmd = (value: string): string => {
-    if (!value) {
-      return '""';
-    }
-    const escaped = value.replace(/(["^&|<>%!])/g, "^$1");
-    return `"${escaped}"`;
-  };
-
   try {
     const result = useWindowsCmdShim
       ? await execFileAsync(
         "cmd.exe",
-        [
-          "/d",
-          "/s",
-          "/c",
-          `${quoteForCmd(ptermPath)} ${args.map((arg) => quoteForCmd(arg)).join(" ")}`,
-        ],
+        ["/d", "/c", "call", ptermPath, ...args],
         {
           cwd: getRootDir(),
           windowsHide: true,
@@ -668,12 +655,7 @@ function stableAudioModeConfig(mode: StableAudioMode): { label: string; prompt: 
 }
 
 function stableAudioDefaultTarget(mode: StableAudioMode): string {
-  const config = stableAudioModeConfig(mode);
-  const params = new URLSearchParams({
-    model: mode,
-    title: config.title,
-    prompt: config.prompt,
-  });
+  const params = new URLSearchParams({ model: mode });
   return `start.js?${params.toString()}`;
 }
 
@@ -766,7 +748,7 @@ async function getStableAudioStatus(): Promise<StableAudioStatusPayload> {
 async function launchStableAudio(mode: StableAudioMode): Promise<{ status: StableAudioStatusPayload; notice?: string }> {
   const status = await getStableAudioStatus();
   if (!status.installed) {
-    await runPterm(["run", STABLE_AUDIO_APP_ID, "--default", "install.js"]);
+    await runPterm(["open", `${STABLE_AUDIO_APP_ID}/install.js`]);
   }
 
   if (mode === "medium" && !status.supportsMedium) {
@@ -776,7 +758,7 @@ async function launchStableAudio(mode: StableAudioMode): Promise<{ status: Stabl
     };
   }
 
-  await runPterm(["run", STABLE_AUDIO_APP_ID, "--default", stableAudioDefaultTarget(mode)]);
+  await runPterm(["open", `${STABLE_AUDIO_APP_ID}/${stableAudioDefaultTarget(mode)}`]);
   return {
     status: await getStableAudioStatus(),
     notice: mode === "medium"
