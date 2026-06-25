@@ -254,6 +254,7 @@ type StableAudioGeneratedClip = {
   duration: number;
   prompt: string;
   relativePath: string;
+  playbackUrl: string;
 };
 
 type RuntimeJob = {
@@ -847,13 +848,14 @@ function App() {
       return;
     }
 
-    const payload = (await response.json()) as { mode: "small-music" | "small-sfx" | "medium"; duration: number; prompt: string; relativePath: string };
+    const payload = (await response.json()) as { mode: "small-music" | "small-sfx" | "medium"; duration: number; prompt: string; relativePath: string; playbackUrl: string };
     setStableAudioGenerated((current) => [
       {
         mode: payload.mode,
         duration: payload.duration,
         prompt: payload.prompt,
         relativePath: payload.relativePath,
+        playbackUrl: payload.playbackUrl,
       },
       ...current,
     ].slice(0, 8));
@@ -2944,6 +2946,7 @@ function App() {
                     {stableAudioGenerated.map((clip) => (
                       <li key={`${clip.relativePath}-${clip.mode}`}>
                         {clip.mode} · {clip.duration}s · {clip.relativePath}
+                        <audio controls preload="none" src={clip.playbackUrl} />
                       </li>
                     ))}
                   </ul>

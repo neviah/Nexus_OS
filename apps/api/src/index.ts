@@ -570,6 +570,11 @@ type StableAudioStatusPayload = {
 const STABLE_AUDIO_APP_ID = "stable-audio-3-small.pinokio.git";
 const STABLE_AUDIO_REPO_URL = "https://github.com/cocktailpeanut/stable-audio-3-small.pinokio.git";
 const STABLE_AUDIO_UPSTREAM_REPO_URL = "https://github.com/Stability-AI/stable-audio-3";
+const STABLE_AUDIO_MODEL_MIRRORS: Record<StableAudioMode, string> = {
+  "small-music": "cocktailpeanut/stable-audio-3-small-music",
+  "small-sfx": "cocktailpeanut/stable-audio-3-small-sfx",
+  medium: "cocktailpeanut/stable-audio-3-medium",
+};
 
 type PinokioConfig = {
   home?: string;
@@ -735,11 +740,12 @@ async function ensureStableAudioSourceRepo(): Promise<string> {
   return sourcePath;
 }
 
-async function runUv(args: string[], cwd: string): Promise<void> {
+async function runUv(args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<void> {
   await execFileAsync("uv", args, {
     cwd,
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024,
+    env,
   });
 }
 
@@ -765,21 +771,48 @@ async function generateStableAudioAudio(input: {
     `nexus-${input.mode}-${new Date().toISOString().replace(/[:.]/g, "-")}.wav`,
   );
 
-  await runUv(
-    [
-      "run",
-      "stable-audio",
-      "--model",
-      input.mode,
-      "-p",
-      input.prompt,
-      "--duration",
-      String(input.duration),
-      "-o",
-      outputPath,
-    ],
-    ready.sourcePath,
-  );
+  const scriptPath = path.join(ready.sourcePath, ".nexus-generate-stable-audio.py");
+  const pythonScript = [
+    "import os",
+    "import stable_audio_3.model as model_module",
+    "import stable_audio_3.model_configs as model_configs",
+    "from stable_audio_3.model_configs import ModelConfig",
+    "from stable_audio_3 import StableAudioModel",
+    "import torchaudio",
+    "",
+    "mode = os.environ['NEXUS_STABLE_AUDIO_MODE']",
+    "prompt = os.environ['NEXUS_STABLE_AUDIO_PROMPT']",
+    "duration = float(os.environ['NEXUS_STABLE_AUDIO_DURATION'])",
+    "output_path = os.environ['NEXUS_STABLE_AUDIO_OUTPUT']",
+    "",
+    "mirrors = {",
+    "  'small-music': os.environ['NEXUS_SA3_MIRROR_SMALL_MUSIC'],",
+    "  'small-sfx': os.environ['NEXUS_SA3_MIRROR_SMALL_SFX'],",
+    "  'medium': os.environ['NEXUS_SA3_MIRROR_MEDIUM'],",
+    "}",
+    "",
+    "for name, repo_id in mirrors.items():",
+    "  config = ModelConfig(repo_id, 'model_config.json', 'model.safetensors')",
+    "  model_configs.models[name] = config",
+    "  model_configs.all_models[name] = config",
+    "",
+    "model_module.all_models = model_configs.all_models",
+    "model = StableAudioModel.from_pretrained(mode)",
+    "audio = model.generate(prompt=prompt, duration=duration)",
+    "torchaudio.save(output_path, audio[0].cpu(), model.sample_rate)",
+  ].join("\n");
+  await fs.writeFile(scriptPath, pythonScript, "utf-8");
+
+  await runUv(["run", "python", scriptPath], ready.sourcePath, {
+    ...process.env,
+    NEXUS_STABLE_AUDIO_MODE: input.mode,
+    NEXUS_STABLE_AUDIO_PROMPT: input.prompt,
+    NEXUS_STABLE_AUDIO_DURATION: String(input.duration),
+    NEXUS_STABLE_AUDIO_OUTPUT: outputPath,
+    NEXUS_SA3_MIRROR_SMALL_MUSIC: STABLE_AUDIO_MODEL_MIRRORS["small-music"],
+    NEXUS_SA3_MIRROR_SMALL_SFX: STABLE_AUDIO_MODEL_MIRRORS["small-sfx"],
+    NEXUS_SA3_MIRROR_MEDIUM: STABLE_AUDIO_MODEL_MIRRORS.medium,
+  });
 
   return { outputPath };
 }
@@ -1519,7 +1552,7 @@ app.get("/api/bootstrap", async (_req, res) => {
       {
         id: "music-generator",
         name: "Music Generator",
-        status: stableAudioStatus.ready ? "online" : (stableAudioStatus.installed ? "setup-required" : "offline"),
+        status: stableAudioStatus.installed ? "online" : "setup-required",
       },
       { id: "image-generator", name: "Image Generator", status: "online" },
       { id: "video-generator", name: "Video Generator", status: "offline" },
@@ -1821,6 +1854,39 @@ app.post("/api/tools/music/save", async (req, res) => {
   }
 });
 
+app.get("/api/tools/music/file", async (req, res) => {
+  const relativePath = String(req.query.relativePath ?? "").trim();
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+  if (!relativePath) {
+    return res.status(400).json({ error: "relativePath is required" });
+  }
+
+  try {
+    const state = await readSystemState();
+    const workspace = await resolveWorkspaceContext(state, workspaceId);
+    if (!workspace.path) {
+      return res.status(404).json({ error: "Workspace path is unavailable." });
+    }
+
+    const absolutePath = resolveWorkspaceTargetPath(workspace.path, relativePath);
+    await fs.access(absolutePath);
+    if (!/\.(wav|mp3|ogg)$/i.test(absolutePath)) {
+      return res.status(400).json({ error: "Only wav/mp3/ogg files are supported." });
+    }
+
+    const extension = path.extname(absolutePath).toLowerCase();
+    const contentType = extension === ".mp3"
+      ? "audio/mpeg"
+      : extension === ".ogg"
+        ? "audio/ogg"
+        : "audio/wav";
+    res.setHeader("Content-Type", contentType);
+    return res.sendFile(absolutePath);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
 app.get("/api/tools/music/stable-audio/status", async (_req, res) => {
   try {
     const status = await getStableAudioStatus();
@@ -1879,6 +1945,7 @@ app.post("/api/tools/music/stable-audio/generate", async (req, res) => {
       duration,
       prompt,
       outputPath: generated.outputPath,
+      playbackUrl: `/api/tools/music/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
       ...saved,
     });
   } catch (error) {
