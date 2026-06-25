@@ -604,12 +604,38 @@ async function resolvePtermPath(): Promise<string> {
 
 async function runPterm(args: string[]): Promise<{ stdout: string; stderr: string }> {
   const ptermPath = await resolvePtermPath();
+  const useWindowsCmdShim = process.platform === "win32" && /\.(cmd|bat)$/i.test(ptermPath);
+
+  const quoteForCmd = (value: string): string => {
+    if (!value) {
+      return '""';
+    }
+    const escaped = value.replace(/(["^&|<>%!])/g, "^$1");
+    return `"${escaped}"`;
+  };
+
   try {
-    const result = await execFileAsync(ptermPath, args, {
+    const result = useWindowsCmdShim
+      ? await execFileAsync(
+        "cmd.exe",
+        [
+          "/d",
+          "/s",
+          "/c",
+          `${quoteForCmd(ptermPath)} ${args.map((arg) => quoteForCmd(arg)).join(" ")}`,
+        ],
+        {
+          cwd: getRootDir(),
+          windowsHide: true,
+          maxBuffer: 2 * 1024 * 1024,
+        },
+      )
+      : await execFileAsync(ptermPath, args, {
       cwd: getRootDir(),
       windowsHide: true,
       maxBuffer: 2 * 1024 * 1024,
     });
+
     return {
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? "",
