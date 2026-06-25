@@ -568,20 +568,106 @@ type StableAudioStatusPayload = {
 };
 
 const STABLE_AUDIO_APP_ID = "stable-audio-3-small.pinokio.git";
+const STABLE_AUDIO_REPO_URL = "https://github.com/cocktailpeanut/stable-audio-3-small.pinokio.git";
 
-async function resolvePtermPath(): Promise<string> {
-  const candidates: string[] = [];
+type PinokioConfig = {
+  home?: string;
+};
+
+async function readPinokioConfig(): Promise<PinokioConfig> {
   const pinokioConfigPath = path.join(os.homedir(), ".pinokio", "config.json");
   try {
     const raw = await fs.readFile(pinokioConfigPath, "utf-8");
-    const parsed = JSON.parse(raw) as { home?: string };
-    if (parsed.home?.trim()) {
-      candidates.push(path.join(parsed.home, "bin", "npm", "pterm.cmd"));
-      candidates.push(path.join(parsed.home, "bin", "npm", "pterm"));
-      candidates.push(path.join(parsed.home, "bin", "pterm"));
-    }
+    return JSON.parse(raw) as PinokioConfig;
   } catch {
-    // Fall through to PATH.
+    return {};
+  }
+}
+
+async function resolvePinokioHome(): Promise<string | null> {
+  const config = await readPinokioConfig();
+  if (config.home?.trim()) {
+    return config.home.trim();
+  }
+  return null;
+}
+
+async function resolveStableAudioAppPath(): Promise<string | null> {
+  const pinokioHome = await resolvePinokioHome();
+  if (!pinokioHome) {
+    return null;
+  }
+  return path.join(pinokioHome, "api", STABLE_AUDIO_APP_ID);
+}
+
+async function stableAudioScriptsPresent(): Promise<boolean> {
+  const appPath = await resolveStableAudioAppPath();
+  if (!appPath) {
+    return false;
+  }
+
+  try {
+    await fs.access(path.join(appPath, "install.js"));
+    await fs.access(path.join(appPath, "start.js"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function execGit(args: string[]): Promise<void> {
+  await execFileAsync("git", args, {
+    cwd: getRootDir(),
+    windowsHide: true,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+}
+
+async function ensureStableAudioAppFiles(): Promise<void> {
+  if (await stableAudioScriptsPresent()) {
+    return;
+  }
+
+  const appPath = await resolveStableAudioAppPath();
+  if (!appPath) {
+    throw new Error("Pinokio home is not configured. Open Pinokio once and try again.");
+  }
+
+  await fs.mkdir(appPath, { recursive: true });
+
+  const gitDir = path.join(appPath, ".git");
+  let hasGit = true;
+  try {
+    await fs.access(gitDir);
+  } catch {
+    hasGit = false;
+  }
+
+  if (!hasGit) {
+    await execGit(["-C", appPath, "init"]);
+    try {
+      await execGit(["-C", appPath, "remote", "add", "origin", STABLE_AUDIO_REPO_URL]);
+    } catch {
+      // Ignore if remote already exists.
+    }
+  }
+
+  await execGit(["-C", appPath, "fetch", "--depth", "1", "origin", "main"]);
+  await execGit(["-C", appPath, "reset", "--hard", "FETCH_HEAD"]);
+  await execGit(["-C", appPath, "clean", "-fd"]);
+
+  if (!(await stableAudioScriptsPresent())) {
+    throw new Error("Stable Audio app files are still missing after bootstrap.");
+  }
+}
+
+async function resolvePtermPath(): Promise<string> {
+  const candidates: string[] = [];
+  const pinokioHome = await resolvePinokioHome();
+  if (pinokioHome) {
+    candidates.push(path.join(pinokioHome, "bin", "npm", "pterm.cmd"));
+    candidates.push(path.join(pinokioHome, "bin", "npm", "pterm"));
+    candidates.push(path.join(pinokioHome, "bin", "pterm"));
   }
 
   candidates.push("pterm");
@@ -659,7 +745,7 @@ function stableAudioDefaultTarget(mode: StableAudioMode): string {
   return `start.js?${params.toString()}`;
 }
 
-function parseStableAudioStatus(raw: string): StableAudioStatusPayload {
+function parseStableAudioStatus(raw: string, scriptsPresent: boolean): StableAudioStatusPayload {
   const parsed = JSON.parse(raw) as {
     app_id?: string;
     running?: boolean;
@@ -670,7 +756,7 @@ function parseStableAudioStatus(raw: string): StableAudioStatusPayload {
   };
   const supportsMedium = process.platform === "win32" || process.platform === "linux";
   return {
-    installed: true,
+    installed: scriptsPresent,
     running: Boolean(parsed.running),
     ready: Boolean(parsed.ready),
     readyUrl: parsed.ready_url ?? null,
@@ -705,12 +791,13 @@ function parseStableAudioStatus(raw: string): StableAudioStatusPayload {
 }
 
 async function getStableAudioStatus(): Promise<StableAudioStatusPayload> {
+  const scriptsPresent = await stableAudioScriptsPresent();
   try {
     const result = await runPterm(["status", STABLE_AUDIO_APP_ID]);
-    return parseStableAudioStatus(result.stdout);
+    return parseStableAudioStatus(result.stdout, scriptsPresent);
   } catch {
     return {
-      installed: false,
+      installed: scriptsPresent,
       running: false,
       ready: false,
       readyUrl: null,
@@ -746,8 +833,10 @@ async function getStableAudioStatus(): Promise<StableAudioStatusPayload> {
 }
 
 async function launchStableAudio(mode: StableAudioMode): Promise<{ status: StableAudioStatusPayload; notice?: string }> {
+  await ensureStableAudioAppFiles();
   const status = await getStableAudioStatus();
-  if (!status.installed) {
+
+  if (!status.running) {
     await runPterm(["open", `${STABLE_AUDIO_APP_ID}/install.js`]);
   }
 
