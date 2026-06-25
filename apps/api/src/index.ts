@@ -799,7 +799,7 @@ async function generateStableAudioAudio(input: {
     "model_module.all_models = model_configs.all_models",
     "model = StableAudioModel.from_pretrained(mode)",
     "audio = model.generate(prompt=prompt, duration=duration)",
-    "torchaudio.save(output_path, audio[0].cpu(), model.sample_rate)",
+    "torchaudio.save(output_path, audio[0].cpu(), model.model.sample_rate)",
   ].join("\n");
   await fs.writeFile(scriptPath, pythonScript, "utf-8");
 
