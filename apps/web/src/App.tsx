@@ -249,6 +249,13 @@ type StableAudioStatus = {
   }>;
 };
 
+type StableAudioGeneratedClip = {
+  mode: "small-music" | "small-sfx" | "medium";
+  duration: number;
+  prompt: string;
+  relativePath: string;
+};
+
 type RuntimeJob = {
   id: string;
   action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam";
@@ -441,7 +448,11 @@ function App() {
   const [runtimeJobs, setRuntimeJobs] = useState<RuntimeJob[]>([]);
   const [expandedRuntimeJobIds, setExpandedRuntimeJobIds] = useState<Record<string, boolean>>({});
   const [stableAudioStatus, setStableAudioStatus] = useState<StableAudioStatus | null>(null);
-  const [stableAudioBusyMode, setStableAudioBusyMode] = useState<"small-music" | "small-sfx" | "medium" | "refresh" | null>(null);
+  const [stableAudioBusyAction, setStableAudioBusyAction] = useState<"refresh" | "generate" | null>(null);
+  const [stableAudioMode, setStableAudioMode] = useState<"small-music" | "small-sfx" | "medium">("small-music");
+  const [stableAudioPrompt, setStableAudioPrompt] = useState("lo-fi hip hop beat, 90 BPM");
+  const [stableAudioDuration, setStableAudioDuration] = useState(30);
+  const [stableAudioGenerated, setStableAudioGenerated] = useState<StableAudioGeneratedClip[]>([]);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -800,48 +811,56 @@ function App() {
   }
 
   async function loadStableAudioStatus() {
-    setStableAudioBusyMode("refresh");
+    setStableAudioBusyAction("refresh");
     const response = await fetch("/api/tools/music/stable-audio/status");
     if (!response.ok) {
       const payload = (await response.json()) as { error?: string };
       setStatusMessage(payload.error ?? "Failed to load Stable Audio status.");
       pushToast(payload.error ?? "Failed to load Stable Audio status.", "err");
-      setStableAudioBusyMode(null);
+      setStableAudioBusyAction(null);
       return;
     }
     const payload = (await response.json()) as StableAudioStatus;
     setStableAudioStatus(payload);
-    setStableAudioBusyMode(null);
+    setStableAudioBusyAction(null);
   }
 
-  async function launchStableAudioMode(mode: "small-music" | "small-sfx" | "medium") {
-    setStableAudioBusyMode(mode);
-    const response = await fetch("/api/tools/music/stable-audio/launch", {
+  async function generateStableAudio() {
+    setStableAudioBusyAction("generate");
+    const response = await fetch("/api/tools/music/stable-audio/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({
+        mode: stableAudioMode,
+        prompt: stableAudioPrompt,
+        duration: stableAudioDuration,
+        workspaceId: boot?.activeWorkspaceId,
+      }),
     });
 
     if (!response.ok) {
       const payload = (await response.json()) as { error?: string };
-      const message = payload.error ?? "Stable Audio launch failed.";
+      const message = payload.error ?? "Stable Audio generation failed.";
       setStatusMessage(message);
       pushToast(message, "err");
-      setStableAudioBusyMode(null);
+      setStableAudioBusyAction(null);
       return;
     }
 
-    const payload = (await response.json()) as { status: StableAudioStatus; notice?: string };
-    setStableAudioStatus(payload.status);
-    if (payload.notice) {
-      setStatusMessage(payload.notice);
-      pushToast(payload.notice, "warn");
-    } else {
-      const message = `Stable Audio ${mode} launch requested.`;
-      setStatusMessage(message);
-      pushToast(message, "ok");
-    }
-    setStableAudioBusyMode(null);
+    const payload = (await response.json()) as { mode: "small-music" | "small-sfx" | "medium"; duration: number; prompt: string; relativePath: string };
+    setStableAudioGenerated((current) => [
+      {
+        mode: payload.mode,
+        duration: payload.duration,
+        prompt: payload.prompt,
+        relativePath: payload.relativePath,
+      },
+      ...current,
+    ].slice(0, 8));
+    setStatusMessage(`Saved generated audio to ${payload.relativePath}`);
+    pushToast(`Generated ${payload.mode} clip saved to Assets.`, "ok");
+    setStableAudioBusyAction(null);
+    await loadStableAudioStatus();
   }
 
   // Nexus Router state
@@ -2863,55 +2882,73 @@ function App() {
               <div className="tool-header-row">
                 <div>
                   <h2>Music Generator</h2>
-                  <p className="subtitle">Stable Audio 3 via Pinokio for small music, small SFX, and medium GPU generation.</p>
+                  <p className="subtitle">Nexus-native Stable Audio generation using local Stable Audio 3 runtime.</p>
                 </div>
-                <button type="button" onClick={() => void loadStableAudioStatus()} disabled={stableAudioBusyMode !== null}>
-                  {stableAudioBusyMode === "refresh" ? "Refreshing..." : "Refresh"}
+                <button type="button" onClick={() => void loadStableAudioStatus()} disabled={stableAudioBusyAction !== null}>
+                  {stableAudioBusyAction === "refresh" ? "Refreshing..." : "Refresh"}
                 </button>
               </div>
 
               <section className="tool-section">
-                <h3>Stable Audio Launcher</h3>
-                <div className="stable-audio-grid">
-                  {(stableAudioStatus?.modes ?? []).map((mode) => (
-                    <article key={mode.id} className="stable-audio-card">
-                      <strong>{mode.label}</strong>
-                      <small>{mode.description}</small>
-                      <small>Prompt seed: {mode.recommendedPrompt}</small>
-                      <button
-                        type="button"
-                        onClick={() => void launchStableAudioMode(mode.id)}
-                        disabled={stableAudioBusyMode !== null || !mode.available}
-                      >
-                        {stableAudioBusyMode === mode.id ? "Starting..." : `Start ${mode.label}`}
-                      </button>
-                    </article>
-                  ))}
+                <h3>Generate Audio</h3>
+                <div className="stable-audio-form">
+                  <label>
+                    <span>Mode</span>
+                    <select value={stableAudioMode} onChange={(event) => setStableAudioMode(event.target.value as "small-music" | "small-sfx" | "medium")}>
+                      {(stableAudioStatus?.modes ?? []).map((mode) => (
+                        <option key={mode.id} value={mode.id} disabled={!mode.available}>{mode.label}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Duration (seconds)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={stableAudioMode === "medium" ? 380 : 120}
+                      value={stableAudioDuration}
+                      onChange={(event) => setStableAudioDuration(Number(event.target.value || 30))}
+                    />
+                  </label>
+
+                  <label>
+                    <span>Prompt</span>
+                    <textarea
+                      rows={4}
+                      value={stableAudioPrompt}
+                      onChange={(event) => setStableAudioPrompt(event.target.value)}
+                      placeholder="Describe the song or sound effect you want..."
+                    />
+                  </label>
+
+                  <button
+                    type="button"
+                    onClick={() => void generateStableAudio()}
+                    disabled={stableAudioBusyAction !== null || !stableAudioPrompt.trim()}
+                  >
+                    {stableAudioBusyAction === "generate" ? "Generating..." : "Generate Song"}
+                  </button>
                 </div>
-                <small>Status: {stableAudioStatus?.installed ? "installed" : "not installed"} · {stableAudioStatus?.running ? "running" : "stopped"} · {stableAudioStatus?.ready ? "web ui ready" : "web ui offline"}</small>
-                <small>Medium requires the Stable Audio Medium path. If it is missing or incompatible, check Cookbook recommendations before retrying.</small>
+
+                <small>Status: {stableAudioStatus?.installed ? "runtime ready" : "runtime needs install"} · mode max {stableAudioMode === "medium" ? "380s" : "120s"}</small>
+                <small>Medium requires a compatible NVIDIA setup. If medium fails, use Small Music or check Cookbook recommendations.</small>
               </section>
 
-              {stableAudioStatus?.readyUrl ? (
-                <section className="tool-section stable-audio-embed-section">
-                  <div className="tool-header-row">
-                    <h3>Stable Audio Web UI</h3>
-                    <button type="button" className="ghost" onClick={() => window.open(stableAudioStatus.readyUrl ?? "", "_blank", "noopener,noreferrer")}>
-                      Open In Browser
-                    </button>
-                  </div>
-                  <iframe
-                    title="Stable Audio Web UI"
-                    src={stableAudioStatus.readyUrl}
-                    className="stable-audio-embed"
-                  />
-                </section>
-              ) : (
-                <section className="tool-section coming-soon-panel">
-                  <h3>Stable Audio Web UI</h3>
-                  <p>Launch one of the Stable Audio modes above to open the built-in Gradio interface here.</p>
-                </section>
-              )}
+              <section className="tool-section">
+                <h3>Recent Outputs</h3>
+                {stableAudioGenerated.length === 0 ? (
+                  <small>No generated clips yet. Your first successful run will be saved into Assets/music.</small>
+                ) : (
+                  <ul className="tool-list">
+                    {stableAudioGenerated.map((clip) => (
+                      <li key={`${clip.relativePath}-${clip.mode}`}>
+                        {clip.mode} · {clip.duration}s · {clip.relativePath}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
 
             </div>
           ) : null}

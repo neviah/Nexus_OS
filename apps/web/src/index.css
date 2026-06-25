@@ -828,6 +828,21 @@ button:disabled {
   gap: 10px;
 }
 
+.stable-audio-form {
+  display: grid;
+  gap: 10px;
+}
+
+.stable-audio-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.stable-audio-form textarea {
+  resize: vertical;
+  min-height: 88px;
+}
+
 .stable-audio-card {
   border: 1px solid rgba(47, 71, 79, 0.35);
   border-radius: 10px;

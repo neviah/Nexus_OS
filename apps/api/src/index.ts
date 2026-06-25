@@ -569,6 +569,7 @@ type StableAudioStatusPayload = {
 
 const STABLE_AUDIO_APP_ID = "stable-audio-3-small.pinokio.git";
 const STABLE_AUDIO_REPO_URL = "https://github.com/cocktailpeanut/stable-audio-3-small.pinokio.git";
+const STABLE_AUDIO_UPSTREAM_REPO_URL = "https://github.com/Stability-AI/stable-audio-3";
 
 type PinokioConfig = {
   home?: string;
@@ -600,6 +601,14 @@ async function resolveStableAudioAppPath(): Promise<string | null> {
   return path.join(pinokioHome, "api", STABLE_AUDIO_APP_ID);
 }
 
+async function resolveStableAudioSourcePath(): Promise<string | null> {
+  const appPath = await resolveStableAudioAppPath();
+  if (!appPath) {
+    return null;
+  }
+  return path.join(appPath, "app");
+}
+
 async function stableAudioScriptsPresent(): Promise<boolean> {
   const appPath = await resolveStableAudioAppPath();
   if (!appPath) {
@@ -613,6 +622,42 @@ async function stableAudioScriptsPresent(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function stableAudioSourcePresent(): Promise<boolean> {
+  const sourcePath = await resolveStableAudioSourcePath();
+  if (!sourcePath) {
+    return false;
+  }
+
+  try {
+    await fs.access(path.join(sourcePath, "pyproject.toml"));
+    await fs.access(path.join(sourcePath, "run_gradio.py"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function stableAudioEnvReady(): Promise<boolean> {
+  const sourcePath = await resolveStableAudioSourcePath();
+  if (!sourcePath) {
+    return false;
+  }
+
+  const candidates = process.platform === "win32"
+    ? [path.join(sourcePath, ".venv", "Scripts", "python.exe")]
+    : [path.join(sourcePath, ".venv", "bin", "python")];
+
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return true;
+    } catch {
+      // keep scanning
+    }
+  }
+  return false;
 }
 
 async function execGit(args: string[]): Promise<void> {
@@ -659,6 +704,84 @@ async function ensureStableAudioAppFiles(): Promise<void> {
   if (!(await stableAudioScriptsPresent())) {
     throw new Error("Stable Audio app files are still missing after bootstrap.");
   }
+}
+
+async function ensureStableAudioSourceRepo(): Promise<string> {
+  const sourcePath = await resolveStableAudioSourcePath();
+  if (!sourcePath) {
+    throw new Error("Pinokio home is not configured. Open Pinokio once and try again.");
+  }
+
+  if (await stableAudioSourcePresent()) {
+    return sourcePath;
+  }
+
+  await fs.mkdir(sourcePath, { recursive: true });
+  await execGit(["-C", sourcePath, "init"]);
+  try {
+    await execGit(["-C", sourcePath, "remote", "add", "origin", STABLE_AUDIO_UPSTREAM_REPO_URL]);
+  } catch {
+    // Ignore if remote already exists.
+  }
+
+  await execGit(["-C", sourcePath, "fetch", "--depth", "1", "origin", "main"]);
+  await execGit(["-C", sourcePath, "reset", "--hard", "FETCH_HEAD"]);
+  await execGit(["-C", sourcePath, "clean", "-fd"]);
+
+  if (!(await stableAudioSourcePresent())) {
+    throw new Error("Stable Audio source repository is missing required files.");
+  }
+
+  return sourcePath;
+}
+
+async function runUv(args: string[], cwd: string): Promise<void> {
+  await execFileAsync("uv", args, {
+    cwd,
+    windowsHide: true,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+}
+
+async function ensureStableAudioNativeReady(): Promise<{ sourcePath: string }> {
+  await ensureStableAudioAppFiles();
+  const sourcePath = await ensureStableAudioSourceRepo();
+  if (!(await stableAudioEnvReady())) {
+    await runUv(["sync", "--extra", "ui"], sourcePath);
+  }
+  return { sourcePath };
+}
+
+async function generateStableAudioAudio(input: {
+  mode: StableAudioMode;
+  prompt: string;
+  duration: number;
+}): Promise<{ outputPath: string }> {
+  const ready = await ensureStableAudioNativeReady();
+  const outputDir = path.join(ready.sourcePath, "outputs");
+  await fs.mkdir(outputDir, { recursive: true });
+  const outputPath = path.join(
+    outputDir,
+    `nexus-${input.mode}-${new Date().toISOString().replace(/[:.]/g, "-")}.wav`,
+  );
+
+  await runUv(
+    [
+      "run",
+      "stable-audio",
+      "--model",
+      input.mode,
+      "-p",
+      input.prompt,
+      "--duration",
+      String(input.duration),
+      "-o",
+      outputPath,
+    ],
+    ready.sourcePath,
+  );
+
+  return { outputPath };
 }
 
 async function resolvePtermPath(): Promise<string> {
@@ -792,12 +915,18 @@ function parseStableAudioStatus(raw: string, scriptsPresent: boolean): StableAud
 
 async function getStableAudioStatus(): Promise<StableAudioStatusPayload> {
   const scriptsPresent = await stableAudioScriptsPresent();
+  const sourcePresent = await stableAudioSourcePresent();
+  const envPresent = await stableAudioEnvReady();
   try {
     const result = await runPterm(["status", STABLE_AUDIO_APP_ID]);
-    return parseStableAudioStatus(result.stdout, scriptsPresent);
+    const parsed = parseStableAudioStatus(result.stdout, scriptsPresent && sourcePresent && envPresent);
+    parsed.running = false;
+    parsed.ready = false;
+    parsed.readyUrl = null;
+    return parsed;
   } catch {
     return {
-      installed: scriptsPresent,
+      installed: scriptsPresent && sourcePresent && envPresent,
       running: false,
       ready: false,
       readyUrl: null,
@@ -833,26 +962,16 @@ async function getStableAudioStatus(): Promise<StableAudioStatusPayload> {
 }
 
 async function launchStableAudio(mode: StableAudioMode): Promise<{ status: StableAudioStatusPayload; notice?: string }> {
-  await ensureStableAudioAppFiles();
-  const status = await getStableAudioStatus();
-
-  if (!status.running) {
-    await runPterm(["open", `${STABLE_AUDIO_APP_ID}/install.js`]);
-  }
-
-  if (mode === "medium" && !status.supportsMedium) {
+  await ensureStableAudioNativeReady();
+  if (mode === "medium" && !(process.platform === "win32" || process.platform === "linux")) {
     return {
       status: await getStableAudioStatus(),
       notice: "Stable Audio Medium requires a supported GPU/runtime path. Check Cookbook for compatible music model guidance.",
     };
   }
-
-  await runPterm(["open", `${STABLE_AUDIO_APP_ID}/${stableAudioDefaultTarget(mode)}`]);
   return {
     status: await getStableAudioStatus(),
-    notice: mode === "medium"
-      ? "If Medium does not launch cleanly, install a compatible Stable Audio Medium setup from the Cookbook recommendations."
-      : undefined,
+    notice: "Stable Audio is now controlled from the Nexus-native generator UI.",
   };
 }
 
@@ -1720,6 +1839,48 @@ app.post("/api/tools/music/stable-audio/launch", async (req, res) => {
   try {
     const result = await launchStableAudio(mode);
     return res.json({ ok: true, ...result });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/music/stable-audio/generate", async (req, res) => {
+  const body = req.body as { mode?: StableAudioMode; prompt?: string; duration?: number; workspaceId?: string; fileName?: string };
+  const mode = body.mode;
+  const prompt = body.prompt?.trim() ?? "";
+  const duration = Number(body.duration ?? 30);
+
+  if (mode !== "small-music" && mode !== "small-sfx" && mode !== "medium") {
+    return res.status(400).json({ error: "mode must be one of small-music, small-sfx, or medium." });
+  }
+  if (!prompt) {
+    return res.status(400).json({ error: "prompt is required." });
+  }
+
+  const maxDuration = mode === "medium" ? 380 : 120;
+  if (!Number.isFinite(duration) || duration < 1 || duration > maxDuration) {
+    return res.status(400).json({ error: `duration must be between 1 and ${maxDuration} seconds for ${mode}.` });
+  }
+
+  try {
+    const generated = await generateStableAudioAudio({ mode, prompt, duration });
+    const bytes = await fs.readFile(generated.outputPath);
+    const saved = await saveBufferToWorkspaceAssets({
+      workspaceId: body.workspaceId,
+      category: "music",
+      baseName: body.fileName ?? `${mode}-generated`,
+      extension: "wav",
+      bytes,
+    });
+
+    return res.json({
+      ok: true,
+      mode,
+      duration,
+      prompt,
+      outputPath: generated.outputPath,
+      ...saved,
+    });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
   }
