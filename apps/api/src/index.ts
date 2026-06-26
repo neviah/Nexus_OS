@@ -1423,14 +1423,21 @@ async function resolveWorkspaceContext(state: SystemState, workspaceId?: string)
 
 async function openPathInFileManager(targetPath: string): Promise<void> {
   if (process.platform === "win32") {
-    await execFileAsync("explorer.exe", [targetPath], { windowsHide: true, maxBuffer: 256 * 1024 });
+    // explorer.exe always exits with code 1 — use spawn+detach and never await.
+    const { spawn } = await import("node:child_process");
+    const child = spawn("explorer.exe", [targetPath], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
     return;
   }
   if (process.platform === "darwin") {
-    await execFileAsync("open", [targetPath], { windowsHide: true, maxBuffer: 256 * 1024 });
+    await execFileAsync("open", [targetPath], { maxBuffer: 256 * 1024 });
     return;
   }
-  await execFileAsync("xdg-open", [targetPath], { windowsHide: true, maxBuffer: 256 * 1024 });
+  await execFileAsync("xdg-open", [targetPath], { maxBuffer: 256 * 1024 });
 }
 
 async function runScheduledHarnessTask(input: {
@@ -2666,6 +2673,8 @@ app.post("/api/chat", async (req, res) => {
   const safeHistory = history ?? [];
   const harnesses = await readHarnessRegistry();
   const harness = harnesses.find((entry) => entry.id === harnessId);
+  const githubConnectorForChat = await readGitHubConnectorState();
+  const githubLoginForChat = githubConnectorForChat?.login ?? undefined;
   const taskId = requestId ?? crypto.randomUUID();
 
   if (!isNexusRouterConfigured(state)) {
@@ -2696,6 +2705,7 @@ app.post("/api/chat", async (req, res) => {
       history: safeHistory,
       state,
       workspace,
+      githubLogin: githubLoginForChat,
     });
 
     if (workspace.path) {
@@ -2826,6 +2836,8 @@ app.post("/api/chat/stream", async (req, res) => {
   const safeHistory = history ?? [];
   const harnesses = await readHarnessRegistry();
   const harness = harnesses.find((entry) => entry.id === harnessId);
+  const githubConnectorForStream = await readGitHubConnectorState();
+  const githubLoginForChat = githubConnectorForStream?.login ?? undefined;
 
   if (!isNexusRouterConfigured(state)) {
     return res.status(412).json({ error: "Complete Nexus Router setup before starting chats." });
@@ -2876,6 +2888,7 @@ app.post("/api/chat/stream", async (req, res) => {
       state,
       workspace,
       signal: controller.signal,
+      githubLogin: githubLoginForChat,
     })) {
       if (controller.signal.aborted) {
         break;

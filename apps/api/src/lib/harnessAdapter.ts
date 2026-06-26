@@ -11,6 +11,7 @@ type AdapterRequest = {
     path: string;
   };
   signal?: AbortSignal;
+  githubLogin?: string;
 };
 
 type AdapterConfig = NonNullable<HarnessConfig["adapter"]>;
@@ -46,7 +47,7 @@ const REQUEST_TIMEOUT_MS = 35000;
 
 export async function invokeHarness(input: AdapterRequest): Promise<AdapterResult> {
   const startedAt = Date.now();
-  const { harness, message, history, state, workspace, signal } = input;
+  const { harness, message, history, state, workspace, signal, githubLogin } = input;
   const models = resolveModelOrder(harness, state);
 
   for (let index = 0; index < models.length; index += 1) {
@@ -59,6 +60,7 @@ export async function invokeHarness(input: AdapterRequest): Promise<AdapterResul
       workspace,
       model,
       signal,
+      githubLogin,
     });
 
     if (!attempt) {
@@ -103,7 +105,7 @@ export async function invokeHarness(input: AdapterRequest): Promise<AdapterResul
 }
 
 export async function* streamHarness(input: AdapterRequest): AsyncGenerator<StreamChunk> {
-  const { harness, message, history, state, workspace, signal } = input;
+  const { harness, message, history, state, workspace, signal, githubLogin } = input;
   const startedAt = Date.now();
   const models = resolveModelOrder(harness, state);
 
@@ -117,6 +119,7 @@ export async function* streamHarness(input: AdapterRequest): AsyncGenerator<Stre
       state,
       workspace,
       signal,
+      githubLogin,
     });
 
     if (!stream) {
@@ -183,19 +186,20 @@ async function tryHarnessEndpoints(input: {
   state: SystemState;
   workspace?: { id: string; path: string };
   signal?: AbortSignal;
+  githubLogin?: string;
 }): Promise<AttemptResult | null> {
-  const { harness, model, message, history, state, workspace, signal } = input;
+  const { harness, model, message, history, state, workspace, signal, githubLogin } = input;
   const config = getAdapterConfig(harness);
 
   if (config.protocol !== "openai") {
-    const generic = await requestGenericJson(harness, model, message, history, state, workspace, signal);
+    const generic = await requestGenericJson(harness, model, message, history, state, workspace, signal, githubLogin);
     if (generic) {
       return generic;
     }
   }
 
   if (config.protocol !== "generic") {
-    const openAi = await requestOpenAiJson(harness, model, message, history, state, workspace, signal);
+    const openAi = await requestOpenAiJson(harness, model, message, history, state, workspace, signal, githubLogin);
     if (openAi) {
       return openAi;
     }
@@ -212,8 +216,9 @@ async function tryHarnessStream(input: {
   state: SystemState;
   workspace?: { id: string; path: string };
   signal?: AbortSignal;
+  githubLogin?: string;
 }): Promise<AsyncGenerator<string> | null> {
-  const { harness, model, message, history, state, workspace, signal } = input;
+  const { harness, model, message, history, state, workspace, signal, githubLogin } = input;
   const config = getAdapterConfig(harness);
 
   if (config.streamProtocol === "none") {
@@ -221,10 +226,10 @@ async function tryHarnessStream(input: {
   }
 
   if (config.streamProtocol === "custom-sse") {
-    return requestGenericStream(harness, model, message, history, state, workspace, signal);
+    return requestGenericStream(harness, model, message, history, state, workspace, signal, githubLogin);
   }
 
-  return requestOpenAiStream(harness, model, message, history, state, workspace, signal);
+  return requestOpenAiStream(harness, model, message, history, state, workspace, signal, githubLogin);
 }
 
 async function requestGenericJson(
@@ -235,6 +240,7 @@ async function requestGenericJson(
   state: SystemState,
   workspace?: { id: string; path: string },
   signal?: AbortSignal,
+  _githubLogin?: string,
 ): Promise<AttemptResult | null> {
   const config = getAdapterConfig(harness);
   const context = createRouterContext(state, model, workspace);
@@ -286,9 +292,11 @@ async function requestOpenAiJson(
   state: SystemState,
   workspace?: { id: string; path: string },
   signal?: AbortSignal,
+  githubLogin?: string,
 ): Promise<AttemptResult | null> {
   const config = getAdapterConfig(harness);
   const context = createRouterContext(state, model, workspace);
+  const nexusCtx: NexusInjectedContext = { workspacePath: workspace?.path, githubLogin };
 
   try {
     const response = await fetchWithTimeout(
@@ -299,7 +307,7 @@ async function requestOpenAiJson(
         body: JSON.stringify({
           model,
           stream: false,
-          messages: buildOpenAiMessages(message, history),
+          messages: buildOpenAiMessages(message, history, nexusCtx),
           workspace,
           router: buildRouterBody(context),
         }),
@@ -332,9 +340,11 @@ async function requestOpenAiStream(
   state: SystemState,
   workspace?: { id: string; path: string },
   signal?: AbortSignal,
+  githubLogin?: string,
 ): Promise<AsyncGenerator<string> | null> {
   const config = getAdapterConfig(harness);
   const context = createRouterContext(state, model, workspace);
+  const nexusCtx: NexusInjectedContext = { workspacePath: workspace?.path, githubLogin };
 
   try {
     const response = await fetchWithTimeout(
@@ -345,7 +355,7 @@ async function requestOpenAiStream(
         body: JSON.stringify({
           model,
           stream: true,
-          messages: buildOpenAiMessages(message, history),
+          messages: buildOpenAiMessages(message, history, nexusCtx),
           workspace,
           router: buildRouterBody(context),
         }),
@@ -372,6 +382,7 @@ async function requestGenericStream(
   state: SystemState,
   workspace?: { id: string; path: string },
   signal?: AbortSignal,
+  _githubLogin?: string,
 ): Promise<AsyncGenerator<string> | null> {
   const config = getAdapterConfig(harness);
   const context = createRouterContext(state, model, workspace);
@@ -538,14 +549,47 @@ function resolveModelOrder(harness: HarnessConfig, state: SystemState): string[]
   return uniqueModels([...router, ...preferred]);
 }
 
-function buildOpenAiMessages(message: string, history: ChatMessage[]) {
+type NexusInjectedContext = {
+  workspacePath?: string;
+  githubLogin?: string;
+};
+
+function buildNexusSystemMessage(ctx: NexusInjectedContext): string {
+  const lines: string[] = [
+    "You are running inside Nexus OS, a local AI workspace.",
+  ];
+  if (ctx.workspacePath) {
+    lines.push(`Active workspace path: ${ctx.workspacePath}`);
+  }
+  if (ctx.githubLogin) {
+    lines.push(
+      `GitHub is connected as @${ctx.githubLogin}. You can reference this account when the user asks you to work with GitHub repos, create PRs, or push code. Use standard git CLI operations against the workspace path above; the git credential is already configured.`,
+    );
+  } else {
+    lines.push("GitHub is not connected. Advise the user to connect GitHub in Nexus OS Settings > Connectors if they need repo access.");
+  }
+  return lines.join("\n");
+}
+
+function buildOpenAiMessages(
+  message: string,
+  history: ChatMessage[],
+  nexusContext?: NexusInjectedContext,
+) {
   const base = history.map((entry) => ({ role: entry.role, content: entry.content }));
-  const last = base[base.length - 1];
+  // Strip any previous Nexus system injection to avoid duplication.
+  const withoutPreviousSystem = base.filter(
+    (m) => !(m.role === "system" && m.content.startsWith("You are running inside Nexus OS")),
+  );
+  if (nexusContext) {
+    withoutPreviousSystem.unshift({ role: "system", content: buildNexusSystemMessage(nexusContext) });
+  }
+  const last = withoutPreviousSystem[withoutPreviousSystem.length - 1];
   const alreadyIncluded = last?.role === "user" && last?.content === message;
   if (!alreadyIncluded) {
-    base.push({ role: "user", content: message });
+    withoutPreviousSystem.push({ role: "user", content: message });
   }
-  return base;
+  return withoutPreviousSystem;
 }
 
 function extractText(payload: Record<string, unknown>): string {
