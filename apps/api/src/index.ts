@@ -1423,14 +1423,16 @@ async function resolveWorkspaceContext(state: SystemState, workspaceId?: string)
 
 async function openPathInFileManager(targetPath: string): Promise<void> {
   if (process.platform === "win32") {
-    // explorer.exe always exits with code 1 — use spawn+detach and never await.
+    // Use cmd.exe /c start which is more reliable than direct explorer.exe spawn
     const { spawn } = await import("node:child_process");
-    const child = spawn("explorer.exe", [targetPath], {
+    const child = spawn("cmd.exe", ["/c", "start", "", targetPath], {
       detached: true,
       stdio: "ignore",
-      windowsHide: true,
+      shell: false,
     });
     child.unref();
+    // Give it a moment to start, but don't block
+    await new Promise((resolve) => setTimeout(resolve, 100));
     return;
   }
   if (process.platform === "darwin") {
