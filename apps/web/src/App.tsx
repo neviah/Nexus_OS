@@ -260,10 +260,19 @@ type StableAudioGeneratedClip = {
 type ImageGeneratedResult = {
   imageUrl: string;
   prompt: string;
+  provider: string;
   model: string;
   width: number;
   height: number;
+  createdAt: string;
   relativePath?: string;
+};
+
+type ImageSizePreset = {
+  id: string;
+  label: string;
+  width: number;
+  height: number;
 };
 
 type RuntimeJob = {
@@ -408,6 +417,13 @@ const THEME_PRESETS: ThemePreset[] = [
   { id: "sunset", name: "Sunset Neon", hint: "gold + coral high contrast" },
 ];
 
+const IMAGE_SIZE_PRESETS: ImageSizePreset[] = [
+  { id: "square", label: "Square 1024", width: 1024, height: 1024 },
+  { id: "portrait", label: "Portrait 832x1216", width: 832, height: 1216 },
+  { id: "landscape", label: "Landscape 1216x832", width: 1216, height: 832 },
+  { id: "thumbnail", label: "Thumbnail 640x360", width: 640, height: 360 },
+];
+
 function App() {
   const [themeId, setThemeId] = useState<string>(() => {
     if (typeof window === "undefined") {
@@ -469,6 +485,7 @@ function App() {
   const [imageHeight, setImageHeight] = useState(1024);
   const [imageBusyAction, setImageBusyAction] = useState<"generate" | "save" | null>(null);
   const [imageResult, setImageResult] = useState<ImageGeneratedResult | null>(null);
+  const [recentImages, setRecentImages] = useState<ImageGeneratedResult[]>([]);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -887,6 +904,7 @@ function App() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        provider: "pollinations",
         prompt: imagePrompt,
         model: imageModel,
         width: imageWidth,
@@ -905,23 +923,29 @@ function App() {
 
     const payload = (await response.json()) as {
       imageUrl: string;
+      provider: string;
       model: string;
       width: number;
       height: number;
     };
-    setImageResult({
+    const generated: ImageGeneratedResult = {
       imageUrl: payload.imageUrl,
       prompt: imagePrompt,
+      provider: payload.provider,
       model: payload.model,
       width: payload.width,
       height: payload.height,
-    });
+      createdAt: new Date().toISOString(),
+    };
+    setImageResult(generated);
+    setRecentImages((current) => [generated, ...current].slice(0, 10));
     setStatusMessage(`Image generated with ${payload.model}.`);
     setImageBusyAction(null);
   }
 
-  async function saveGeneratedImage() {
-    if (!imageResult?.imageUrl) {
+  async function saveGeneratedImage(target?: ImageGeneratedResult) {
+    const imageToSave = target ?? imageResult;
+    if (!imageToSave?.imageUrl) {
       return;
     }
     setImageBusyAction("save");
@@ -929,8 +953,8 @@ function App() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        imageUrl: imageResult.imageUrl,
-        prompt: imageResult.prompt,
+        imageUrl: imageToSave.imageUrl,
+        prompt: imageToSave.prompt,
         workspaceId: boot?.activeWorkspaceId,
       }),
     });
@@ -945,11 +969,36 @@ function App() {
     }
 
     const payload = (await response.json()) as { relativePath: string; workspaceId: string };
-    setImageResult((current) => current ? { ...current, relativePath: payload.relativePath } : current);
+    setImageResult((current) => {
+      if (!current || current.imageUrl !== imageToSave.imageUrl) {
+        return current;
+      }
+      return { ...current, relativePath: payload.relativePath };
+    });
+    setRecentImages((current) => current.map((item) => (
+      item.imageUrl === imageToSave.imageUrl
+        ? { ...item, relativePath: payload.relativePath }
+        : item
+    )));
     setStatusMessage(`Saved generated image to ${payload.relativePath}`);
     pushToast("Image saved to Assets/images.", "ok");
     await refreshActiveWorkspaceTree(payload.workspaceId);
     setImageBusyAction(null);
+  }
+
+  function applyImageSizePreset(preset: ImageSizePreset) {
+    setImageWidth(preset.width);
+    setImageHeight(preset.height);
+    setStatusMessage(`Applied ${preset.label} preset.`);
+  }
+
+  function openRecentImage(image: ImageGeneratedResult) {
+    setImagePrompt(image.prompt);
+    setImageModel(image.model === "krea-2" ? "krea-2" : "flux-2");
+    setImageWidth(image.width);
+    setImageHeight(image.height);
+    setImageResult(image);
+    setStatusMessage("Loaded recent image into preview.");
   }
 
   async function openActiveWorkspaceFolder() {
@@ -3074,6 +3123,16 @@ function App() {
               <section className="tool-section">
                 <h3>Generate Image</h3>
                 <div className="stable-audio-form">
+                  <div>
+                    <span>Size Presets</span>
+                    <div className="image-preset-row">
+                      {IMAGE_SIZE_PRESETS.map((preset) => (
+                        <button key={preset.id} type="button" className="ghost" onClick={() => applyImageSizePreset(preset)} disabled={imageBusyAction !== null}>
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <label>
                     <span>Model</span>
                     <select value={imageModel} onChange={(event) => setImageModel(event.target.value as "flux-2" | "krea-2")}>
@@ -3111,11 +3170,36 @@ function App() {
                 {imageResult?.imageUrl ? (
                   <div className="image-preview-panel">
                     <img src={imageResult.imageUrl} alt="Generated output preview" />
-                    <small>{imageResult.model} · {imageResult.width}x{imageResult.height}</small>
+                    <small>{imageResult.provider} · {imageResult.model} · {imageResult.width}x{imageResult.height}</small>
                     {imageResult.relativePath ? <small>Saved: {imageResult.relativePath}</small> : null}
                   </div>
                 ) : (
                   <small>Generate an image to preview it here.</small>
+                )}
+              </section>
+
+              <section className="tool-section">
+                <h3>Recent Images</h3>
+                {recentImages.length === 0 ? (
+                  <small>No recent generations yet.</small>
+                ) : (
+                  <ul className="tool-list">
+                    {recentImages.map((image) => (
+                      <li key={`${image.imageUrl}-${image.createdAt}`}>
+                        {image.model} · {image.width}x{image.height} · {new Date(image.createdAt).toLocaleTimeString()}
+                        <small>{image.prompt}</small>
+                        {image.relativePath ? <small>Saved: {image.relativePath}</small> : null}
+                        <div className="tool-action-row">
+                          <button type="button" className="ghost" onClick={() => openRecentImage(image)}>
+                            Open
+                          </button>
+                          <button type="button" className="ghost" onClick={() => void saveGeneratedImage(image)} disabled={imageBusyAction !== null}>
+                            Re-save
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </section>
             </div>

@@ -70,6 +70,7 @@ import {
   listHarnessThreads,
   upsertHarnessThread,
 } from "./lib/harnessChats.js";
+import { generateImageFromProvider } from "./lib/imageProviders.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -1807,49 +1808,22 @@ app.post("/api/tools/voice/save", async (req, res) => {
 });
 
 app.post("/api/tools/image/generate", async (req, res) => {
-  const body = req.body as { prompt?: string; model?: string; width?: number; height?: number; seed?: number };
+  const body = req.body as { prompt?: string; provider?: string; model?: string; width?: number; height?: number; seed?: number };
   const prompt = body.prompt?.trim();
   if (!prompt) {
     return res.status(400).json({ error: "prompt is required" });
   }
 
   try {
-    const requestedModel = (body.model?.trim() || "flux-2").toLowerCase();
-    const modelMap: Record<string, string> = {
-      "flux-2": "flux",
-      "krea-2": "krea",
-      "flux": "flux",
-      "krea": "krea",
-      "turbo": "turbo",
-    };
-    const pollinationsModel = modelMap[requestedModel] ?? "flux";
-
-    const width = Number(body.width ?? 1024);
-    const height = Number(body.height ?? 1024);
-    const safeWidth = Number.isFinite(width) ? Math.min(Math.max(Math.round(width), 256), 2048) : 1024;
-    const safeHeight = Number.isFinite(height) ? Math.min(Math.max(Math.round(height), 256), 2048) : 1024;
-    const seed = Number.isFinite(Number(body.seed)) ? Number(body.seed) : Date.now();
-
-    const params = new URLSearchParams({
-      model: pollinationsModel,
-      width: String(safeWidth),
-      height: String(safeHeight),
-      nologo: "true",
-      enhance: "true",
-      seed: String(seed),
+    const generated = await generateImageFromProvider({
+      provider: body.provider,
+      prompt,
+      model: body.model,
+      width: body.width,
+      height: body.height,
+      seed: body.seed,
     });
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${params.toString()}`;
-
-    return res.json({
-      ok: true,
-      imageUrl,
-      engine: "pollinations",
-      model: requestedModel,
-      resolvedModel: pollinationsModel,
-      width: safeWidth,
-      height: safeHeight,
-      seed,
-    });
+    return res.json({ ok: true, ...generated });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
   }

@@ -849,6 +849,17 @@ button:disabled {
   gap: 10px;
 }
 
+.image-preset-row {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.image-preset-row .ghost {
+  padding: 6px 10px;
+}
+
 .image-preview-panel {
   display: grid;
   gap: 10px;
