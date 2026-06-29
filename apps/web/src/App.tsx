@@ -257,6 +257,15 @@ type StableAudioGeneratedClip = {
   playbackUrl: string;
 };
 
+type ImageGeneratedResult = {
+  imageUrl: string;
+  prompt: string;
+  model: string;
+  width: number;
+  height: number;
+  relativePath?: string;
+};
+
 type RuntimeJob = {
   id: string;
   action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam";
@@ -454,6 +463,12 @@ function App() {
   const [stableAudioPrompt, setStableAudioPrompt] = useState("lo-fi hip hop beat, 90 BPM");
   const [stableAudioDuration, setStableAudioDuration] = useState(30);
   const [stableAudioGenerated, setStableAudioGenerated] = useState<StableAudioGeneratedClip[]>([]);
+  const [imagePrompt, setImagePrompt] = useState("pixel-art hero sprite sheet, transparent background, game-ready");
+  const [imageModel, setImageModel] = useState<"flux-2" | "krea-2">("flux-2");
+  const [imageWidth, setImageWidth] = useState(1024);
+  const [imageHeight, setImageHeight] = useState(1024);
+  const [imageBusyAction, setImageBusyAction] = useState<"generate" | "save" | null>(null);
+  const [imageResult, setImageResult] = useState<ImageGeneratedResult | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -864,6 +879,77 @@ function App() {
     setStableAudioBusyAction(null);
     await refreshActiveWorkspaceTree(payload.workspaceId);
     await loadStableAudioStatus();
+  }
+
+  async function generateImage() {
+    setImageBusyAction("generate");
+    const response = await fetch("/api/tools/image/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: imagePrompt,
+        model: imageModel,
+        width: imageWidth,
+        height: imageHeight,
+      }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      const message = payload.error ?? "Image generation failed.";
+      setStatusMessage(message);
+      pushToast(message, "err");
+      setImageBusyAction(null);
+      return;
+    }
+
+    const payload = (await response.json()) as {
+      imageUrl: string;
+      model: string;
+      width: number;
+      height: number;
+    };
+    setImageResult({
+      imageUrl: payload.imageUrl,
+      prompt: imagePrompt,
+      model: payload.model,
+      width: payload.width,
+      height: payload.height,
+    });
+    setStatusMessage(`Image generated with ${payload.model}.`);
+    setImageBusyAction(null);
+  }
+
+  async function saveGeneratedImage() {
+    if (!imageResult?.imageUrl) {
+      return;
+    }
+    setImageBusyAction("save");
+    const response = await fetch("/api/tools/image/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        imageUrl: imageResult.imageUrl,
+        prompt: imageResult.prompt,
+        workspaceId: boot?.activeWorkspaceId,
+      }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      const message = payload.error ?? "Image save failed.";
+      setStatusMessage(message);
+      pushToast(message, "err");
+      setImageBusyAction(null);
+      return;
+    }
+
+    const payload = (await response.json()) as { relativePath: string; workspaceId: string };
+    setImageResult((current) => current ? { ...current, relativePath: payload.relativePath } : current);
+    setStatusMessage(`Saved generated image to ${payload.relativePath}`);
+    pushToast("Image saved to Assets/images.", "ok");
+    await refreshActiveWorkspaceTree(payload.workspaceId);
+    setImageBusyAction(null);
   }
 
   async function openActiveWorkspaceFolder() {
@@ -2978,10 +3064,59 @@ function App() {
 
           {selectedPane.type === "tool" && selectedPane.id === "image-generator" ? (
             <div className="tool-view tool-console">
-              <section className="coming-soon-panel">
-                <h2>Image Generator</h2>
-                <p>Coming Soon</p>
-                <small>This pane is being held until a stronger local or repo-backed image generator replaces the current implementation.</small>
+              <div className="tool-header-row">
+                <div>
+                  <h2>Image Generator</h2>
+                  <p className="subtitle">Generate concept art, sprites, UI assets, and scene visuals for orchestration-ready workflows.</p>
+                </div>
+              </div>
+
+              <section className="tool-section">
+                <h3>Generate Image</h3>
+                <div className="stable-audio-form">
+                  <label>
+                    <span>Model</span>
+                    <select value={imageModel} onChange={(event) => setImageModel(event.target.value as "flux-2" | "krea-2")}>
+                      <option value="flux-2">Flux 2</option>
+                      <option value="krea-2">Krea 2</option>
+                    </select>
+                  </label>
+                  <div className="image-size-grid">
+                    <label>
+                      <span>Width</span>
+                      <input type="number" min={256} max={2048} step={64} value={imageWidth} onChange={(event) => setImageWidth(Number(event.target.value || 1024))} />
+                    </label>
+                    <label>
+                      <span>Height</span>
+                      <input type="number" min={256} max={2048} step={64} value={imageHeight} onChange={(event) => setImageHeight(Number(event.target.value || 1024))} />
+                    </label>
+                  </div>
+                  <label>
+                    <span>Prompt</span>
+                    <textarea rows={4} value={imagePrompt} onChange={(event) => setImagePrompt(event.target.value)} placeholder="Describe the image you want to generate..." />
+                  </label>
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => void generateImage()} disabled={imageBusyAction !== null || !imagePrompt.trim()}>
+                      {imageBusyAction === "generate" ? "Generating..." : "Generate"}
+                    </button>
+                    <button type="button" className="ghost" onClick={() => void saveGeneratedImage()} disabled={imageBusyAction !== null || !imageResult?.imageUrl}>
+                      {imageBusyAction === "save" ? "Saving..." : "Save To Workspace"}
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section className="tool-section">
+                <h3>Preview</h3>
+                {imageResult?.imageUrl ? (
+                  <div className="image-preview-panel">
+                    <img src={imageResult.imageUrl} alt="Generated output preview" />
+                    <small>{imageResult.model} · {imageResult.width}x{imageResult.height}</small>
+                    {imageResult.relativePath ? <small>Saved: {imageResult.relativePath}</small> : null}
+                  </div>
+                ) : (
+                  <small>Generate an image to preview it here.</small>
+                )}
               </section>
             </div>
           ) : null}
