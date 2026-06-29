@@ -874,6 +874,22 @@ button:disabled {
   background: rgba(9, 15, 20, 0.7);
 }
 
+.image-status-stream {
+  margin: 0;
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 10px;
+  background: rgba(9, 15, 20, 0.8);
+  color: var(--ink-2);
+  min-height: 130px;
+  max-height: 300px;
+  overflow: auto;
+  padding: 10px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .stable-audio-card {
   border: 1px solid rgba(47, 71, 79, 0.35);
   border-radius: 10px;

@@ -70,7 +70,7 @@ import {
   listHarnessThreads,
   upsertHarnessThread,
 } from "./lib/harnessChats.js";
-import { generateImageFromProvider } from "./lib/imageProviders.js";
+import { generateLocalImageStreaming, getLocalImageStatus } from "./lib/localImageGenerator.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -1539,6 +1539,7 @@ app.get("/api/bootstrap", async (_req, res) => {
   const harnessStatus = await resolveHarnessHealth(harnesses);
   const runtimeStatus = await getRuntimeStatus();
   const stableAudioStatus = await getStableAudioStatus();
+  const localImageStatus = await getLocalImageStatus();
   const workspaces = await listWorkspaces({
     [state.activeWorkspaceId]: harnessStatus.filter((h) => h.status === "online").map((h) => h.id),
   });
@@ -1576,7 +1577,7 @@ app.get("/api/bootstrap", async (_req, res) => {
         name: "Music Generator",
         status: stableAudioStatus.installed ? "online" : "setup-required",
       },
-      { id: "image-generator", name: "Image Generator", status: "online" },
+      { id: "image-generator", name: "Image Generator", status: localImageStatus.ready ? "online" : "setup-required" },
       { id: "video-generator", name: "Video Generator", status: "offline" },
       { id: "settings", name: "Settings", status: "online" },
     ],
@@ -1808,24 +1809,123 @@ app.post("/api/tools/voice/save", async (req, res) => {
 });
 
 app.post("/api/tools/image/generate", async (req, res) => {
-  const body = req.body as { prompt?: string; provider?: string; model?: string; width?: number; height?: number; seed?: number };
-  const prompt = body.prompt?.trim();
+  return res.status(410).json({ error: "Remote image generation is disabled. Use /api/tools/image/local/stream for local-only mode." });
+});
+
+app.get("/api/tools/image/local/status", async (_req, res) => {
+  try {
+    const status = await getLocalImageStatus();
+    return res.json(status);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/tools/image/local/file", async (req, res) => {
+  const relativePath = String(req.query.relativePath ?? "").trim();
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+  if (!relativePath) {
+    return res.status(400).json({ error: "relativePath is required" });
+  }
+
+  try {
+    const state = await readSystemState();
+    const workspace = await resolveWorkspaceContext(state, workspaceId);
+    if (!workspace.path) {
+      return res.status(404).json({ error: "Workspace path is unavailable." });
+    }
+
+    const absolutePath = resolveWorkspaceTargetPath(workspace.path, relativePath);
+    await fs.access(absolutePath);
+    if (!/\.(png|jpg|jpeg|webp)$/i.test(absolutePath)) {
+      return res.status(400).json({ error: "Only png/jpg/jpeg/webp files are supported." });
+    }
+
+    const extension = path.extname(absolutePath).toLowerCase();
+    const contentType = extension === ".jpg" || extension === ".jpeg"
+      ? "image/jpeg"
+      : extension === ".webp"
+        ? "image/webp"
+        : "image/png";
+    res.setHeader("Content-Type", contentType);
+    return res.sendFile(absolutePath);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/tools/image/local/stream", async (req, res) => {
+  const prompt = String(req.query.prompt ?? "").trim();
+  const model = String(req.query.model ?? "sd15").trim();
+  const negativePrompt = String(req.query.negativePrompt ?? "").trim();
+  const width = Number(req.query.width ?? 512);
+  const height = Number(req.query.height ?? 512);
+  const steps = Number(req.query.steps ?? 18);
+  const guidanceScale = Number(req.query.guidanceScale ?? 6.5);
+  const seed = Number(req.query.seed ?? Date.now() % 2147483647);
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+
   if (!prompt) {
     return res.status(400).json({ error: "prompt is required" });
   }
 
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const send = (payload: unknown) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
   try {
-    const generated = await generateImageFromProvider({
-      provider: body.provider,
-      prompt,
-      model: body.model,
-      width: body.width,
-      height: body.height,
-      seed: body.seed,
+    send({ type: "status", message: "Starting local image generation..." });
+    const generated = await generateLocalImageStreaming(
+      {
+        model,
+        prompt,
+        negativePrompt,
+        width,
+        height,
+        steps,
+        guidanceScale,
+        seed,
+      },
+      (message) => send({ type: "status", message }),
+    );
+
+    send({ type: "status", message: "Saving generated image into workspace assets..." });
+    const bytes = await fs.readFile(generated.outputPath);
+    const saved = await saveBufferToWorkspaceAssets({
+      workspaceId,
+      category: "images",
+      baseName: `${generated.model}-local`,
+      extension: "png",
+      bytes,
     });
-    return res.json({ ok: true, ...generated });
+
+    send({
+      type: "done",
+      result: {
+        imageUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        relativePath: saved.relativePath,
+        workspaceId: saved.workspaceId,
+        provider: "local-diffusers",
+        model: generated.model,
+        resolvedModel: generated.resolvedModel,
+        width: generated.width,
+        height: generated.height,
+        steps: generated.steps,
+        guidanceScale: generated.guidanceScale,
+        seed: generated.seed,
+        prompt: generated.prompt,
+        negativePrompt: generated.negativePrompt,
+      },
+    });
+    return res.end();
   } catch (error) {
-    return res.status(500).json({ error: String(error) });
+    send({ type: "error", message: String(error) });
+    return res.end();
   }
 });
 

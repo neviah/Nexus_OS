@@ -262,11 +262,53 @@ type ImageGeneratedResult = {
   prompt: string;
   provider: string;
   model: string;
+  resolvedModel?: string;
   width: number;
   height: number;
+  steps?: number;
+  guidanceScale?: number;
+  seed?: number;
+  negativePrompt?: string;
   createdAt: string;
   relativePath?: string;
 };
+
+type LocalImageStatus = {
+  ready: boolean;
+  uvInstalled: boolean;
+  models: Array<{
+    id: string;
+    label: string;
+    repoId: string;
+    defaultWidth: number;
+    defaultHeight: number;
+    recommendedMaxSide: number;
+    notes: string;
+    installed: boolean;
+  }>;
+};
+
+type LocalImageStreamEnvelope =
+  | { type: "status"; message: string }
+  | {
+    type: "done";
+    result: {
+      imageUrl: string;
+      relativePath: string;
+      workspaceId: string;
+      provider: string;
+      model: string;
+      resolvedModel: string;
+      width: number;
+      height: number;
+      steps: number;
+      guidanceScale: number;
+      seed: number;
+      prompt: string;
+      negativePrompt: string;
+    };
+  }
+  | { type: "error"; message: string };
 
 type ImageSizePreset = {
   id: string;
@@ -418,10 +460,10 @@ const THEME_PRESETS: ThemePreset[] = [
 ];
 
 const IMAGE_SIZE_PRESETS: ImageSizePreset[] = [
-  { id: "square", label: "Square 1024", width: 1024, height: 1024 },
-  { id: "portrait", label: "Portrait 832x1216", width: 832, height: 1216 },
-  { id: "landscape", label: "Landscape 1216x832", width: 1216, height: 832 },
-  { id: "thumbnail", label: "Thumbnail 640x360", width: 640, height: 360 },
+  { id: "square", label: "Square 512", width: 512, height: 512 },
+  { id: "portrait", label: "Portrait 512x768", width: 512, height: 768 },
+  { id: "landscape", label: "Landscape 768x512", width: 768, height: 512 },
+  { id: "thumbnail", label: "Thumbnail 640x384", width: 640, height: 384 },
 ];
 
 function App() {
@@ -480,12 +522,18 @@ function App() {
   const [stableAudioDuration, setStableAudioDuration] = useState(30);
   const [stableAudioGenerated, setStableAudioGenerated] = useState<StableAudioGeneratedClip[]>([]);
   const [imagePrompt, setImagePrompt] = useState("pixel-art hero sprite sheet, transparent background, game-ready");
-  const [imageModel, setImageModel] = useState<"flux-2" | "krea-2">("flux-2");
-  const [imageWidth, setImageWidth] = useState(1024);
-  const [imageHeight, setImageHeight] = useState(1024);
+  const [imageNegativePrompt, setImageNegativePrompt] = useState("blurry, low quality, watermark, text");
+  const [imageModel, setImageModel] = useState<"sd15" | "dreamshaper-8">("sd15");
+  const [imageWidth, setImageWidth] = useState(512);
+  const [imageHeight, setImageHeight] = useState(512);
+  const [imageSteps, setImageSteps] = useState(18);
+  const [imageGuidanceScale, setImageGuidanceScale] = useState(6.5);
+  const [imageSeed, setImageSeed] = useState(-1);
   const [imageBusyAction, setImageBusyAction] = useState<"generate" | "save" | null>(null);
   const [imageResult, setImageResult] = useState<ImageGeneratedResult | null>(null);
   const [recentImages, setRecentImages] = useState<ImageGeneratedResult[]>([]);
+  const [imageStatusTrace, setImageStatusTrace] = useState("");
+  const [localImageStatus, setLocalImageStatus] = useState<LocalImageStatus | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -900,46 +948,103 @@ function App() {
 
   async function generateImage() {
     setImageBusyAction("generate");
-    const response = await fetch("/api/tools/image/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        provider: "pollinations",
-        prompt: imagePrompt,
-        model: imageModel,
-        width: imageWidth,
-        height: imageHeight,
-      }),
+    setImageStatusTrace("Starting local generation...\n");
+    const seedToUse = imageSeed < 0 ? Math.floor(Math.random() * 2147483647) : imageSeed;
+    const params = new URLSearchParams({
+      prompt: imagePrompt,
+      model: imageModel,
+      negativePrompt: imageNegativePrompt,
+      width: String(imageWidth),
+      height: String(imageHeight),
+      steps: String(imageSteps),
+      guidanceScale: String(imageGuidanceScale),
+      seed: String(seedToUse),
+      workspaceId: boot?.activeWorkspaceId ?? "default",
     });
 
-    if (!response.ok) {
+    const response = await fetch(`/api/tools/image/local/stream?${params.toString()}`);
+    if (!response.ok || !response.body) {
       const payload = (await response.json()) as { error?: string };
-      const message = payload.error ?? "Image generation failed.";
+      const message = payload.error ?? "Local image generation failed.";
       setStatusMessage(message);
       pushToast(message, "err");
       setImageBusyAction(null);
       return;
     }
 
-    const payload = (await response.json()) as {
-      imageUrl: string;
-      provider: string;
-      model: string;
-      width: number;
-      height: number;
-    };
-    const generated: ImageGeneratedResult = {
-      imageUrl: payload.imageUrl,
-      prompt: imagePrompt,
-      provider: payload.provider,
-      model: payload.model,
-      width: payload.width,
-      height: payload.height,
-      createdAt: new Date().toISOString(),
-    };
-    setImageResult(generated);
-    setRecentImages((current) => [generated, ...current].slice(0, 10));
-    setStatusMessage(`Image generated with ${payload.model}.`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let completed = false;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+
+      while (true) {
+        const split = buffer.indexOf("\n\n");
+        if (split === -1) {
+          break;
+        }
+        const frame = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+        if (!dataLine) {
+          continue;
+        }
+        const raw = dataLine.slice(5).trim();
+        let envelope: LocalImageStreamEnvelope;
+        try {
+          envelope = JSON.parse(raw) as LocalImageStreamEnvelope;
+        } catch {
+          continue;
+        }
+
+        if (envelope.type === "status") {
+          setImageStatusTrace((current) => `${current}${envelope.message}\n`.slice(-12000));
+          continue;
+        }
+
+        if (envelope.type === "error") {
+          setImageStatusTrace((current) => `${current}[error] ${envelope.message}\n`.slice(-12000));
+          setStatusMessage(envelope.message);
+          pushToast(envelope.message, "err");
+          continue;
+        }
+
+        if (envelope.type === "done") {
+          const generated: ImageGeneratedResult = {
+            imageUrl: envelope.result.imageUrl,
+            prompt: envelope.result.prompt,
+            provider: envelope.result.provider,
+            model: envelope.result.model,
+            resolvedModel: envelope.result.resolvedModel,
+            width: envelope.result.width,
+            height: envelope.result.height,
+            steps: envelope.result.steps,
+            guidanceScale: envelope.result.guidanceScale,
+            seed: envelope.result.seed,
+            negativePrompt: envelope.result.negativePrompt,
+            relativePath: envelope.result.relativePath,
+            createdAt: new Date().toISOString(),
+          };
+          setImageResult(generated);
+          setRecentImages((current) => [generated, ...current].slice(0, 10));
+          setStatusMessage(`Local image generated (${envelope.result.model}).`);
+          pushToast("Local image generated and saved.", "ok");
+          completed = true;
+          await refreshActiveWorkspaceTree(envelope.result.workspaceId);
+          void loadLocalImageStatus();
+        }
+      }
+    }
+
+    if (!completed) {
+      setStatusMessage("Local generation stream ended before completion.");
+    }
     setImageBusyAction(null);
   }
 
@@ -994,11 +1099,24 @@ function App() {
 
   function openRecentImage(image: ImageGeneratedResult) {
     setImagePrompt(image.prompt);
-    setImageModel(image.model === "krea-2" ? "krea-2" : "flux-2");
+    setImageNegativePrompt(image.negativePrompt ?? "");
+    setImageModel(image.model === "dreamshaper-8" ? "dreamshaper-8" : "sd15");
     setImageWidth(image.width);
     setImageHeight(image.height);
+    setImageSteps(image.steps ?? 18);
+    setImageGuidanceScale(image.guidanceScale ?? 6.5);
+    setImageSeed(image.seed ?? -1);
     setImageResult(image);
     setStatusMessage("Loaded recent image into preview.");
+  }
+
+  async function loadLocalImageStatus() {
+    const response = await fetch("/api/tools/image/local/status");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as LocalImageStatus;
+    setLocalImageStatus(payload);
   }
 
   async function openActiveWorkspaceFolder() {
@@ -1564,6 +1682,9 @@ function App() {
     }
     if (selectedPane.type === "tool" && selectedPane.id === "music-generator") {
       void loadStableAudioStatus();
+    }
+    if (selectedPane.type === "tool" && selectedPane.id === "image-generator") {
+      void loadLocalImageStatus();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "settings") {
       void loadGitStatus();
@@ -3116,13 +3237,16 @@ function App() {
               <div className="tool-header-row">
                 <div>
                   <h2>Image Generator</h2>
-                  <p className="subtitle">Generate concept art, sprites, UI assets, and scene visuals for orchestration-ready workflows.</p>
+                  <p className="subtitle">Local-only generation tuned for 6-8GB VRAM devices with first-run model install and live status stream.</p>
                 </div>
               </div>
 
               <section className="tool-section">
                 <h3>Generate Image</h3>
                 <div className="stable-audio-form">
+                  {!localImageStatus?.ready ? (
+                    <small>Local image runtime is not ready. Install uv first, then refresh this pane.</small>
+                  ) : null}
                   <div>
                     <span>Size Presets</span>
                     <div className="image-preset-row">
@@ -3135,27 +3259,52 @@ function App() {
                   </div>
                   <label>
                     <span>Model</span>
-                    <select value={imageModel} onChange={(event) => setImageModel(event.target.value as "flux-2" | "krea-2")}>
-                      <option value="flux-2">Flux 2</option>
-                      <option value="krea-2">Krea 2</option>
+                    <select value={imageModel} onChange={(event) => setImageModel(event.target.value as "sd15" | "dreamshaper-8")}> 
+                      <option value="sd15">Stable Diffusion 1.5</option>
+                      <option value="dreamshaper-8">DreamShaper 8</option>
                     </select>
                   </label>
+                  {localImageStatus?.models?.length ? (
+                    <small>
+                      {localImageStatus.models.find((entry) => entry.id === imageModel)?.installed
+                        ? "Model is installed locally."
+                        : "Model will auto-install on first run."}
+                    </small>
+                  ) : null}
                   <div className="image-size-grid">
                     <label>
                       <span>Width</span>
-                      <input type="number" min={256} max={2048} step={64} value={imageWidth} onChange={(event) => setImageWidth(Number(event.target.value || 1024))} />
+                      <input type="number" min={256} max={768} step={64} value={imageWidth} onChange={(event) => setImageWidth(Number(event.target.value || 512))} />
                     </label>
                     <label>
                       <span>Height</span>
-                      <input type="number" min={256} max={2048} step={64} value={imageHeight} onChange={(event) => setImageHeight(Number(event.target.value || 1024))} />
+                      <input type="number" min={256} max={768} step={64} value={imageHeight} onChange={(event) => setImageHeight(Number(event.target.value || 512))} />
                     </label>
                   </div>
+                  <div className="image-size-grid">
+                    <label>
+                      <span>Steps</span>
+                      <input type="number" min={4} max={50} value={imageSteps} onChange={(event) => setImageSteps(Number(event.target.value || 18))} />
+                    </label>
+                    <label>
+                      <span>Guidance</span>
+                      <input type="number" min={0} max={20} step={0.5} value={imageGuidanceScale} onChange={(event) => setImageGuidanceScale(Number(event.target.value || 6.5))} />
+                    </label>
+                  </div>
+                  <label>
+                    <span>Seed (-1 = random)</span>
+                    <input type="number" value={imageSeed} onChange={(event) => setImageSeed(Number(event.target.value || -1))} />
+                  </label>
                   <label>
                     <span>Prompt</span>
                     <textarea rows={4} value={imagePrompt} onChange={(event) => setImagePrompt(event.target.value)} placeholder="Describe the image you want to generate..." />
                   </label>
+                  <label>
+                    <span>Negative Prompt</span>
+                    <textarea rows={2} value={imageNegativePrompt} onChange={(event) => setImageNegativePrompt(event.target.value)} placeholder="blurry, low quality, artifacts..." />
+                  </label>
                   <div className="tool-action-row">
-                    <button type="button" onClick={() => void generateImage()} disabled={imageBusyAction !== null || !imagePrompt.trim()}>
+                    <button type="button" onClick={() => void generateImage()} disabled={imageBusyAction !== null || !imagePrompt.trim() || !localImageStatus?.ready}>
                       {imageBusyAction === "generate" ? "Generating..." : "Generate"}
                     </button>
                     <button type="button" className="ghost" onClick={() => void saveGeneratedImage()} disabled={imageBusyAction !== null || !imageResult?.imageUrl}>
@@ -3170,12 +3319,17 @@ function App() {
                 {imageResult?.imageUrl ? (
                   <div className="image-preview-panel">
                     <img src={imageResult.imageUrl} alt="Generated output preview" />
-                    <small>{imageResult.provider} · {imageResult.model} · {imageResult.width}x{imageResult.height}</small>
+                    <small>{imageResult.provider} · {imageResult.model} · {imageResult.width}x{imageResult.height} · steps {imageResult.steps ?? "-"} · cfg {imageResult.guidanceScale ?? "-"} · seed {imageResult.seed ?? "-"}</small>
                     {imageResult.relativePath ? <small>Saved: {imageResult.relativePath}</small> : null}
                   </div>
                 ) : (
                   <small>Generate an image to preview it here.</small>
                 )}
+              </section>
+
+              <section className="tool-section">
+                <h3>Status Stream</h3>
+                <pre className="image-status-stream">{imageStatusTrace || "No status yet."}</pre>
               </section>
 
               <section className="tool-section">
