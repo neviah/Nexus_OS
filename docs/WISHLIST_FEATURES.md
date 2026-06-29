@@ -223,6 +223,101 @@ How to implement:
 
 Priority: P1 (low effort, high signal quality improvement)
 
+---
+
+### 9) cobusgreyling/loop-engineering
+
+Decision: Adopt as orchestration-pattern reference and optional integration helper.
+
+Why it helps:
+
+- Strong fit for NexusOS agent orchestration and repeatable task loops.
+- Useful for codifying multi-step automation patterns without major runtime bloat.
+- MIT license keeps integration risk low.
+
+Bloat/risk:
+
+- Full direct embedding is unnecessary for v1.
+- Should be consumed as patterns/components rather than as hard core dependency.
+
+How to use safely:
+
+- Add a small "Loop Patterns" integration layer in orchestration tooling.
+- Keep feature optional and independently diagnosable.
+
+Priority: P1 (near-term orchestration quality)
+
+---
+
+### 10) nexu-io/open-design
+
+Decision: Pilot later as optional creator workflow integration, not core dependency.
+
+Why it helps:
+
+- Strong local-first design workflow concept aligns with creator-tool direction.
+- Valuable as an advanced design companion once core image tooling is stable.
+- Apache-2.0 license is integration-friendly.
+
+Bloat/risk:
+
+- Broader scope than immediate NexusOS image MVP.
+- Could distract from stabilizing simple local image generation first.
+
+How to use safely:
+
+- Keep as an opt-in plugin/tool card under Creator Tools.
+- Defer until FLUX/SD local image workflows are stable.
+
+Priority: P2 (creator expansion)
+
+---
+
+### 11) D4Vinci/Scrapling
+
+Decision: Pilot with guardrails as an optional web-ingestion capability.
+
+Why it helps:
+
+- Strong data ingestion/scraping capability for agent workflows and automation.
+- Good fit for optional "Web Capability Pack" expansion.
+- BSD-3-Clause license is permissive.
+
+Bloat/risk:
+
+- Legal/compliance considerations depend on target sites and usage behavior.
+- Adds operational and policy surface area if made default.
+
+How to use safely:
+
+- Keep disabled by default and gated behind explicit user enablement.
+- Add policy notice, allowlist controls, and per-source diagnostics.
+
+Priority: P2 (optional capability pack)
+
+---
+
+### 12) calesthio/OpenMontage
+
+Decision: Skip for now; re-evaluate only if NexusOS commits to a dedicated video vertical.
+
+Why it helps:
+
+- Deep video-production orchestration potential.
+
+Bloat/risk:
+
+- High scope and integration complexity for current NexusOS roadmap.
+- AGPL-3.0 license introduces stricter distribution/compliance implications.
+- High risk of slowing core roadmap if adopted early.
+
+How to use safely:
+
+- Track as a future strategic option.
+- Only revisit with dedicated video team scope and clear licensing plan.
+
+Priority: P3 (defer)
+
 ## Wishlist Feature Backlog
 
 ### Phase A: High ROI, low bloat (next)
