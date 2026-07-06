@@ -1878,6 +1878,12 @@ app.get("/api/tools/image/local/stream", async (req, res) => {
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
+  const controller = new AbortController();
+  const onClientDisconnect = () => {
+    controller.abort();
+  };
+  req.on("close", onClientDisconnect);
+
   try {
     send({ type: "status", message: "Starting local image generation..." });
     const generated = await generateLocalImageStreaming(
@@ -1892,6 +1898,7 @@ app.get("/api/tools/image/local/stream", async (req, res) => {
         seed,
       },
       (message) => send({ type: "status", message }),
+      controller.signal,
     );
 
     send({ type: "status", message: "Saving generated image into workspace assets..." });
@@ -1924,8 +1931,12 @@ app.get("/api/tools/image/local/stream", async (req, res) => {
     });
     return res.end();
   } catch (error) {
-    send({ type: "error", message: String(error) });
+    if (!controller.signal.aborted) {
+      send({ type: "error", message: String(error) });
+    }
     return res.end();
+  } finally {
+    req.off("close", onClientDisconnect);
   }
 });
 

@@ -534,6 +534,7 @@ function App() {
   const [recentImages, setRecentImages] = useState<ImageGeneratedResult[]>([]);
   const [imageStatusTrace, setImageStatusTrace] = useState("");
   const [localImageStatus, setLocalImageStatus] = useState<LocalImageStatus | null>(null);
+  const imageGenerationAbortRef = useRef<AbortController | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -947,6 +948,11 @@ function App() {
   }
 
   async function generateImage() {
+    if (imageGenerationAbortRef.current) {
+      imageGenerationAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    imageGenerationAbortRef.current = controller;
     setImageBusyAction("generate");
     setImageStatusTrace("Starting local generation...\n");
     const seedToUse = imageSeed < 0 ? Math.floor(Math.random() * 2147483647) : imageSeed;
@@ -962,90 +968,113 @@ function App() {
       workspaceId: boot?.activeWorkspaceId ?? "default",
     });
 
-    const response = await fetch(`/api/tools/image/local/stream?${params.toString()}`);
-    if (!response.ok || !response.body) {
-      const payload = (await response.json()) as { error?: string };
-      const message = payload.error ?? "Local image generation failed.";
-      setStatusMessage(message);
-      pushToast(message, "err");
-      setImageBusyAction(null);
-      return;
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let completed = false;
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        break;
+    try {
+      const response = await fetch(`/api/tools/image/local/stream?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        const payload = (await response.json()) as { error?: string };
+        const message = payload.error ?? "Local image generation failed.";
+        setStatusMessage(message);
+        pushToast(message, "err");
+        setImageBusyAction(null);
+        return;
       }
-      buffer += decoder.decode(value, { stream: true });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completed = false;
 
       while (true) {
-        const split = buffer.indexOf("\n\n");
-        if (split === -1) {
+        const { value, done } = await reader.read();
+        if (done) {
           break;
         }
-        const frame = buffer.slice(0, split);
-        buffer = buffer.slice(split + 2);
-        const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
-        if (!dataLine) {
-          continue;
-        }
-        const raw = dataLine.slice(5).trim();
-        let envelope: LocalImageStreamEnvelope;
-        try {
-          envelope = JSON.parse(raw) as LocalImageStreamEnvelope;
-        } catch {
-          continue;
-        }
+        buffer += decoder.decode(value, { stream: true });
 
-        if (envelope.type === "status") {
-          setImageStatusTrace((current) => `${current}${envelope.message}\n`.slice(-12000));
-          continue;
-        }
+        while (true) {
+          const split = buffer.indexOf("\n\n");
+          if (split === -1) {
+            break;
+          }
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+          if (!dataLine) {
+            continue;
+          }
+          const raw = dataLine.slice(5).trim();
+          let envelope: LocalImageStreamEnvelope;
+          try {
+            envelope = JSON.parse(raw) as LocalImageStreamEnvelope;
+          } catch {
+            continue;
+          }
 
-        if (envelope.type === "error") {
-          setImageStatusTrace((current) => `${current}[error] ${envelope.message}\n`.slice(-12000));
-          setStatusMessage(envelope.message);
-          pushToast(envelope.message, "err");
-          continue;
-        }
+          if (envelope.type === "status") {
+            setImageStatusTrace((current) => `${current}${envelope.message}\n`.slice(-12000));
+            continue;
+          }
 
-        if (envelope.type === "done") {
-          const generated: ImageGeneratedResult = {
-            imageUrl: envelope.result.imageUrl,
-            prompt: envelope.result.prompt,
-            provider: envelope.result.provider,
-            model: envelope.result.model,
-            resolvedModel: envelope.result.resolvedModel,
-            width: envelope.result.width,
-            height: envelope.result.height,
-            steps: envelope.result.steps,
-            guidanceScale: envelope.result.guidanceScale,
-            seed: envelope.result.seed,
-            negativePrompt: envelope.result.negativePrompt,
-            relativePath: envelope.result.relativePath,
-            createdAt: new Date().toISOString(),
-          };
-          setImageResult(generated);
-          setRecentImages((current) => [generated, ...current].slice(0, 10));
-          setStatusMessage(`Local image generated (${envelope.result.model}).`);
-          pushToast("Local image generated and saved.", "ok");
-          completed = true;
-          await refreshActiveWorkspaceTree(envelope.result.workspaceId);
-          void loadLocalImageStatus();
+          if (envelope.type === "error") {
+            setImageStatusTrace((current) => `${current}[error] ${envelope.message}\n`.slice(-12000));
+            setStatusMessage(envelope.message);
+            pushToast(envelope.message, "err");
+            continue;
+          }
+
+          if (envelope.type === "done") {
+            const generated: ImageGeneratedResult = {
+              imageUrl: envelope.result.imageUrl,
+              prompt: envelope.result.prompt,
+              provider: envelope.result.provider,
+              model: envelope.result.model,
+              resolvedModel: envelope.result.resolvedModel,
+              width: envelope.result.width,
+              height: envelope.result.height,
+              steps: envelope.result.steps,
+              guidanceScale: envelope.result.guidanceScale,
+              seed: envelope.result.seed,
+              negativePrompt: envelope.result.negativePrompt,
+              relativePath: envelope.result.relativePath,
+              createdAt: new Date().toISOString(),
+            };
+            setImageResult(generated);
+            setRecentImages((current) => [generated, ...current].slice(0, 10));
+            setStatusMessage(`Local image generated (${envelope.result.model}).`);
+            pushToast("Local image generated and saved.", "ok");
+            completed = true;
+            await refreshActiveWorkspaceTree(envelope.result.workspaceId);
+            void loadLocalImageStatus();
+          }
         }
       }
-    }
 
-    if (!completed) {
-      setStatusMessage("Local generation stream ended before completion.");
+      if (!completed && !controller.signal.aborted) {
+        setStatusMessage("Local generation stream ended before completion.");
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        setImageStatusTrace((current) => `${current}Generation canceled by user.\n`.slice(-12000));
+        setStatusMessage("Local generation stopped.");
+        pushToast("Image generation canceled.", "warn");
+      } else {
+        const message = String(error);
+        setImageStatusTrace((current) => `${current}[error] ${message}\n`.slice(-12000));
+        setStatusMessage(message);
+        pushToast(message, "err");
+      }
+    } finally {
+      if (imageGenerationAbortRef.current === controller) {
+        imageGenerationAbortRef.current = null;
+      }
+      setImageBusyAction(null);
     }
-    setImageBusyAction(null);
+  }
+
+  function stopImageGeneration() {
+    imageGenerationAbortRef.current?.abort();
   }
 
   async function saveGeneratedImage(target?: ImageGeneratedResult) {
@@ -3306,6 +3335,9 @@ function App() {
                   <div className="tool-action-row">
                     <button type="button" onClick={() => void generateImage()} disabled={imageBusyAction !== null || !imagePrompt.trim() || !localImageStatus?.ready}>
                       {imageBusyAction === "generate" ? "Generating..." : "Generate"}
+                    </button>
+                    <button type="button" className="ghost" onClick={stopImageGeneration} disabled={imageBusyAction !== "generate"}>
+                      Stop
                     </button>
                     <button type="button" className="ghost" onClick={() => void saveGeneratedImage()} disabled={imageBusyAction !== null || !imageResult?.imageUrl}>
                       {imageBusyAction === "save" ? "Saving..." : "Save To Workspace"}

@@ -235,6 +235,7 @@ export async function getLocalImageStatus(): Promise<LocalImageStatusPayload> {
 export async function generateLocalImageStreaming(
   input: LocalImageGenerateInput,
   onStatus: (message: string) => void,
+  signal?: AbortSignal,
 ): Promise<LocalImageGenerateResult> {
   await ensureRuntimeScaffold();
   const uvInstalled = await detectUvInstalled();
@@ -252,6 +253,10 @@ export async function generateLocalImageStreaming(
   const outputPath = path.join(getOutputDir(), `image-${model.id}-${new Date().toISOString().replace(/[:.]/g, "-")}.png`);
 
   onStatus(`Preparing local runtime for ${model.label}...`);
+
+  if (signal?.aborted) {
+    throw new Error("Image generation canceled by user.");
+  }
 
   const child = spawn(
     "uv",
@@ -293,10 +298,42 @@ export async function generateLocalImageStreaming(
     },
   );
 
+  const terminateChild = async (): Promise<void> => {
+    if (!child.pid) {
+      return;
+    }
+    if (process.platform === "win32") {
+      try {
+        await execFileAsync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+          windowsHide: true,
+          maxBuffer: 256 * 1024,
+        });
+      } catch {
+        // Ignore cancellation races when process already exited.
+      }
+      return;
+    }
+
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Ignore if already terminated.
+    }
+  };
+
   return await new Promise<LocalImageGenerateResult>((resolve, reject) => {
     let stdoutBuffer = "";
     let stderrBuffer = "";
     let resultPayload: { output_path: string; width: number; height: number; steps: number; guidance_scale: number; seed: number } | null = null;
+    let canceled = false;
+
+    const onAbort = () => {
+      canceled = true;
+      onStatus("Cancellation requested. Stopping local image process...");
+      void terminateChild();
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout.on("data", (chunk: Buffer | string) => {
       stdoutBuffer += chunk.toString();
@@ -339,10 +376,16 @@ export async function generateLocalImageStreaming(
     });
 
     child.on("error", (error) => {
+      signal?.removeEventListener("abort", onAbort);
       reject(error);
     });
 
     child.on("close", (code) => {
+      signal?.removeEventListener("abort", onAbort);
+      if (canceled || signal?.aborted) {
+        reject(new Error("Image generation canceled by user."));
+        return;
+      }
       if (code !== 0) {
         reject(new Error(stderrBuffer.trim() || `Local image generation failed with exit code ${code ?? "unknown"}.`));
         return;
