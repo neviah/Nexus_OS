@@ -301,7 +301,7 @@ async function requestOpenAiJson(
     harnessId: harness.id,
     workspacePath: workspace?.path,
     githubLogin,
-    capabilitySummary: buildCapabilitySummary(state, harness.id),
+    capabilitySummary: buildCapabilitySummary(state, harness.id, message, history),
   };
 
   try {
@@ -354,7 +354,7 @@ async function requestOpenAiStream(
     harnessId: harness.id,
     workspacePath: workspace?.path,
     githubLogin,
-    capabilitySummary: buildCapabilitySummary(state, harness.id),
+    capabilitySummary: buildCapabilitySummary(state, harness.id, message, history),
   };
 
   try {
@@ -588,7 +588,7 @@ function buildNexusSystemMessage(ctx: NexusInjectedContext): string {
   return lines.join("\n");
 }
 
-function buildCapabilitySummary(state: SystemState, harnessId: string): string {
+function buildCapabilitySummary(state: SystemState, harnessId: string, message?: string, history?: ChatMessage[]): string {
   const capabilities = getHarnessCapabilities(state, harnessId);
   const lines: string[] = [
     "Harness extra capabilities:",
@@ -608,10 +608,20 @@ function buildCapabilitySummary(state: SystemState, harnessId: string): string {
   }
 
   if (capabilities.openDesign.enabled) {
-    lines.push("- Open Design workflow enabled for this coding harness.");
-    lines.push("- Only apply Open Design guidance when the user's task is about UI, UX, layout, styling, components, theming, branding, or design-system work.");
-    lines.push("- For those UI/design tasks, prefer design-system-aware planning, component structure, visual hierarchy, states, responsiveness, and implementation handoff.");
-    lines.push("- If the task is not UI/design related, ignore Open Design and proceed normally.");
+    const designIntent = isDesignIntent(message, history);
+    lines.push(`- Open Design workflow enabled for this coding harness (designIntent=${designIntent ? "yes" : "no"}).`);
+    lines.push("- Apply Open Design only when the task is UI/UX/layout/styling/components/theming/design-system related.");
+    if (designIntent) {
+      lines.push("- OPEN DESIGN WORKFLOW (required for this request):");
+      lines.push("  1) Clarify UX goal + target user + platform constraints (desktop/mobile). Keep this brief.");
+      lines.push("  2) Define visual direction: typography, color tokens, spacing/radius/shadow tokens, and interaction tone.");
+      lines.push("  3) Plan component structure: sections/components/states (empty, loading, error, success). Include accessibility notes.");
+      lines.push("  4) Implement with responsive-first markup/styles and realistic content, not placeholder-only UI.");
+      lines.push("  5) Verify: keyboard focus order, contrast, overflow/scroll behavior, and mobile layout at small widths.");
+      lines.push("- For UI/design outputs, provide concise rationale tied to hierarchy, usability, and implementation tradeoffs.");
+    } else {
+      lines.push("- Current request is not UI/design heavy. Do not force Open Design steps; continue normal coding workflow.");
+    }
   } else {
     lines.push("- Open Design workflow disabled for this harness.");
   }
@@ -640,6 +650,25 @@ function buildCapabilitySummary(state: SystemState, harnessId: string): string {
   }
 
   return lines.join("\n");
+}
+
+function isDesignIntent(message?: string, history?: ChatMessage[]): boolean {
+  const combined = [
+    String(message ?? ""),
+    ...(history ?? []).slice(-4).map((entry) => String(entry.content ?? "")),
+  ].join("\n").toLowerCase();
+
+  if (!combined.trim()) {
+    return false;
+  }
+
+  const designKeywords = [
+    "ui", "ux", "layout", "design", "visual", "style", "styling", "theme", "theming", "color", "typography",
+    "component", "responsive", "mobile", "desktop", "accessibility", "a11y", "landing page", "dashboard", "wireframe",
+    "hero section", "navbar", "card", "button", "figma",
+  ];
+
+  return designKeywords.some((keyword) => combined.includes(keyword));
 }
 
 function buildOpenAiMessages(
