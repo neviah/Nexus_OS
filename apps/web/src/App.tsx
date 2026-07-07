@@ -629,6 +629,7 @@ function App() {
   const [workspaceBrowseBusy, setWorkspaceBrowseBusy] = useState(false);
   const [cookbookSnapshot, setCookbookSnapshot] = useState<CookbookSnapshot | null>(null);
   const [cookbookBusy, setCookbookBusy] = useState(false);
+  const [cookbookRouterHandoffBusy, setCookbookRouterHandoffBusy] = useState(false);
   const [cookbookTab, setCookbookTab] = useState<"overview" | "jobs">("overview");
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -1648,6 +1649,53 @@ function App() {
       `${recommendation.name} installed into Ollama.`,
       model,
     );
+  }
+
+  async function handoffCookbookModelsToRouter() {
+    const cookbookTargets = Array.from(new Set(cookbookModelOptions))
+      .slice(0, 4)
+      .map((model) => ({ providerId: "cookbook", model }));
+
+    if (cookbookTargets.length === 0) {
+      setStatusMessage("No Cookbook-installed local models found yet.");
+      return;
+    }
+
+    setCookbookRouterHandoffBusy(true);
+    try {
+      const cfgRes = await fetch("/api/router/config");
+      if (!cfgRes.ok) {
+        const err = (await cfgRes.json()) as { error?: string };
+        setStatusMessage(err.error ?? "Failed to load router config.");
+        return;
+      }
+
+      const current = (await cfgRes.json()) as NxRouterConfig;
+      const existingNonCookbook = (current.fallbackChain ?? []).filter((target) => target.providerId !== "cookbook");
+      const nextFallback = [...cookbookTargets, ...existingNonCookbook].slice(0, 8);
+
+      const saveRes = await fetch("/api/router/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fallbackChain: nextFallback,
+          harnessAssignments: current.harnessAssignments ?? {},
+          retryPolicy: current.retryPolicy ?? nxRetryEditor,
+        }),
+      });
+
+      if (!saveRes.ok) {
+        const err = (await saveRes.json()) as { error?: string };
+        setStatusMessage(err.error ?? "Failed to sync Cookbook models into Router fallback.");
+        return;
+      }
+
+      await loadNxRouter();
+      setSelectedPane({ type: "tool", id: "nexus-router" });
+      setStatusMessage("Cookbook models imported into Router fallback chain.");
+    } finally {
+      setCookbookRouterHandoffBusy(false);
+    }
   }
 
   function getFallbackRowHealth(row: NxFallbackRow): { label: string; tone: "ok" | "warn" | "bad" | "idle" } {
@@ -3446,6 +3494,22 @@ function App() {
                       <span>Piper {runtimeStatus?.piperInstalled ? "up" : "provisioning"}</span>
                     </div>
                     <small>Models installed: {runtimeStatus?.ollamaModels.join(", ") || "none yet"}</small>
+                    <div className="tool-action-row">
+                      <button
+                        type="button"
+                        onClick={() => void handoffCookbookModelsToRouter()}
+                        disabled={cookbookRouterHandoffBusy || cookbookModelOptions.length === 0}
+                      >
+                        {cookbookRouterHandoffBusy ? "Syncing to Router..." : "Send Installed Models To Router"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => setSelectedPane({ type: "tool", id: "nexus-router" })}
+                      >
+                        Open Router
+                      </button>
+                    </div>
                   </section>
 
                   <section className="tool-section">
@@ -4381,60 +4445,10 @@ function App() {
                   </section>
 
                   <footer className="chat-composer">
-                    <div className="composer-utility-row">
-                      <button
-                        type="button"
-                        className={`ghost chip-icon-button ${autoSpeakHarnessReplies ? "is-active" : ""}`}
-                        onClick={() => {
-                          if (autoSpeakHarnessReplies) {
-                            stopHarnessSpeech();
-                          }
-                          setAutoSpeakHarnessReplies((current) => !current);
-                        }}
-                        title={`Voice replies ${autoSpeakHarnessReplies ? "on" : "off"}`}
-                        aria-label={`Voice replies ${autoSpeakHarnessReplies ? "on" : "off"}`}
-                      >
-                        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-                          {autoSpeakHarnessReplies ? (
-                            <path d="M5 9v6h4l5 5V4L9 9H5zm10.5 3a4.5 4.5 0 0 0-2.2-3.85v7.7A4.5 4.5 0 0 0 15.5 12zm2.5 0a7 7 0 0 1-3.4 6.02l-1.02-1.68A5 5 0 0 0 16 12a5 5 0 0 0-2.42-4.34l1.02-1.68A7 7 0 0 1 18 12z" fill="currentColor" />
-                          ) : (
-                            <path d="M4.27 3 3 4.27 7.73 9H5v6h4l5 5v-6.73L19.73 19 21 17.73 4.27 3zM14 4.27v4.61l-2-2V9l2 2V20l-5-5H5V9h3.73L14 4.27z" fill="currentColor" />
-                          )}
-                        </svg>
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost chip-icon-button"
-                        onClick={() => {
-                          setRightTab("diagnostics");
-                          const card = document.getElementById("failed-tasks-card");
-                          setTimeout(() => card?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 60);
-                        }}
-                        title={`Failed tasks (${failedTasks.length})`}
-                        aria-label={`Failed tasks (${failedTasks.length})`}
-                      >
-                        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-                          <path d="M12 2 1 21h22L12 2zm1 14h-2v2h2v-2zm0-6h-2v5h2V10z" fill="currentColor" />
-                        </svg>
-                      </button>
-                      {selectedPane.type === "agent" ? (
-                        <div className="harness-extras-wrap">
-                          <button
-                            type="button"
-                            className={`ghost chip-icon-button ${activeHarnessExtrasOpen ? "is-active" : ""}`}
-                            onClick={() => setHarnessExtrasOpenByHarness((current) => ({
-                              ...current,
-                              [selectedPane.id]: !current[selectedPane.id],
-                            }))}
-                            title="Harness extras"
-                            aria-label="Harness extras"
-                          >
-                            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-                              <path d="M19.14 12.94a7.96 7.96 0 0 0 .06-.94 7.96 7.96 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.28 7.28 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.22-1.12.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.6.22l2.39-.96c.51.41 1.05.72 1.63.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.58-.22 1.12-.53 1.63-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z" fill="currentColor" />
-                            </svg>
-                          </button>
-                          {activeHarnessExtrasOpen ? (
-                            <div className="harness-extras-popover drop-up">
+                    {selectedPane.type === "agent" ? (
+                      <div className="harness-extras-wrap">
+                        {activeHarnessExtrasOpen ? (
+                          <div className="harness-extras-popover drop-up">
                               <strong>Extra Settings · {activeHarness?.name ?? selectedPane.id}</strong>
                               <small>Per-harness opt-in controls for Crawl4AI and OfficeCLI.</small>
 
@@ -4762,11 +4776,10 @@ function App() {
                                   Close
                                 </button>
                               </div>
-                            </div>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <textarea
                       value={composer}
                       onChange={(event) => setComposer(event.target.value)}
@@ -4774,6 +4787,59 @@ function App() {
                       rows={4}
                     />
                     <div className="composer-actions">
+                      <div className="composer-inline-tools">
+                        <button
+                          type="button"
+                          className={`ghost chip-icon-button compact ${autoSpeakHarnessReplies ? "is-active" : ""}`}
+                          onClick={() => {
+                            if (autoSpeakHarnessReplies) {
+                              stopHarnessSpeech();
+                            }
+                            setAutoSpeakHarnessReplies((current) => !current);
+                          }}
+                          title={`Voice replies ${autoSpeakHarnessReplies ? "on" : "off"}`}
+                          aria-label={`Voice replies ${autoSpeakHarnessReplies ? "on" : "off"}`}
+                        >
+                          <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+                            {autoSpeakHarnessReplies ? (
+                              <path d="M5 9v6h4l5 5V4L9 9H5zm10.5 3a4.5 4.5 0 0 0-2.2-3.85v7.7A4.5 4.5 0 0 0 15.5 12zm2.5 0a7 7 0 0 1-3.4 6.02l-1.02-1.68A5 5 0 0 0 16 12a5 5 0 0 0-2.42-4.34l1.02-1.68A7 7 0 0 1 18 12z" fill="currentColor" />
+                            ) : (
+                              <path d="M4.27 3 3 4.27 7.73 9H5v6h4l5 5v-6.73L19.73 19 21 17.73 4.27 3zM14 4.27v4.61l-2-2V9l2 2V20l-5-5H5V9h3.73L14 4.27z" fill="currentColor" />
+                            )}
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost chip-icon-button compact"
+                          onClick={() => {
+                            setRightTab("diagnostics");
+                            const card = document.getElementById("failed-tasks-card");
+                            setTimeout(() => card?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 60);
+                          }}
+                          title={`Failed tasks (${failedTasks.length})`}
+                          aria-label={`Failed tasks (${failedTasks.length})`}
+                        >
+                          <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+                            <path d="M12 2 1 21h22L12 2zm1 14h-2v2h2v-2zm0-6h-2v5h2V10z" fill="currentColor" />
+                          </svg>
+                        </button>
+                        {selectedPane.type === "agent" ? (
+                          <button
+                            type="button"
+                            className={`ghost chip-icon-button compact ${activeHarnessExtrasOpen ? "is-active" : ""}`}
+                            onClick={() => setHarnessExtrasOpenByHarness((current) => ({
+                              ...current,
+                              [selectedPane.id]: !current[selectedPane.id],
+                            }))}
+                            title="Harness extras"
+                            aria-label="Harness extras"
+                          >
+                            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+                              <path d="M19.14 12.94a7.96 7.96 0 0 0 .06-.94 7.96 7.96 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.28 7.28 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.22-1.12.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.6.22l2.39-.96c.51.41 1.05.72 1.63.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.58-.22 1.12-.53 1.63-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z" fill="currentColor" />
+                            </svg>
+                          </button>
+                        ) : null}
+                      </div>
                       <button type="button" className="ghost" disabled>
                         Mic (STT)
                       </button>

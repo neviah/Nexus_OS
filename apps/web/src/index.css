@@ -1314,17 +1314,17 @@ textarea {
 .harness-extras-popover {
   position: absolute;
   right: 0;
-  width: min(420px, 84vw);
+  width: min(460px, 90vw);
   max-height: min(68vh, 560px);
   overflow: auto;
   border: 1px solid rgba(47, 71, 79, 0.52);
   border-radius: 10px;
   background: rgba(10, 19, 25, 0.97);
   box-shadow: 0 14px 32px rgba(0, 0, 0, 0.34);
-  padding: 10px;
+  padding: 12px;
   z-index: 30;
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .harness-extras-popover.drop-up {
@@ -1333,21 +1333,32 @@ textarea {
 
 .harness-extras-popover label {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   font-size: 0.76rem;
   color: var(--ink-3);
 }
 
+.harness-extras-popover input,
+.harness-extras-popover select {
+  width: 100%;
+}
+
+.harness-extras-popover strong {
+  font-size: 0.84rem;
+}
+
 .extras-toggle {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: auto 1fr;
   align-items: center;
   gap: 8px;
+  min-height: 30px;
 }
 
 .extras-inline-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 10px;
 }
 
 .chip {
@@ -1371,6 +1382,11 @@ textarea {
   height: 34px;
   padding: 0;
   border-radius: 999px;
+}
+
+.chip-icon-button.compact {
+  width: 28px;
+  height: 28px;
 }
 
 .chip-icon-button.is-active {
@@ -1536,8 +1552,22 @@ textarea {
 .composer-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.composer-inline-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 4px;
+}
+
+@media (max-width: 960px) {
+  .extras-inline-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .startup-panel {
