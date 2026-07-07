@@ -455,7 +455,7 @@ type SettingsTab = "connectors" | "appearance" | "automation";
 type MediaCenterTab = "voice" | "music" | "image" | "video";
 
 type ConnectorCard = {
-  id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox";
+  id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox" | "open-design";
   name: string;
   connected: boolean;
   kind: "oauth" | "token" | "placeholder";
@@ -2912,6 +2912,7 @@ function App() {
     { id: "discord", name: "Discord", connected: false, kind: "token" },
     { id: "notion", name: "Notion", connected: false, kind: "token" },
     { id: "dropbox", name: "Dropbox", connected: false, kind: "oauth" },
+    { id: "open-design", name: "Open Design", connected: false, kind: "placeholder" },
   ];
   const diagnosticsAlertCount = failedTasks.length + (startupReady ? 0 : Math.max(1, startupBlockers.length));
   const harnessThreads = selectedPane.type === "agent" ? (chatThreadsByHarness[selectedPane.id] ?? []) : [];
@@ -3943,6 +3944,26 @@ function App() {
                             <small>Gmail will use a browser-based connect flow when implemented.</small>
                             <div className="tool-action-row">
                               <button type="button" onClick={() => pushToast("Gmail connector coming soon.", "warn")}>Connect Gmail</button>
+                            </div>
+                          </>
+                        ) : activeConnectorId === "open-design" ? (
+                          <>
+                            <small>Open Design is tracked as an optional creator workflow companion, not a core harness.</small>
+                            <p className="subtitle">Use this slot to launch or integrate local-first design workflows once the image pipeline is more mature.</p>
+                            <div className="tool-action-row">
+                              <button
+                                type="button"
+                                onClick={() => window.open("https://github.com/nexu-io/open-design", "_blank", "noopener,noreferrer")}
+                              >
+                                Open Repository
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => pushToast("Open Design is planned as an opt-in creator tool integration.", "warn")}
+                              >
+                                Why This Slot?
+                              </button>
                             </div>
                           </>
                         ) : (
