@@ -229,6 +229,8 @@ type RuntimeStatus = {
   piperPath: string | null;
   piperVoices: string[];
   defaultVoiceInstalled: boolean;
+  freebuffInstalled?: boolean;
+  freebuffCommand?: string | null;
 };
 
 type ManagedHarnessRuntimeStatus = {

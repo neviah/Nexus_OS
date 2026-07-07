@@ -33,6 +33,8 @@ export type RuntimeStatus = {
   piperPath: string | null;
   piperVoices: string[];
   defaultVoiceInstalled: boolean;
+  freebuffInstalled: boolean;
+  freebuffCommand: string | null;
 };
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
@@ -45,6 +47,7 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   const piperPath = await resolvePiperPath();
   const piperInstalled = Boolean(piperPath);
   const piperVoices = await getInstalledPiperVoices();
+  const freebuffCommand = await resolveFreebuffCommand();
 
   return {
     ollamaInstalled,
@@ -57,7 +60,52 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
     piperPath,
     piperVoices,
     defaultVoiceInstalled: piperVoices.includes(defaultPiperVoiceBase),
+    freebuffInstalled: Boolean(freebuffCommand),
+    freebuffCommand,
   };
+}
+
+export async function installFreebuff(): Promise<void> {
+  if (await resolveFreebuffCommand()) {
+    return;
+  }
+
+  const attempts: Array<{ command: string; args: string[] }> = [
+    { command: "npm", args: ["install", "-g", "freebuff"] },
+    { command: "npm", args: ["install", "-g", "@codebuff/freebuff"] },
+  ];
+
+  let lastError = "";
+  for (const attempt of attempts) {
+    try {
+      await execFileAsync(attempt.command, attempt.args, {
+        windowsHide: true,
+        timeout: 10 * 60 * 1000,
+        maxBuffer: 1024 * 1024 * 16,
+      });
+      if (await resolveFreebuffCommand()) {
+        return;
+      }
+    } catch (error) {
+      lastError = String(error);
+    }
+  }
+
+  throw new Error(`Freebuff install failed. ${lastError || "No install attempt succeeded."}`);
+}
+
+export async function resolveFreebuffCommand(): Promise<string | null> {
+  const commandCandidates = process.platform === "win32"
+    ? ["freebuff.cmd", "freebuff.exe", "freebuff"]
+    : ["freebuff"];
+
+  for (const command of commandCandidates) {
+    if (await commandWorks(command, ["--help"])) {
+      return command;
+    }
+  }
+
+  return null;
 }
 
 export async function installAceJam(): Promise<void> {

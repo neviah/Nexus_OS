@@ -45,9 +45,11 @@ import {
   getRuntimeStatus,
   installAceJam,
   installDefaultPiperVoice,
+  installFreebuff,
   installOllama,
   installPiper,
   pullOllamaModel,
+  resolveFreebuffCommand,
   startAceJamIfNeeded,
   startOllamaIfNeeded,
   synthesizeWithPiper,
@@ -87,7 +89,8 @@ type RuntimeJobAction =
   | "install-piper"
   | "install-default-piper-voice"
   | "install-acejam"
-  | "start-acejam";
+  | "start-acejam"
+  | "install-freebuff";
 
 type RuntimeJob = {
   id: string;
@@ -387,6 +390,8 @@ function findActiveRuntimeJobByAction(action: RuntimeJobAction): RuntimeJob | un
 async function ensureCoreRuntimeProvisioning(): Promise<void> {
   await loadRuntimeJobsFromDisk();
   const status = await getRuntimeStatus();
+  const harnesses = await readHarnessRegistry().catch(() => []);
+  const hasFreebuffHarness = harnesses.some((harness) => harness.id === "freebuff");
   if (!status.ollamaInstalled) {
     if (!findActiveRuntimeJobByAction("install-ollama")) {
       const ollamaJob = createRuntimeJob("install-ollama");
@@ -415,6 +420,14 @@ async function ensureCoreRuntimeProvisioning(): Promise<void> {
       const voiceJob = createRuntimeJob("install-default-piper-voice");
       appendRuntimeJobLog(voiceJob, "Queued by NexusOS core runtime provisioning.");
       startRuntimeJob(voiceJob);
+    }
+  }
+
+  if (hasFreebuffHarness && !status.freebuffInstalled) {
+    if (!findActiveRuntimeJobByAction("install-freebuff")) {
+      const freebuffJob = createRuntimeJob("install-freebuff");
+      appendRuntimeJobLog(freebuffJob, "Queued by NexusOS core runtime provisioning.");
+      startRuntimeJob(freebuffJob);
     }
   }
 }
@@ -485,6 +498,15 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
     return;
   }
 
+  if (job.action === "install-freebuff") {
+    ensureRuntimeJobNotCanceled(job);
+    appendRuntimeJobLog(job, "Installing Freebuff runtime...");
+    await installFreebuff();
+    const command = await resolveFreebuffCommand();
+    appendRuntimeJobLog(job, command ? `Freebuff available via ${command}.` : "Freebuff install completed.");
+    return;
+  }
+
   throw new Error(`Unsupported runtime action: ${job.action}`);
 }
 
@@ -504,6 +526,7 @@ function buildStartupReadiness(input: {
   totalHarnesses: number;
   runtimeStatus?: Awaited<ReturnType<typeof getRuntimeStatus>>;
   managedStatuses?: ReturnType<typeof getManagedHarnessRuntimeStatus>;
+  hasFreebuffHarness?: boolean;
 }): StartupReadiness {
   const blockers: string[] = [];
   const {
@@ -512,6 +535,7 @@ function buildStartupReadiness(input: {
     totalHarnesses,
     runtimeStatus,
     managedStatuses,
+    hasFreebuffHarness,
   } = input;
 
   if (!onboardingComplete) {
@@ -533,6 +557,10 @@ function buildStartupReadiness(input: {
       blockers.push("Piper is not installed yet.");
     } else if (!runtimeStatus.defaultVoiceInstalled) {
       blockers.push("Piper is installed but default voices are not ready.");
+    }
+
+    if (hasFreebuffHarness && !runtimeStatus.freebuffInstalled) {
+      blockers.push("Freebuff is configured but not installed yet.");
     }
   }
 
@@ -1629,6 +1657,7 @@ app.get("/api/bootstrap", async (_req, res) => {
     totalHarnesses: harnessStatus.length,
     runtimeStatus,
     managedStatuses: getManagedHarnessRuntimeStatus(),
+    hasFreebuffHarness: harnesses.some((h) => h.id === "freebuff"),
   });
   const selectedPane = state.selectedPane.id === "9router"
     ? { type: "tool" as const, id: "nexus-router" }
@@ -1748,7 +1777,7 @@ app.post("/api/tools/runtimes/jobs/:jobId/retry", async (req, res) => {
 });
 
 app.post("/api/tools/runtimes/install", async (req, res) => {
-  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" };
+  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" | "freebuff" };
   try {
     if (body.runtime === "ollama") {
       await installOllama();
@@ -1759,6 +1788,8 @@ app.post("/api/tools/runtimes/install", async (req, res) => {
       await installPiper();
     } else if (body.runtime === "default-piper-voice") {
       await installDefaultPiperVoice();
+    } else if (body.runtime === "freebuff") {
+      await installFreebuff();
     } else {
       return res.status(400).json({ error: "Unknown runtime target" });
     }
@@ -2379,6 +2410,7 @@ app.get("/api/startup/check", async (_req, res) => {
     totalHarnesses: harnesses.length,
     runtimeStatus,
     managedStatuses,
+    hasFreebuffHarness: harnesses.some((h) => h.id === "freebuff"),
   });
   await persistStartupCheck(startup);
   res.json({ startup, conformance, runtimeStatus, managedStatuses });
