@@ -10,6 +10,9 @@ export function createDefaultHarnessCapabilities(harnessId?: string): HarnessCap
       enabled: defaultProfile !== "off",
       profile: defaultProfile,
     },
+    openDesign: {
+      enabled: false,
+    },
     crawl4ai: {
       enabled: false,
       allowedDomains: [],
@@ -52,6 +55,7 @@ export function updateHarnessCapabilities(
   harnessId: string,
   next: {
     fableMode?: Partial<HarnessCapabilitySettings["fableMode"]>;
+    openDesign?: Partial<HarnessCapabilitySettings["openDesign"]>;
     crawl4ai?: Partial<HarnessCapabilitySettings["crawl4ai"]>;
     officeCli?: Partial<HarnessCapabilitySettings["officeCli"]>;
   },
@@ -63,6 +67,10 @@ export function updateHarnessCapabilities(
     fableMode: {
       ...current.fableMode,
       ...(next.fableMode ?? {}),
+    },
+    openDesign: {
+      ...current.openDesign,
+      ...(next.openDesign ?? {}),
     },
     crawl4ai: {
       ...current.crawl4ai,
@@ -102,6 +110,9 @@ function normalizeHarnessCapabilities(value: HarnessCapabilitySettings, harnessI
       enabled: normalizeFableProfile(value?.fableMode?.profile, defaults.fableMode.profile) !== "off"
         ? (value?.fableMode?.enabled ?? true)
         : false,
+    },
+    openDesign: {
+      enabled: Boolean(value?.openDesign?.enabled),
     },
     crawl4ai: {
       enabled: Boolean(value?.crawl4ai?.enabled),

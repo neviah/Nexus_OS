@@ -538,8 +538,6 @@ function findActiveRuntimeJobByAction(action: RuntimeJobAction): RuntimeJob | un
 async function ensureCoreRuntimeProvisioning(): Promise<void> {
   await loadRuntimeJobsFromDisk();
   const status = await getRuntimeStatus();
-  const harnesses = await readHarnessRegistry().catch(() => []);
-  const hasFreebuffHarness = harnesses.some((harness) => harness.id === "freebuff");
   if (!status.ollamaInstalled) {
     if (!findActiveRuntimeJobByAction("install-ollama")) {
       const ollamaJob = createRuntimeJob("install-ollama");
@@ -568,13 +566,6 @@ async function ensureCoreRuntimeProvisioning(): Promise<void> {
     }
   }
 
-  if (hasFreebuffHarness && !status.freebuffInstalled) {
-    if (!findActiveRuntimeJobByAction("install-freebuff")) {
-      const freebuffJob = createRuntimeJob("install-freebuff");
-      appendRuntimeJobLog(freebuffJob, "Queued by NexusOS core runtime provisioning.");
-      startRuntimeJob(freebuffJob);
-    }
-  }
 }
 
 async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
@@ -671,7 +662,6 @@ function buildStartupReadiness(input: {
   totalHarnesses: number;
   runtimeStatus?: Awaited<ReturnType<typeof getRuntimeStatus>>;
   managedStatuses?: ReturnType<typeof getManagedHarnessRuntimeStatus>;
-  hasFreebuffHarness?: boolean;
 }): StartupReadiness {
   const blockers: string[] = [];
   const {
@@ -680,7 +670,6 @@ function buildStartupReadiness(input: {
     totalHarnesses,
     runtimeStatus,
     managedStatuses,
-    hasFreebuffHarness,
   } = input;
 
   if (!onboardingComplete) {
@@ -702,11 +691,6 @@ function buildStartupReadiness(input: {
       blockers.push("Piper is not installed yet.");
     } else if (!runtimeStatus.defaultVoiceInstalled) {
       blockers.push("Piper is installed but default voices are not ready.");
-    }
-
-    const freebuffManagedUsable = managedStatuses?.some((entry) => entry.harnessId === "freebuff" && entry.mode !== "failed") ?? false;
-    if (hasFreebuffHarness && !runtimeStatus.freebuffInstalled && !freebuffManagedUsable) {
-      blockers.push("Freebuff is configured but not installed yet.");
     }
   }
 
@@ -1828,7 +1812,6 @@ app.get("/api/bootstrap", async (_req, res) => {
     totalHarnesses: harnessStatus.length,
     runtimeStatus,
     managedStatuses: getManagedHarnessRuntimeStatus(),
-    hasFreebuffHarness: harnesses.some((h) => h.id === "freebuff"),
   });
   const selectedPane = state.selectedPane.id === "9router"
     ? { type: "tool" as const, id: "nexus-router" }
@@ -2582,7 +2565,6 @@ app.get("/api/startup/check", async (_req, res) => {
     totalHarnesses: harnesses.length,
     runtimeStatus,
     managedStatuses,
-    hasFreebuffHarness: harnesses.some((h) => h.id === "freebuff"),
   });
   await persistStartupCheck(startup);
   res.json({
@@ -3537,7 +3519,6 @@ app.post("/api/chat", async (req, res) => {
       totalHarnesses: harnesses.length,
       runtimeStatus,
       managedStatuses: getManagedHarnessRuntimeStatus(),
-      hasFreebuffHarness: harnesses.some((h) => h.id === "freebuff"),
     });
     if (!startup.ready) {
       return res.status(412).json({ error: `Strict startup mode is enabled. Resolve blockers first: ${startup.blockers.join(" ")}` });
@@ -3736,7 +3717,6 @@ app.post("/api/chat/stream", async (req, res) => {
       totalHarnesses: harnesses.length,
       runtimeStatus,
       managedStatuses: getManagedHarnessRuntimeStatus(),
-      hasFreebuffHarness: harnesses.some((h) => h.id === "freebuff"),
     });
     if (!startup.ready) {
       return res.status(412).json({ error: `Strict startup mode is enabled. Resolve blockers first: ${startup.blockers.join(" ")}` });

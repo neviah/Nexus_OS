@@ -607,6 +607,13 @@ function buildCapabilitySummary(state: SystemState, harnessId: string): string {
     lines.push("- Fable mode disabled for this harness.");
   }
 
+  if (capabilities.openDesign.enabled) {
+    lines.push("- Open Design workflow enabled for this coding harness.");
+    lines.push("- Prefer design-system-aware planning, component structure, and visual workflow handoff when the task involves UI or product design work.");
+  } else {
+    lines.push("- Open Design workflow disabled for this harness.");
+  }
+
   if (capabilities.crawl4ai.enabled) {
     lines.push(
       `- Crawl4AI enabled (maxPages=${capabilities.crawl4ai.maxPages}, allowExternalDomains=${capabilities.crawl4ai.allowExternalDomains}, obeyRobotsTxt=${capabilities.crawl4ai.obeyRobotsTxt}).`,

@@ -94,6 +94,9 @@ export type HarnessCapabilitySettings = {
     enabled: boolean;
     profile: "off" | "balanced" | "strict";
   };
+  openDesign: {
+    enabled: boolean;
+  };
   crawl4ai: {
     enabled: boolean;
     allowedDomains: string[];
