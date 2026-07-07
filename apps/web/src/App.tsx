@@ -231,6 +231,46 @@ type RuntimeStatus = {
   defaultVoiceInstalled: boolean;
 };
 
+type ManagedHarnessRuntimeStatus = {
+  harnessId: string;
+  endpoint: string;
+  mode: "managed" | "external" | "failed";
+  detail: string;
+};
+
+type StartupCheckPayload = {
+  startup: StartupReadiness;
+  conformance: Array<{
+    harnessId: string;
+    harnessName: string;
+    endpoint: string;
+    timestamp: string;
+    checks: Array<{ name: string; passed: boolean; details: string }>;
+    score: { passed: number; total: number };
+  }>;
+  runtimeStatus?: RuntimeStatus;
+  managedStatuses?: ManagedHarnessRuntimeStatus[];
+};
+
+type WebCapabilityDiagnostics = {
+  probes: {
+    crawl4ai: { available: boolean; command: string; details: string };
+    officecli: { available: boolean; command: string; details: string };
+    freebuff: { available: boolean; command: string; details: string };
+  };
+  harnessCapabilitySummary: Array<{
+    harnessId: string;
+    harnessName: string;
+    fableModeEnabled: boolean;
+    crawl4aiEnabled: boolean;
+    officeCliEnabled: boolean;
+    crawlAllowlistCount: number;
+  }>;
+  runtimeStatus: RuntimeStatus;
+  managedStatuses: ManagedHarnessRuntimeStatus[];
+  checkedAt: string;
+};
+
 type StableAudioStatus = {
   installed: boolean;
   running: boolean;
@@ -440,6 +480,9 @@ type ProviderCatalogEntry = {
 };
 
 type HarnessCapabilitySettings = {
+  fableMode: {
+    enabled: boolean;
+  };
   crawl4ai: {
     enabled: boolean;
     allowedDomains: string[];
@@ -587,6 +630,9 @@ function App() {
   const [nxConfigSaving, setNxConfigSaving] = useState(false);
   const [startupChecking, setStartupChecking] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
+  const [startupCheckDetails, setStartupCheckDetails] = useState<StartupCheckPayload | null>(null);
+  const [webCapabilityDiagnostics, setWebCapabilityDiagnostics] = useState<WebCapabilityDiagnostics | null>(null);
+  const [webCapabilityDiagnosticsBusy, setWebCapabilityDiagnosticsBusy] = useState(false);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
   const [streamTrace, setStreamTrace] = useState("");
   const [streamTraceOpen, setStreamTraceOpen] = useState(false);
@@ -1461,6 +1507,9 @@ function App() {
 
   function defaultHarnessCapabilities(): HarnessCapabilitySettings {
     return {
+      fableMode: {
+        enabled: selectedPane.type === "agent" && ["free-claude-code", "free-code", "opencode", "freebuff"].includes(selectedPane.id),
+      },
       crawl4ai: {
         enabled: false,
         allowedDomains: [],
@@ -1797,6 +1846,18 @@ function App() {
     setLastStartupCheck(payload.last);
   }
 
+  async function loadWebCapabilityDiagnostics() {
+    setWebCapabilityDiagnosticsBusy(true);
+    const response = await fetch("/api/tools/web-capabilities/diagnostics");
+    if (!response.ok) {
+      setWebCapabilityDiagnosticsBusy(false);
+      return;
+    }
+    const payload = (await response.json()) as WebCapabilityDiagnostics;
+    setWebCapabilityDiagnostics(payload);
+    setWebCapabilityDiagnosticsBusy(false);
+  }
+
   async function loadFailedTasks() {
     const response = await fetch("/api/chat/tasks/resumable");
     const payload = (await response.json()) as { tasks: FailedTask[] };
@@ -1808,6 +1869,14 @@ function App() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadBootstrap();
   }, [loadBootstrap]);
+
+  useEffect(() => {
+    if (rightTab !== "diagnostics") {
+      return;
+    }
+    void loadWebCapabilityDiagnostics();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rightTab]);
 
   useEffect(() => {
     void loadProviderCatalog();
@@ -2318,7 +2387,7 @@ function App() {
     setStartupChecking(true);
     setStatusMessage("Running startup check...");
     const response = await fetch("/api/startup/check");
-    const payload = (await response.json()) as { startup: StartupReadiness };
+    const payload = (await response.json()) as StartupCheckPayload;
 
     setBoot((current) => {
       if (!current) {
@@ -2330,9 +2399,15 @@ function App() {
       };
     });
 
+    setStartupCheckDetails(payload);
+    if (payload.runtimeStatus) {
+      setRuntimeStatus(payload.runtimeStatus);
+    }
+
     setStatusMessage(payload.startup.ready ? "Startup checks passed" : "Startup checks found blockers");
     setStartupChecking(false);
     await loadLastStartupCheck();
+    await loadWebCapabilityDiagnostics();
   }
 
   async function onSendMessage(resendText?: string) {
@@ -4114,6 +4189,26 @@ function App() {
                               <strong>Extra Settings · {activeHarness?.name ?? selectedPane.id}</strong>
                               <small>Per-harness opt-in controls for Crawl4AI and OfficeCLI.</small>
 
+                              {["free-claude-code", "free-code", "opencode", "freebuff"].includes(selectedPane.id) ? (
+                                <label className="extras-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={activeHarnessCapabilities.fableMode.enabled}
+                                    onChange={(event) => setHarnessCapabilitiesByHarness((current) => ({
+                                      ...current,
+                                      [selectedPane.id]: {
+                                        ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                        fableMode: {
+                                          ...(current[selectedPane.id]?.fableMode ?? defaultHarnessCapabilities().fableMode),
+                                          enabled: event.target.checked,
+                                        },
+                                      },
+                                    }))}
+                                  />
+                                  <span>Fable Mode (staged plan/verify/self-critique)</span>
+                                </label>
+                              ) : null}
+
                               <label className="extras-toggle">
                                 <input
                                   type="checkbox"
@@ -4594,6 +4689,56 @@ function App() {
                 <button type="button" className="ghost" onClick={() => void onRunStartupCheck()} disabled={startupChecking}>
                   {startupChecking ? "Checking..." : "Run Startup Check"}
                 </button>
+                {startupCheckDetails?.managedStatuses?.length ? (
+                  <ul className="diagnostic-list">
+                    {startupCheckDetails.managedStatuses.map((status) => (
+                      <li key={`${status.harnessId}-${status.endpoint}`}>
+                        <strong>{status.harnessId}</strong> · {status.mode} · <small>{status.detail}</small>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </section>
+
+              <section className="startup-panel">
+                <div className="failed-tasks-header">
+                  <h3>Web Capability Diagnostics</h3>
+                  <button type="button" className="ghost" onClick={() => void loadWebCapabilityDiagnostics()} disabled={webCapabilityDiagnosticsBusy}>
+                    {webCapabilityDiagnosticsBusy ? "Checking..." : "Refresh"}
+                  </button>
+                </div>
+                {webCapabilityDiagnostics ? (
+                  <>
+                    <small>Checked: {new Date(webCapabilityDiagnostics.checkedAt).toLocaleString()}</small>
+                    <ul className="diagnostic-list">
+                      <li>
+                        <strong>Crawl4AI</strong> · {webCapabilityDiagnostics.probes.crawl4ai.available ? "available" : "missing"}
+                        <small>{webCapabilityDiagnostics.probes.crawl4ai.command}</small>
+                      </li>
+                      <li>
+                        <strong>OfficeCLI</strong> · {webCapabilityDiagnostics.probes.officecli.available ? "available" : "missing"}
+                        <small>{webCapabilityDiagnostics.probes.officecli.command}</small>
+                      </li>
+                      <li>
+                        <strong>Freebuff</strong> · {webCapabilityDiagnostics.probes.freebuff.available ? "available" : "missing"}
+                        <small>{webCapabilityDiagnostics.probes.freebuff.command}</small>
+                      </li>
+                    </ul>
+                    <details>
+                      <summary>Harness Capability Matrix</summary>
+                      <ul className="diagnostic-list">
+                        {webCapabilityDiagnostics.harnessCapabilitySummary.map((entry) => (
+                          <li key={entry.harnessId}>
+                            <strong>{entry.harnessName}</strong>
+                            <small>fable={entry.fableModeEnabled ? "on" : "off"} · crawl={entry.crawl4aiEnabled ? "on" : "off"} · office={entry.officeCliEnabled ? "on" : "off"} · domains={entry.crawlAllowlistCount}</small>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  </>
+                ) : (
+                  <p className="diagnostics-empty">No web capability diagnostics loaded yet.</p>
+                )}
               </section>
 
               <section id="failed-tasks-card" className="failed-tasks-panel">

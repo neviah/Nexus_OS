@@ -89,6 +89,9 @@ export type SystemState = {
 };
 
 export type HarnessCapabilitySettings = {
+  fableMode: {
+    enabled: boolean;
+  };
   crawl4ai: {
     enabled: boolean;
     allowedDomains: string[];

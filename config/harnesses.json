@@ -73,6 +73,22 @@
         "genericPaths": ["/api/chat", "/chat"],
         "streamPath": "/api/chat/stream"
       }
+    },
+    {
+      "id": "freebuff",
+      "name": "Freebuff",
+      "endpoint": "http://localhost:8006",
+      "models": ["deepseek-coder", "gemini-flash", "kimi-k2", "minimax-m1"],
+      "defaultModel": "deepseek-coder",
+      "adapter": {
+        "protocol": "hybrid",
+        "streamProtocol": "openai-sse",
+        "authMode": "both",
+        "healthPath": "/health",
+        "openAiPath": "/v1/chat/completions",
+        "genericPaths": ["/api/chat", "/chat"],
+        "streamPath": "/api/chat/stream"
+      }
     }
   ]
 }

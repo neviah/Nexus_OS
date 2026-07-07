@@ -122,7 +122,7 @@ Priority: P1 internal process
 
 ### 5) CodebuffAI/codebuff (Freebuff)
 
-Decision: Add as a harness. Freebuff is the fully free, ad-supported tier.
+Decision: Added as a harness. Freebuff is the fully free, ad-supported tier.
 
 What it is:
 
@@ -143,7 +143,9 @@ Bloat/risk:
 - Limited mode applies outside US/CA/UK/EU or when using VPN.
 - Ad-supported model may change terms; treat it like any external free service.
 
-Priority: P1 (near-term harness addition)
+Status: Implemented
+
+Priority: P1 (completed)
 
 ---
 
@@ -196,7 +198,7 @@ Priority: P2 (Social Media Center phase)
 
 ### 8) mrtooher/fable-mode
 
-Decision: Add as a behavior profile for the Free-Claude-Code harness, not a new standalone harness.
+Decision: Add as a behavior profile toggle for coding harnesses, with Free-Claude-Code as the default-on primary target.
 
 What it is:
 
@@ -218,8 +220,10 @@ Bloat/risk:
 
 How to implement:
 
-- Add fable-mode SKILL.md to the Free-Claude-Code harness profile.
-- Optionally expose as a toggleable "Fable Mode" setting per harness in Router Console.
+- Expose a toggleable "Fable Mode" setting in per-harness extra settings for coding harnesses only.
+- Keep non-coding harnesses out of scope by default to avoid token overhead on simple/general tasks.
+
+Status: Implemented (toggle + harness-context behavior injection)
 
 Priority: P1 (low effort, high signal quality improvement)
 
@@ -346,6 +350,8 @@ How to use safely:
 - Add per-domain allowlist, explicit user opt-in, and request throttling.
 - Store only extracted metadata by default (title/url/snippet/timestamp), not full raw scrape dumps.
 
+Status: Implemented as optional per-harness capability with guardrails + diagnostics.
+
 Priority: P1.5 (high utility, medium integration complexity)
 
 ---
@@ -376,6 +382,8 @@ How to use safely:
 - Restrict operations to active workspace paths.
 - Start with a minimal command subset (create/get/set/view/validate) before enabling broader operations.
 
+Status: Implemented as optional per-harness capability with workspace path/extension/size restrictions + diagnostics.
+
 Priority: P1 (high user value, practical integration path)
 
 ## Wishlist Feature Backlog
@@ -386,17 +394,25 @@ Priority: P1 (high user value, practical integration path)
 - Expand provider presets from curated free-provider sources.
 - Include quota/rate-limit notes and health checks.
 
+Status: Implemented (catalog endpoint + UI filters).
+
 2. Freebuff Harness
 - Add Freebuff as a registered harness alongside Hermes/OpenClaw.
 - No API key required; `npm install -g freebuff` and point endpoint at local server.
 
+Status: Implemented.
+
 3. Fable-Mode Behavior Profile
-- Drop fable-mode SKILL.md into Free-Claude-Code harness.
-- Optional toggle in Router Console per harness; off by default on simple tasks.
+- Toggle in per-harness extras for coding harnesses only.
+- Default-on for coding harnesses can be tuned per harness.
+
+Status: Implemented (coding harness scope).
 
 4. Web Capability Pack (optional)
 - Basic read/search tooling for harnesses via controlled integrations.
 - Keep disabled by default and independently diagnosable.
+
+Status: Partially implemented (Crawl4AI + OfficeCLI packs, per-harness toggles, diagnostics panel).
 
 5. TTS Voice Output (Piper)
 - Bundle Piper with NexusOS so there is no separate user install path.
@@ -407,6 +423,8 @@ Priority: P1 (high user value, practical integration path)
 - Bundle Ollama with NexusOS so local model fallback works out of the box.
 - Cookbook should detect bundled Ollama first, then recommend which model to pull.
 - No external setup should be required for local chat/coding fallback.
+
+Status: Hardened (runtime startup/install blockers now included in startup checks, plus proactive start/install queueing).
 
 ### Phase B: Creator tools
 
@@ -461,6 +479,6 @@ Before adding any new external system, require:
 
 ## Suggested Next Implementation Slice
 
-1. Provider Preset Catalog ingestion + UI filters for free tiers.
-2. Optional Web Capability Pack adapter with diagnostics panel.
-3. Piper local TTS tool card and playback controls.
+1. Finish Freebuff managed-runtime bootstrap path + one-click installer helper.
+2. Add Crawl4AI execution history table (URL/domain, result file, duration, status).
+3. Add OfficeCLI safe command presets (create/view/validate) to reduce free-form arg errors.

@@ -243,6 +243,24 @@ h3 {
 
 .side-brand {
   display: grid;
+.diagnostic-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.diagnostic-list li {
+  display: grid;
+  gap: 2px;
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 8px;
+  background: rgba(16, 26, 32, 0.55);
+  padding: 8px;
+}
+.diagnostic-list small {
+  color: var(--ink-3);
+}
   gap: 6px;
   margin-bottom: 4px;
 }

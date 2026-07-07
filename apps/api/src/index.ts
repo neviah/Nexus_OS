@@ -387,11 +387,17 @@ function findActiveRuntimeJobByAction(action: RuntimeJobAction): RuntimeJob | un
 async function ensureCoreRuntimeProvisioning(): Promise<void> {
   await loadRuntimeJobsFromDisk();
   const status = await getRuntimeStatus();
-  if (!status.ollamaInstalled || !status.ollamaRunning) {
+  if (!status.ollamaInstalled) {
     if (!findActiveRuntimeJobByAction("install-ollama")) {
       const ollamaJob = createRuntimeJob("install-ollama");
       appendRuntimeJobLog(ollamaJob, "Queued by NexusOS core runtime provisioning.");
       startRuntimeJob(ollamaJob);
+    }
+  } else if (!status.ollamaRunning) {
+    if (!findActiveRuntimeJobByAction("start-ollama")) {
+      const startJob = createRuntimeJob("start-ollama");
+      appendRuntimeJobLog(startJob, "Queued by NexusOS core runtime provisioning.");
+      startRuntimeJob(startJob);
     }
   }
 
@@ -492,8 +498,21 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
   }
 }
 
-function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: number, totalHarnesses: number): StartupReadiness {
+function buildStartupReadiness(input: {
+  onboardingComplete: boolean;
+  liveHarnesses: number;
+  totalHarnesses: number;
+  runtimeStatus?: Awaited<ReturnType<typeof getRuntimeStatus>>;
+  managedStatuses?: ReturnType<typeof getManagedHarnessRuntimeStatus>;
+}): StartupReadiness {
   const blockers: string[] = [];
+  const {
+    onboardingComplete,
+    liveHarnesses,
+    totalHarnesses,
+    runtimeStatus,
+    managedStatuses,
+  } = input;
 
   if (!onboardingComplete) {
     blockers.push("Nexus Router is not configured.");
@@ -501,6 +520,24 @@ function buildStartupReadiness(onboardingComplete: boolean, liveHarnesses: numbe
 
   if (liveHarnesses === 0) {
     blockers.push("No live harnesses detected. Start at least one harness service.");
+  }
+
+  if (runtimeStatus) {
+    if (!runtimeStatus.ollamaInstalled) {
+      blockers.push("Ollama is not installed yet.");
+    } else if (!runtimeStatus.ollamaRunning) {
+      blockers.push("Ollama is installed but not running.");
+    }
+
+    if (!runtimeStatus.piperInstalled) {
+      blockers.push("Piper is not installed yet.");
+    } else if (!runtimeStatus.defaultVoiceInstalled) {
+      blockers.push("Piper is installed but default voices are not ready.");
+    }
+  }
+
+  if (managedStatuses?.some((entry) => entry.mode === "failed")) {
+    blockers.push("One or more managed harness runtimes failed to initialize.");
   }
 
   return {
@@ -1586,7 +1623,13 @@ app.get("/api/bootstrap", async (_req, res) => {
   }
   const liveHarnesses = harnessStatus.filter((entry) => entry.status === "online").length;
   const routerConfigured = isNexusRouterConfigured(state);
-  const startup = buildStartupReadiness(routerConfigured, liveHarnesses, harnessStatus.length);
+  const startup = buildStartupReadiness({
+    onboardingComplete: routerConfigured,
+    liveHarnesses,
+    totalHarnesses: harnessStatus.length,
+    runtimeStatus,
+    managedStatuses: getManagedHarnessRuntimeStatus(),
+  });
   const selectedPane = state.selectedPane.id === "9router"
     ? { type: "tool" as const, id: "nexus-router" }
     : (state.selectedPane.id === "voice-studio"
@@ -2323,14 +2366,22 @@ app.get("/api/startup/check", async (_req, res) => {
   const state = await readSystemState();
   const harnesses = await readHarnessRegistry();
   const conformance = await runHarnessConformance(harnesses, state);
+  const runtimeStatus = await getRuntimeStatus();
+  const managedStatuses = getManagedHarnessRuntimeStatus();
 
   const liveHarnesses = conformance.filter((item) =>
     item.checks.some((check) => (check.name === "live-health-check" || check.name.startsWith("live-probe-")) && check.passed)
   ).length;
 
-  const startup = buildStartupReadiness(isNexusRouterConfigured(state), liveHarnesses, harnesses.length);
+  const startup = buildStartupReadiness({
+    onboardingComplete: isNexusRouterConfigured(state),
+    liveHarnesses,
+    totalHarnesses: harnesses.length,
+    runtimeStatus,
+    managedStatuses,
+  });
   await persistStartupCheck(startup);
-  res.json({ startup, conformance });
+  res.json({ startup, conformance, runtimeStatus, managedStatuses });
 });
 
 app.get("/api/startup/check/last", async (_req, res) => {
@@ -2549,6 +2600,9 @@ app.get("/api/harnesses/:harnessId/capabilities", async (req, res) => {
 app.put("/api/harnesses/:harnessId/capabilities", async (req, res) => {
   const { harnessId } = req.params;
   const body = req.body as {
+    fableMode?: {
+      enabled?: boolean;
+    };
     crawl4ai?: {
       enabled?: boolean;
       allowedDomains?: string[];
@@ -2566,11 +2620,78 @@ app.put("/api/harnesses/:harnessId/capabilities", async (req, res) => {
 
   const state = await readSystemState();
   const capabilities = updateHarnessCapabilities(state, harnessId, {
+    fableMode: body.fableMode,
     crawl4ai: body.crawl4ai,
     officeCli: body.officeCli,
   });
   await writeSystemState(state);
   return res.json({ ok: true, harnessId, capabilities });
+});
+
+app.get("/api/tools/web-capabilities/diagnostics", async (_req, res) => {
+  const state = await readSystemState();
+  const harnesses = await readHarnessRegistry();
+
+  const probes = {
+    crawl4ai: { available: false, command: "", details: "" },
+    officecli: { available: false, command: "", details: "" },
+    freebuff: { available: false, command: "", details: "" },
+  };
+
+  const probeCandidates: Array<{ key: keyof typeof probes; command: string; args: string[] }> = [
+    { key: "crawl4ai", command: "crawl4ai", args: ["--help"] },
+    { key: "crawl4ai", command: "python", args: ["-m", "crawl4ai", "--help"] },
+    { key: "crawl4ai", command: "py", args: ["-m", "crawl4ai", "--help"] },
+    { key: "officecli", command: "officecli", args: ["--help"] },
+    { key: "officecli", command: "office", args: ["--help"] },
+    { key: "freebuff", command: "freebuff", args: ["--help"] },
+    { key: "freebuff", command: "npx", args: ["-y", "freebuff", "--help"] },
+  ];
+
+  for (const probe of probeCandidates) {
+    if (probes[probe.key].available) {
+      continue;
+    }
+
+    try {
+      await execFileAsync(probe.command, probe.args, { windowsHide: true, timeout: 8000, maxBuffer: 1024 * 1024 * 4 });
+      probes[probe.key] = {
+        available: true,
+        command: [probe.command, ...probe.args].join(" "),
+        details: "Command probe succeeded.",
+      };
+    } catch (error) {
+      probes[probe.key] = {
+        ...probes[probe.key],
+        command: probes[probe.key].command || [probe.command, ...probe.args].join(" "),
+        details: String(error),
+      };
+    }
+  }
+
+  const harnessCapabilitySummary = harnesses.map((harness) => {
+    const capabilities = getHarnessCapabilities(state, harness.id);
+    return {
+      harnessId: harness.id,
+      harnessName: harness.name,
+      fableModeEnabled: capabilities.fableMode.enabled,
+      crawl4aiEnabled: capabilities.crawl4ai.enabled,
+      officeCliEnabled: capabilities.officeCli.enabled,
+      crawlAllowlistCount: capabilities.crawl4ai.allowedDomains.length,
+    };
+  });
+
+  const runtimeStatus = await getRuntimeStatus();
+  const managedStatuses = getManagedHarnessRuntimeStatus();
+  await writeSystemState(state);
+
+  return res.json({
+    probes,
+    harnessCapabilitySummary,
+    runtimeStatus,
+    managedStatuses,
+    checkedAt: new Date().toISOString(),
+  });
 });
 
 app.post("/api/tools/crawl4ai/run", async (req, res) => {

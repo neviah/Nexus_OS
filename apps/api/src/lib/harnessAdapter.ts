@@ -594,6 +594,14 @@ function buildCapabilitySummary(state: SystemState, harnessId: string): string {
     "Harness extra capabilities:",
   ];
 
+  if (capabilities.fableMode.enabled) {
+    lines.push("- Fable mode enabled for this harness.");
+    lines.push("- Use staged execution for complex work: Plan -> Execute -> Verify -> Self-critique.");
+    lines.push("- Prefer explicit verification per stage and surface failures clearly before final answer.");
+  } else {
+    lines.push("- Fable mode disabled for this harness.");
+  }
+
   if (capabilities.crawl4ai.enabled) {
     lines.push(
       `- Crawl4AI enabled (maxPages=${capabilities.crawl4ai.maxPages}, allowExternalDomains=${capabilities.crawl4ai.allowExternalDomains}, obeyRobotsTxt=${capabilities.crawl4ai.obeyRobotsTxt}).`,

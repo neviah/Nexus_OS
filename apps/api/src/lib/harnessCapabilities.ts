@@ -1,9 +1,13 @@
 import type { HarnessCapabilitySettings, SystemState } from "../types.js";
 
 const DEFAULT_ALLOWED_EXTENSIONS = [".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv", ".json"];
+const FABLE_CODING_HARNESSES = new Set(["free-claude-code", "free-code", "opencode", "freebuff"]);
 
-export function createDefaultHarnessCapabilities(): HarnessCapabilitySettings {
+export function createDefaultHarnessCapabilities(harnessId?: string): HarnessCapabilitySettings {
   return {
+    fableMode: {
+      enabled: Boolean(harnessId && FABLE_CODING_HARNESSES.has(harnessId)),
+    },
     crawl4ai: {
       enabled: false,
       allowedDomains: [],
@@ -31,12 +35,12 @@ export function getHarnessCapabilities(state: SystemState, harnessId: string): H
   const store = ensureHarnessCapabilitiesStore(state);
   const current = store[harnessId];
   if (!current) {
-    const defaults = createDefaultHarnessCapabilities();
+    const defaults = createDefaultHarnessCapabilities(harnessId);
     store[harnessId] = defaults;
     return defaults;
   }
 
-  const normalized = normalizeHarnessCapabilities(current);
+  const normalized = normalizeHarnessCapabilities(current, harnessId);
   store[harnessId] = normalized;
   return normalized;
 }
@@ -45,6 +49,7 @@ export function updateHarnessCapabilities(
   state: SystemState,
   harnessId: string,
   next: {
+    fableMode?: Partial<HarnessCapabilitySettings["fableMode"]>;
     crawl4ai?: Partial<HarnessCapabilitySettings["crawl4ai"]>;
     officeCli?: Partial<HarnessCapabilitySettings["officeCli"]>;
   },
@@ -53,6 +58,10 @@ export function updateHarnessCapabilities(
   const current = getHarnessCapabilities(state, harnessId);
 
   const merged: HarnessCapabilitySettings = {
+    fableMode: {
+      ...current.fableMode,
+      ...(next.fableMode ?? {}),
+    },
     crawl4ai: {
       ...current.crawl4ai,
       ...(next.crawl4ai ?? {}),
@@ -63,13 +72,13 @@ export function updateHarnessCapabilities(
     },
   };
 
-  const normalized = normalizeHarnessCapabilities(merged);
+  const normalized = normalizeHarnessCapabilities(merged, harnessId);
   store[harnessId] = normalized;
   return normalized;
 }
 
-function normalizeHarnessCapabilities(value: HarnessCapabilitySettings): HarnessCapabilitySettings {
-  const defaults = createDefaultHarnessCapabilities();
+function normalizeHarnessCapabilities(value: HarnessCapabilitySettings, harnessId?: string): HarnessCapabilitySettings {
+  const defaults = createDefaultHarnessCapabilities(harnessId);
 
   const crawlAllowedDomains = Array.isArray(value?.crawl4ai?.allowedDomains)
     ? value.crawl4ai.allowedDomains.map((entry) => String(entry).trim().toLowerCase()).filter(Boolean)
@@ -86,6 +95,9 @@ function normalizeHarnessCapabilities(value: HarnessCapabilitySettings): Harness
     : defaults.officeCli.allowedExtensions;
 
   return {
+    fableMode: {
+      enabled: value?.fableMode?.enabled ?? defaults.fableMode.enabled,
+    },
     crawl4ai: {
       enabled: Boolean(value?.crawl4ai?.enabled),
       allowedDomains: Array.from(new Set(crawlAllowedDomains)),
