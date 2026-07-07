@@ -318,6 +318,66 @@ How to use safely:
 
 Priority: P3 (defer)
 
+---
+
+### 13) unclecode/crawl4ai
+
+Decision: Adopt as an optional web-ingestion engine inside the Web Capability Pack.
+
+What it is:
+
+- Open-source crawler/scraper designed for LLM pipelines.
+- Produces markdown/structured extraction and supports browser-assisted crawling.
+- Apache-2.0 license.
+
+Would this help with Reddit/video-idea gathering?
+
+- Yes, for collecting recent thread titles, links, and summaries where standard browsing paths are blocked or inconsistent.
+- It improves resilience versus plain fetch-only browsing and can be used for "trend scan" style inputs.
+
+Important limits:
+
+- It does not guarantee bypass of every anti-bot wall or login-gated path.
+- Site policy/compliance still applies; Reddit and other platforms may rate-limit or challenge automation.
+
+How to use safely:
+
+- Keep optional and off by default.
+- Add per-domain allowlist, explicit user opt-in, and request throttling.
+- Store only extracted metadata by default (title/url/snippet/timestamp), not full raw scrape dumps.
+
+Priority: P1.5 (high utility, medium integration complexity)
+
+---
+
+### 14) iOfficeAI/OfficeCLI
+
+Decision: Adopt as an optional "Office Automation Pack" for harnesses.
+
+What it is:
+
+- Agent-oriented CLI for creating/editing `.docx`, `.xlsx`, and `.pptx`.
+- Single binary, no Office install required, JSON-friendly command model.
+- Apache-2.0 license.
+
+Would this help harnesses create/edit Office files?
+
+- Yes. This is a strong fit for deterministic document generation/editing and automation workflows.
+- It should materially improve reliability compared to ad-hoc script approaches.
+
+Bloat/risk:
+
+- Adds another runtime/tooling surface area and command set to maintain.
+- Needs tight path/permission controls so harnesses only edit workspace-approved files.
+
+How to use safely:
+
+- Register as optional local tool pack with explicit enable.
+- Restrict operations to active workspace paths.
+- Start with a minimal command subset (create/get/set/view/validate) before enabling broader operations.
+
+Priority: P1 (high user value, practical integration path)
+
 ## Wishlist Feature Backlog
 
 ### Phase A: High ROI, low bloat (next)

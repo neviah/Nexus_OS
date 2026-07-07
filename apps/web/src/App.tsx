@@ -374,6 +374,8 @@ type GitHubDeviceFlow = {
 
 type SettingsTab = "connectors" | "appearance" | "automation";
 
+type MediaCenterTab = "voice" | "music" | "image" | "video";
+
 type ConnectorCard = {
   id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox";
   name: string;
@@ -542,6 +544,7 @@ function App() {
   const [gitBusyAction, setGitBusyAction] = useState<"refresh" | "commit" | "push" | null>(null);
   const [gitCommitMessage, setGitCommitMessage] = useState("Update NexusOS workspace changes");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("connectors");
+  const [mediaCenterTab, setMediaCenterTab] = useState<MediaCenterTab>("voice");
   const [activeConnectorId, setActiveConnectorId] = useState<ConnectorCard["id"] | null>(null);
   const [githubConnector, setGithubConnector] = useState<GitHubConnectorStatus | null>(null);
   const [githubClientId, setGithubClientId] = useState<string>(() => {
@@ -1503,9 +1506,30 @@ function App() {
     const payload = (await response.json()) as BootstrapPayload;
     setBoot(payload);
 
+    const payloadPane = payload.selectedPane;
+    if (payloadPane.type === "tool") {
+      if (payloadPane.id === "voice-studio") {
+        setMediaCenterTab("voice");
+      } else if (payloadPane.id === "music-generator") {
+        setMediaCenterTab("music");
+      } else if (payloadPane.id === "image-generator") {
+        setMediaCenterTab("image");
+      } else if (payloadPane.id === "video-generator") {
+        setMediaCenterTab("video");
+      }
+    }
+
+    const normalizedSelectedPane: PaneSelection = payloadPane.type === "tool"
+      && (payloadPane.id === "voice-studio"
+        || payloadPane.id === "music-generator"
+        || payloadPane.id === "image-generator"
+        || payloadPane.id === "video-generator")
+      ? { type: "tool", id: "media-center" }
+      : payloadPane;
+
     const preferredPane: PaneSelection = payload.onboardingRequired
       ? { type: "tool", id: "nexus-router" }
-      : payload.selectedPane;
+      : normalizedSelectedPane;
     setSelectedPane(preferredPane);
     await loadWorkspaceTree(payload.activeWorkspaceId);
     await loadFailedTasks();
@@ -1715,6 +1739,11 @@ function App() {
     if (selectedPane.type === "tool" && selectedPane.id === "image-generator") {
       void loadLocalImageStatus();
     }
+    if (selectedPane.type === "tool" && selectedPane.id === "media-center") {
+      void loadVoiceStatus();
+      void loadStableAudioStatus();
+      void loadLocalImageStatus();
+    }
     if (selectedPane.type === "tool" && selectedPane.id === "settings") {
       void loadGitStatus();
       void loadGitHubConnectorStatus();
@@ -1739,6 +1768,17 @@ function App() {
 
   function getHarnessSubTab(harnessId: string): HarnessSubTab {
     return harnessSubTabByHarness[harnessId] ?? "chats";
+  }
+
+  function renderMediaCenterTabs() {
+    return (
+      <div className="tool-tabs" role="tablist" aria-label="Media generators">
+        <button type="button" className={`tool-tab ${mediaCenterTab === "voice" ? "active" : ""}`} onClick={() => setMediaCenterTab("voice")}>Voice</button>
+        <button type="button" className={`tool-tab ${mediaCenterTab === "music" ? "active" : ""}`} onClick={() => setMediaCenterTab("music")}>Music</button>
+        <button type="button" className={`tool-tab ${mediaCenterTab === "image" ? "active" : ""}`} onClick={() => setMediaCenterTab("image")}>Image</button>
+        <button type="button" className={`tool-tab ${mediaCenterTab === "video" ? "active" : ""}`} onClick={() => setMediaCenterTab("video")}>Video</button>
+      </div>
+    );
   }
 
   function getScheduleDraft(harnessId: string): { title: string; prompt: string; intervalMinutes: number } {
@@ -3079,17 +3119,19 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && selectedPane.id === "voice-studio" ? (
+          {selectedPane.type === "tool" && selectedPane.id === "media-center" && mediaCenterTab === "voice" ? (
             <div className="tool-view tool-console">
               <div className="tool-header-row">
                 <div>
-                  <h2>Voice Studio</h2>
+                  <h2>Media Center</h2>
                   <p className="subtitle">Immediate text-to-speech playback in NexusOS, with Piper readiness for better offline voices later.</p>
                 </div>
                 <button type="button" onClick={() => void loadVoiceStatus()} disabled={voiceBusy}>
                   {voiceBusy ? "Checking..." : "Refresh Voice Status"}
                 </button>
               </div>
+
+              {renderMediaCenterTabs()}
 
               <section className="tool-section">
                 <textarea
@@ -3184,17 +3226,19 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && selectedPane.id === "music-generator" ? (
+          {selectedPane.type === "tool" && selectedPane.id === "media-center" && mediaCenterTab === "music" ? (
             <div className="tool-view tool-console">
               <div className="tool-header-row">
                 <div>
-                  <h2>Music Generator</h2>
+                  <h2>Media Center</h2>
                   <p className="subtitle">Nexus-native Stable Audio generation using local Stable Audio 3 runtime.</p>
                 </div>
                 <button type="button" onClick={() => void loadStableAudioStatus()} disabled={stableAudioBusyAction !== null}>
                   {stableAudioBusyAction === "refresh" ? "Refreshing..." : "Refresh"}
                 </button>
               </div>
+
+              {renderMediaCenterTabs()}
 
               <section className="tool-section">
                 <h3>Generate Audio</h3>
@@ -3261,14 +3305,16 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && selectedPane.id === "image-generator" ? (
+          {selectedPane.type === "tool" && selectedPane.id === "media-center" && mediaCenterTab === "image" ? (
             <div className="tool-view tool-console">
               <div className="tool-header-row">
                 <div>
-                  <h2>Image Generator</h2>
+                  <h2>Media Center</h2>
                   <p className="subtitle">Local-only generation tuned for 6-8GB VRAM devices with first-run model install and live status stream.</p>
                 </div>
               </div>
+
+              {renderMediaCenterTabs()}
 
               <section className="tool-section">
                 <h3>Generate Image</h3>
@@ -3391,8 +3437,17 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && selectedPane.id === "video-generator" ? (
+          {selectedPane.type === "tool" && selectedPane.id === "media-center" && mediaCenterTab === "video" ? (
             <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Media Center</h2>
+                  <p className="subtitle">Video generation slot reserved for a future local or connector-backed pipeline.</p>
+                </div>
+              </div>
+
+              {renderMediaCenterTabs()}
+
               <section className="coming-soon-panel">
                 <h2>Video Generator</h2>
                 <p>Coming Soon</p>

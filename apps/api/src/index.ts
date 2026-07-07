@@ -1555,7 +1555,16 @@ app.get("/api/bootstrap", async (_req, res) => {
   const startup = buildStartupReadiness(routerConfigured, liveHarnesses, harnessStatus.length);
   const selectedPane = state.selectedPane.id === "9router"
     ? { type: "tool" as const, id: "nexus-router" }
-    : state.selectedPane;
+    : (state.selectedPane.id === "voice-studio"
+      || state.selectedPane.id === "music-generator"
+      || state.selectedPane.id === "image-generator"
+      || state.selectedPane.id === "video-generator")
+      ? { type: "tool" as const, id: "media-center" }
+      : state.selectedPane;
+
+  const mediaCenterStatus: "online" | "offline" | "setup-required" = !stableAudioStatus.installed || !localImageStatus.ready
+    ? "setup-required"
+    : "online";
 
   res.json({
     appName: "NEXUS OS",
@@ -1571,14 +1580,7 @@ app.get("/api/bootstrap", async (_req, res) => {
         status: (state.nexusRouter?.providers ?? []).some((p) => p.enabled) ? "online" : "setup-required",
       },
       { id: "cookbook", name: "Cookbook", status: "online" },
-      { id: "voice-studio", name: "Voice Studio", status: "online" },
-      {
-        id: "music-generator",
-        name: "Music Generator",
-        status: stableAudioStatus.installed ? "online" : "setup-required",
-      },
-      { id: "image-generator", name: "Image Generator", status: localImageStatus.ready ? "online" : "setup-required" },
-      { id: "video-generator", name: "Video Generator", status: "offline" },
+      { id: "media-center", name: "Media Center", status: mediaCenterStatus },
       { id: "settings", name: "Settings", status: "online" },
     ],
     router9: getRouterSummary(state),
