@@ -560,10 +560,7 @@ async function ensureCoreRuntimeProvisioning(): Promise<void> {
       appendRuntimeJobLog(piperJob, "Queued by NexusOS core runtime provisioning.");
       startRuntimeJob(piperJob);
     }
-    return;
-  }
-
-  if (!status.defaultVoiceInstalled || status.piperVoices.length < 3) {
+  } else if (!status.defaultVoiceInstalled || status.piperVoices.length < 3) {
     if (!findActiveRuntimeJobByAction("install-default-piper-voice")) {
       const voiceJob = createRuntimeJob("install-default-piper-voice");
       appendRuntimeJobLog(voiceJob, "Queued by NexusOS core runtime provisioning.");
@@ -707,7 +704,8 @@ function buildStartupReadiness(input: {
       blockers.push("Piper is installed but default voices are not ready.");
     }
 
-    if (hasFreebuffHarness && !runtimeStatus.freebuffInstalled) {
+    const freebuffManagedUsable = managedStatuses?.some((entry) => entry.harnessId === "freebuff" && entry.mode !== "failed") ?? false;
+    if (hasFreebuffHarness && !runtimeStatus.freebuffInstalled && !freebuffManagedUsable) {
       blockers.push("Freebuff is configured but not installed yet.");
     }
   }

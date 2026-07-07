@@ -4318,48 +4318,138 @@ function App() {
                     <div className="status-chip-row">
                       <span className="chip">{chatBusy ? "thinking..." : "ready"}</span>
                       <span className="chip">fallback: {chatMeta?.fallbackUsed ? "yes" : "no"}</span>
+                      <span className="chip">voice: {autoSpeakHarnessReplies ? "on" : "off"}</span>
+                    </div>
+                  </header>
+
+                  <details className="stream-trace" open={streamTraceOpen} onToggle={(event) => setStreamTraceOpen((event.target as HTMLDetailsElement).open)}>
+                    <summary>{chatBusy ? "Live stream" : "Last stream"}</summary>
+                    <pre>{streamTrace || (chatBusy ? "Waiting for first token..." : "No recent stream content.")}</pre>
+                  </details>
+
+                  <section className="chat-log" aria-live="polite">
+                    {messages.length === 0 ? (
+                      <article className="message assistant">
+                        <p>Send a prompt to start your unified harness session.</p>
+                      </article>
+                    ) : null}
+
+                    {messages.map((message) => (
+                      <article key={message.id} className={`message ${message.role}`}>
+                        <header>{message.role}</header>
+                        {message.role === "assistant" && chatBusy && !message.content ? (
+                          <p className="typing-indicator">
+                            <span className="typing-dot" />
+                            <span className="typing-dot" />
+                            <span className="typing-dot" />
+                          </p>
+                        ) : (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                        )}
+                        {message.role === "assistant" && message.id === lastAssistantMessageId && chatMeta ? (
+                          <small className="message-meta">
+                            {chatMeta.provider} | {chatMeta.model} | {chatMeta.elapsedMs} ms | tokens {(chatMeta.tokenUsage.input ?? 0) + (chatMeta.tokenUsage.output ?? 0)}
+                          </small>
+                        ) : null}
+                        {message.role === "user" ? (
+                          <div className="message-actions">
+                            <button
+                              type="button"
+                              className="ghost icon-btn"
+                              onClick={() => void onSendMessage(message.content)}
+                              disabled={chatBusy}
+                              title="Retry this prompt"
+                              aria-label="Retry this prompt"
+                            >
+                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                                <path d="M12 5a7 7 0 1 1-6.95 7.88h2.04A5 5 0 1 0 12 7h-2.2l2.7 2.7-1.4 1.4L6 6l5.1-5.1 1.4 1.4L9.8 5H12z" fill="currentColor" />
+                              </svg>
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost icon-btn"
+                              onClick={() => void onCopyMessage(message.content)}
+                              title="Copy message"
+                              aria-label="Copy message"
+                            >
+                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                                <path d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16h-9V7h9v14z" fill="currentColor" />
+                              </svg>
+                            </button>
+                          </div>
+                        ) : null}
+                        {message.role === "assistant" ? (
+                          <div className="message-actions">
+                            <button
+                              type="button"
+                              className="ghost icon-btn"
+                              onClick={stopHarnessSpeech}
+                              title="Stop voice playback"
+                              aria-label="Stop voice playback"
+                              disabled={!harnessSpeaking}
+                            >
+                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                                <path d="M5 9v6h4l5 5V4L9 9H5zm12.5 3a4.5 4.5 0 0 0-2.2-3.85v7.7A4.5 4.5 0 0 0 17.5 12z" fill="currentColor" />
+                              </svg>
+                            </button>
+                          </div>
+                        ) : null}
+                      </article>
+                    ))}
+                  </section>
+
+                  <footer className="chat-composer">
+                    <div className="composer-utility-row">
                       <button
                         type="button"
-                        className="ghost chip-button"
+                        className={`ghost chip-icon-button ${autoSpeakHarnessReplies ? "is-active" : ""}`}
                         onClick={() => {
                           if (autoSpeakHarnessReplies) {
                             stopHarnessSpeech();
                           }
                           setAutoSpeakHarnessReplies((current) => !current);
                         }}
+                        title={`Voice replies ${autoSpeakHarnessReplies ? "on" : "off"}`}
+                        aria-label={`Voice replies ${autoSpeakHarnessReplies ? "on" : "off"}`}
                       >
-                        voice: {autoSpeakHarnessReplies ? "on" : "off"}
+                        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                          {autoSpeakHarnessReplies ? (
+                            <path d="M5 9v6h4l5 5V4L9 9H5zm10.5 3a4.5 4.5 0 0 0-2.2-3.85v7.7A4.5 4.5 0 0 0 15.5 12zm2.5 0a7 7 0 0 1-3.4 6.02l-1.02-1.68A5 5 0 0 0 16 12a5 5 0 0 0-2.42-4.34l1.02-1.68A7 7 0 0 1 18 12z" fill="currentColor" />
+                          ) : (
+                            <path d="M4.27 3 3 4.27 7.73 9H5v6h4l5 5v-6.73L19.73 19 21 17.73 4.27 3zM14 4.27v4.61l-2-2V9l2 2V20l-5-5H5V9h3.73L14 4.27z" fill="currentColor" />
+                          )}
+                        </svg>
                       </button>
                       <button
                         type="button"
-                        className="ghost chip-button"
-                        onClick={stopHarnessSpeech}
-                        disabled={!harnessSpeaking}
-                      >
-                        stop voice
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost chip-button"
+                        className="ghost chip-icon-button"
                         onClick={() => {
                           setRightTab("diagnostics");
                           const card = document.getElementById("failed-tasks-card");
                           setTimeout(() => card?.scrollIntoView({ behavior: "smooth", block: "nearest" }), 60);
                         }}
+                        title={`Failed tasks (${failedTasks.length})`}
+                        aria-label={`Failed tasks (${failedTasks.length})`}
                       >
-                        failed tasks: {failedTasks.length}
+                        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                          <path d="M12 2 1 21h22L12 2zm1 14h-2v2h2v-2zm0-6h-2v5h2V10z" fill="currentColor" />
+                        </svg>
                       </button>
                       {selectedPane.type === "agent" ? (
                         <div className="harness-extras-wrap">
                           <button
                             type="button"
-                            className="ghost chip-button"
+                            className={`ghost chip-icon-button ${activeHarnessExtrasOpen ? "is-active" : ""}`}
                             onClick={() => setHarnessExtrasOpenByHarness((current) => ({
                               ...current,
                               [selectedPane.id]: !current[selectedPane.id],
                             }))}
+                            title="Harness extras"
+                            aria-label="Harness extras"
                           >
-                            ⚙ extras
+                            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                              <path d="M19.14 12.94a7.96 7.96 0 0 0 .06-.94 7.96 7.96 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.28 7.28 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.22-1.12.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.6.22l2.39-.96c.51.41 1.05.72 1.63.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.58-.22 1.12-.53 1.63-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z" fill="currentColor" />
+                            </svg>
                           </button>
                           {activeHarnessExtrasOpen ? (
                             <div className="harness-extras-popover drop-up">
@@ -4678,85 +4768,6 @@ function App() {
                         </div>
                       ) : null}
                     </div>
-                  </header>
-
-                  <details className="stream-trace" open={streamTraceOpen} onToggle={(event) => setStreamTraceOpen((event.target as HTMLDetailsElement).open)}>
-                    <summary>{chatBusy ? "Live stream" : "Last stream"}</summary>
-                    <pre>{streamTrace || (chatBusy ? "Waiting for first token..." : "No recent stream content.")}</pre>
-                  </details>
-
-                  <section className="chat-log" aria-live="polite">
-                    {messages.length === 0 ? (
-                      <article className="message assistant">
-                        <p>Send a prompt to start your unified harness session.</p>
-                      </article>
-                    ) : null}
-
-                    {messages.map((message) => (
-                      <article key={message.id} className={`message ${message.role}`}>
-                        <header>{message.role}</header>
-                        {message.role === "assistant" && chatBusy && !message.content ? (
-                          <p className="typing-indicator">
-                            <span className="typing-dot" />
-                            <span className="typing-dot" />
-                            <span className="typing-dot" />
-                          </p>
-                        ) : (
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                        )}
-                        {message.role === "assistant" && message.id === lastAssistantMessageId && chatMeta ? (
-                          <small className="message-meta">
-                            {chatMeta.provider} | {chatMeta.model} | {chatMeta.elapsedMs} ms | tokens {(chatMeta.tokenUsage.input ?? 0) + (chatMeta.tokenUsage.output ?? 0)}
-                          </small>
-                        ) : null}
-                        {message.role === "user" ? (
-                          <div className="message-actions">
-                            <button
-                              type="button"
-                              className="ghost icon-btn"
-                              onClick={() => void onSendMessage(message.content)}
-                              disabled={chatBusy}
-                              title="Retry this prompt"
-                              aria-label="Retry this prompt"
-                            >
-                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-                                <path d="M12 5a7 7 0 1 1-6.95 7.88h2.04A5 5 0 1 0 12 7h-2.2l2.7 2.7-1.4 1.4L6 6l5.1-5.1 1.4 1.4L9.8 5H12z" fill="currentColor" />
-                              </svg>
-                            </button>
-                            <button
-                              type="button"
-                              className="ghost icon-btn"
-                              onClick={() => void onCopyMessage(message.content)}
-                              title="Copy message"
-                              aria-label="Copy message"
-                            >
-                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-                                <path d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16h-9V7h9v14z" fill="currentColor" />
-                              </svg>
-                            </button>
-                          </div>
-                        ) : null}
-                        {message.role === "assistant" ? (
-                          <div className="message-actions">
-                            <button
-                              type="button"
-                              className="ghost icon-btn"
-                              onClick={stopHarnessSpeech}
-                              title="Stop voice playback"
-                              aria-label="Stop voice playback"
-                              disabled={!harnessSpeaking}
-                            >
-                              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-                                <path d="M5 9v6h4l5 5V4L9 9H5zm12.5 3a4.5 4.5 0 0 0-2.2-3.85v7.7A4.5 4.5 0 0 0 17.5 12z" fill="currentColor" />
-                              </svg>
-                            </button>
-                          </div>
-                        ) : null}
-                      </article>
-                    ))}
-                  </section>
-
-                  <footer className="chat-composer">
                     <textarea
                       value={composer}
                       onChange={(event) => setComposer(event.target.value)}

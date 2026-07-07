@@ -1315,6 +1315,8 @@ textarea {
   position: absolute;
   right: 0;
   width: min(420px, 84vw);
+  max-height: min(68vh, 560px);
+  overflow: auto;
   border: 1px solid rgba(47, 71, 79, 0.52);
   border-radius: 10px;
   background: rgba(10, 19, 25, 0.97);
@@ -1359,6 +1361,22 @@ textarea {
 .chip-button {
   padding: 4px 10px;
   font-size: 0.74rem;
+}
+
+.chip-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.chip-icon-button.is-active {
+  border-color: rgba(255, 122, 24, 0.75);
+  background: rgba(255, 122, 24, 0.16);
+  color: var(--ink-1);
 }
 
 .chat-log {
@@ -1476,6 +1494,14 @@ textarea {
   gap: 8px;
 }
 
+.composer-utility-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 34px;
+}
+
 .pane-right-header {
   display: flex;
   gap: 6px;
@@ -1511,6 +1537,7 @@ textarea {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .startup-panel {
