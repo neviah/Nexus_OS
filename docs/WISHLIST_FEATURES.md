@@ -394,7 +394,7 @@ Priority: P1 (high user value, practical integration path)
 - Expand provider presets from curated free-provider sources.
 - Include quota/rate-limit notes and health checks.
 
-Status: Implemented (catalog endpoint + UI filters).
+Status: Implemented (catalog endpoint + UI filters + health/quota/rate-limit metadata + fallback templates).
 
 2. Freebuff Harness
 - Add Freebuff as a registered harness alongside Hermes/OpenClaw.
@@ -406,13 +406,13 @@ Status: Implemented.
 - Toggle in per-harness extras for coding harnesses only.
 - Default-on for coding harnesses can be tuned per harness.
 
-Status: Implemented (coding harness scope).
+Status: Implemented (coding harness scope + per-harness profile: off/balanced/strict + telemetry).
 
 4. Web Capability Pack (optional)
 - Basic read/search tooling for harnesses via controlled integrations.
 - Keep disabled by default and independently diagnosable.
 
-Status: Partially implemented (Crawl4AI + OfficeCLI packs, per-harness toggles, diagnostics panel).
+Status: Implemented (Crawl4AI + OfficeCLI packs, per-harness toggles, diagnostics, policy warnings, execution history, Office safe presets).
 
 5. TTS Voice Output (Piper)
 - Bundle Piper with NexusOS so there is no separate user install path.
@@ -424,7 +424,7 @@ Status: Partially implemented (Crawl4AI + OfficeCLI packs, per-harness toggles, 
 - Cookbook should detect bundled Ollama first, then recommend which model to pull.
 - No external setup should be required for local chat/coding fallback.
 
-Status: Hardened (runtime startup/install blockers now included in startup checks, plus proactive start/install queueing).
+Status: Hardened (runtime startup/install blockers included in startup checks, proactive start/install queueing, strict startup mode toggle, and runtime self-repair reporting).
 
 ### Phase B: Creator tools
 
@@ -479,6 +479,6 @@ Before adding any new external system, require:
 
 ## Suggested Next Implementation Slice
 
-1. Finish Freebuff managed-runtime bootstrap path + one-click installer helper.
-2. Add Crawl4AI execution history table (URL/domain, result file, duration, status).
-3. Add OfficeCLI safe command presets (create/view/validate) to reduce free-form arg errors.
+1. Add per-provider live health probe jobs (latency/error-rate) to power dynamic fallback ordering.
+2. Add diagnostics export/download (JSON) for startup, policy warnings, and capability run history.
+3. Add strict-mode exception policy (allow selected harnesses/tools during degraded startup) for controlled partial operation.

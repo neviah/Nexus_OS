@@ -4,9 +4,11 @@ const DEFAULT_ALLOWED_EXTENSIONS = [".docx", ".xlsx", ".pptx", ".txt", ".md", ".
 const FABLE_CODING_HARNESSES = new Set(["free-claude-code", "free-code", "opencode", "freebuff"]);
 
 export function createDefaultHarnessCapabilities(harnessId?: string): HarnessCapabilitySettings {
+  const defaultProfile = harnessId && FABLE_CODING_HARNESSES.has(harnessId) ? "balanced" : "off";
   return {
     fableMode: {
-      enabled: Boolean(harnessId && FABLE_CODING_HARNESSES.has(harnessId)),
+      enabled: defaultProfile !== "off",
+      profile: defaultProfile,
     },
     crawl4ai: {
       enabled: false,
@@ -96,7 +98,10 @@ function normalizeHarnessCapabilities(value: HarnessCapabilitySettings, harnessI
 
   return {
     fableMode: {
-      enabled: value?.fableMode?.enabled ?? defaults.fableMode.enabled,
+      profile: normalizeFableProfile(value?.fableMode?.profile, defaults.fableMode.profile),
+      enabled: normalizeFableProfile(value?.fableMode?.profile, defaults.fableMode.profile) !== "off"
+        ? (value?.fableMode?.enabled ?? true)
+        : false,
     },
     crawl4ai: {
       enabled: Boolean(value?.crawl4ai?.enabled),
@@ -112,6 +117,17 @@ function normalizeHarnessCapabilities(value: HarnessCapabilitySettings, harnessI
       maxFileSizeMb: clampNumber(value?.officeCli?.maxFileSizeMb, 1, 512, defaults.officeCli.maxFileSizeMb),
     },
   };
+}
+
+function normalizeFableProfile(
+  value: unknown,
+  fallback: HarnessCapabilitySettings["fableMode"]["profile"],
+): HarnessCapabilitySettings["fableMode"]["profile"] {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "off" || normalized === "balanced" || normalized === "strict") {
+    return normalized;
+  }
+  return fallback;
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {

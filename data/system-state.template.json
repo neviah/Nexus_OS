@@ -1,5 +1,6 @@
 {
   "onboardingComplete": false,
+  "startupStrictMode": false,
   "activeWorkspaceId": "default",
   "selectedPane": {
     "type": "tool",

@@ -145,6 +145,7 @@ type StartupReadiness = {
 type BootstrapPayload = {
   appName: string;
   onboardingRequired: boolean;
+  startupStrictMode?: boolean;
   selectedPane: PaneSelection;
   activeWorkspaceId: string;
   harnesses: Harness[];
@@ -252,6 +253,13 @@ type StartupCheckPayload = {
   }>;
   runtimeStatus?: RuntimeStatus;
   managedStatuses?: ManagedHarnessRuntimeStatus[];
+  strictMode?: boolean;
+  selfRepairReport?: {
+    attempted: number;
+    completed: number;
+    failed: number;
+    recent: Array<{ id: string; action: string; status: string; updatedAt: string; error?: string }>;
+  };
 };
 
 type WebCapabilityDiagnostics = {
@@ -270,6 +278,34 @@ type WebCapabilityDiagnostics = {
   }>;
   runtimeStatus: RuntimeStatus;
   managedStatuses: ManagedHarnessRuntimeStatus[];
+  history?: {
+    crawl4aiRuns: Array<{
+      id: string;
+      harnessId: string;
+      url: string;
+      domain: string;
+      workspaceId: string;
+      outputFile?: string;
+      status: "success" | "failed";
+      durationMs: number;
+      checkedAt: string;
+      error?: string;
+    }>;
+    officeCliRuns: Array<{
+      id: string;
+      harnessId: string;
+      workspaceId: string;
+      file: string;
+      args: string[];
+      preset?: string;
+      status: "success" | "failed";
+      durationMs: number;
+      checkedAt: string;
+      error?: string;
+    }>;
+  };
+  policyWarnings?: string[];
+  fableTelemetry?: Array<{ harnessId: string; profile: string; total: number; success: number; fallbackUsed: number }>;
   checkedAt: string;
 };
 
@@ -361,7 +397,7 @@ type ImageSizePreset = {
 
 type RuntimeJob = {
   id: string;
-  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam";
+  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam" | "install-freebuff";
   model?: string;
   status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   createdAt: string;
@@ -477,13 +513,24 @@ type ProviderCatalogEntry = {
   baseUrl: string;
   defaultModel: string;
   tier: "free" | "paid" | "mixed";
+  healthScore: number;
+  quotaNotes: string;
+  rateLimitNotes: string;
   tags: string[];
   notes: string;
+};
+
+type RouterFallbackTemplate = {
+  id: string;
+  label: string;
+  description: string;
+  targets: Array<{ providerId: string; model: string }>;
 };
 
 type HarnessCapabilitySettings = {
   fableMode: {
     enabled: boolean;
+    profile: "off" | "balanced" | "strict";
   };
   crawl4ai: {
     enabled: boolean;
@@ -500,7 +547,7 @@ type HarnessCapabilitySettings = {
   };
 };
 
-const DEFAULT_PROVIDER_PRESETS: Array<{ id: string; name: string; type: NxProvider["type"]; baseUrl: string; defaultModel: string; tier: "free" | "paid" | "mixed"; tags: string[]; notes: string }> = [
+const DEFAULT_PROVIDER_PRESETS: ProviderCatalogEntry[] = [
   { id: "openrouter", name: "OpenRouter", type: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "openai/gpt-4.1-mini", tier: "mixed", tags: ["multi-provider"], notes: "Large model marketplace." },
   { id: "openai", name: "OpenAI", type: "openai-compatible", baseUrl: "https://api.openai.com/v1", defaultModel: "gpt-4.1-mini", tier: "paid", tags: ["reliable"], notes: "Direct OpenAI endpoint." },
   { id: "iflow", name: "iFlow AI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "iflow/default", tier: "free", tags: ["local-gateway"], notes: "Local free profile." },
@@ -511,7 +558,14 @@ const DEFAULT_PROVIDER_PRESETS: Array<{ id: string; name: string; type: NxProvid
   { id: "together", name: "Together AI", type: "openai-compatible", baseUrl: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3-8b-chat-hf", tier: "mixed", tags: ["open-models"], notes: "Open model API." },
   { id: "groq", name: "Groq", type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama3-8b-8192", tier: "mixed", tags: ["low-latency"], notes: "Fast inference endpoint." },
   { id: "custom", name: "Custom / Local", type: "openai-compatible", baseUrl: "http://localhost:11434/v1", defaultModel: "llama3", tier: "free", tags: ["self-hosted"], notes: "Bring your own endpoint." },
-];
+].map((entry) => ({
+  ...entry,
+  type: entry.type as NxProvider["type"],
+  tier: entry.tier as "free" | "paid" | "mixed",
+  healthScore: entry.tier === "paid" ? 90 : entry.tier === "mixed" ? 82 : 74,
+  quotaNotes: entry.tier === "free" ? "Free usage can be volatile; keep fallback rows ready." : "Check account quotas and spend caps.",
+  rateLimitNotes: "Provider-side rate limits may apply based on RPM/TPM and account tier.",
+}));
 
 const PROVIDER_API_KEY_LINKS: Record<string, string> = {
   openrouter: "https://openrouter.ai/keys",
@@ -631,10 +685,15 @@ function App() {
   const [githubInlineError, setGithubInlineError] = useState<string | null>(null);
   const [nxConfigSaving, setNxConfigSaving] = useState(false);
   const [startupChecking, setStartupChecking] = useState(false);
+  const [startupStrictMode, setStartupStrictMode] = useState(false);
+  const [startupStrictModeSaving, setStartupStrictModeSaving] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
   const [startupCheckDetails, setStartupCheckDetails] = useState<StartupCheckPayload | null>(null);
   const [webCapabilityDiagnostics, setWebCapabilityDiagnostics] = useState<WebCapabilityDiagnostics | null>(null);
   const [webCapabilityDiagnosticsBusy, setWebCapabilityDiagnosticsBusy] = useState(false);
+  const [officePresets, setOfficePresets] = useState<Array<{ id: string; label: string; description: string; args: string[] }>>([]);
+  const [officePresetDraft, setOfficePresetDraft] = useState<{ harnessId: string; preset: "view" | "validate" | "create"; file: string; kind: "docx" | "xlsx" | "pptx" }>({ harnessId: "", preset: "view", file: "", kind: "docx" });
+  const [officePresetBusy, setOfficePresetBusy] = useState(false);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
   const [streamTrace, setStreamTrace] = useState("");
   const [streamTraceOpen, setStreamTraceOpen] = useState(false);
@@ -645,34 +704,35 @@ function App() {
   
   async function loadCookbookSnapshot() {
     setCookbookBusy(true);
-    const response = await fetch("/api/tools/cookbook/scan");
-    if (!response.ok) {
+    try {
+      const response = await fetch("/api/tools/cookbook/scan");
+      if (!response.ok) {
+        setStatusMessage("Failed to scan machine for cookbook recommendations");
+        return;
+      }
+      const payload = (await response.json()) as CookbookSnapshot;
+      setCookbookSnapshot(payload);
+    } finally {
       setCookbookBusy(false);
-      setStatusMessage("Failed to scan machine for cookbook recommendations");
-      return;
     }
-    const payload = (await response.json()) as CookbookSnapshot;
-    setCookbookSnapshot(payload);
-    await loadRuntimeStatus();
-    setCookbookBusy(false);
-  }
-
-  async function loadRuntimeStatus() {
-    const response = await fetch("/api/tools/runtimes/status");
-    if (!response.ok) {
-      return;
-    }
-    const payload = (await response.json()) as RuntimeStatus;
-    setRuntimeStatus(payload);
   }
 
   async function loadRuntimeJobs() {
-    const response = await fetch("/api/tools/runtimes/jobs");
+    const response = await fetch("/api/runtime/jobs");
     if (!response.ok) {
       return;
     }
     const payload = (await response.json()) as { jobs: RuntimeJob[] };
     setRuntimeJobs(payload.jobs ?? []);
+  }
+
+  async function loadRuntimeStatus() {
+    const response = await fetch("/api/runtime/status");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as RuntimeStatus;
+    setRuntimeStatus(payload);
   }
   
   async function loadVoiceStatus() {
@@ -1248,6 +1308,7 @@ function App() {
   // Nexus Router state
   const [nxProviders, setNxProviders] = useState<NxProvider[]>([]);
   const [nxCatalog, setNxCatalog] = useState<ProviderCatalogEntry[]>(DEFAULT_PROVIDER_PRESETS);
+  const [nxTemplates, setNxTemplates] = useState<RouterFallbackTemplate[]>([]);
   const [nxCatalogTier, setNxCatalogTier] = useState<"all" | "free" | "mixed" | "paid">("all");
   const [nxCatalogSearch, setNxCatalogSearch] = useState("");
   const [nxProviderForm, setNxProviderForm] = useState({ preset: "openrouter", id: "openrouter", name: "OpenRouter", type: "openrouter" as NxProvider["type"], baseUrl: "https://openrouter.ai/api/v1", apiKey: "", defaultModel: "openai/gpt-4.1-mini", enabled: true });
@@ -1508,9 +1569,11 @@ function App() {
   }
 
   function defaultHarnessCapabilities(): HarnessCapabilitySettings {
+    const codingHarness = selectedPane.type === "agent" && ["free-claude-code", "free-code", "opencode", "freebuff"].includes(selectedPane.id);
     return {
       fableMode: {
-        enabled: selectedPane.type === "agent" && ["free-claude-code", "free-code", "opencode", "freebuff"].includes(selectedPane.id),
+        enabled: codingHarness,
+        profile: codingHarness ? "balanced" : "off",
       },
       crawl4ai: {
         enabled: false,
@@ -1614,6 +1677,7 @@ function App() {
     const response = await fetch("/api/bootstrap");
     const payload = (await response.json()) as BootstrapPayload;
     setBoot(payload);
+    setStartupStrictMode(Boolean(payload.startupStrictMode));
 
     const payloadPane = payload.selectedPane;
     if (payloadPane.type === "tool") {
@@ -1644,6 +1708,8 @@ function App() {
     await loadFailedTasks();
     await loadLastStartupCheck();
     await loadNxRouter();
+    await loadRouterTemplates();
+    await loadOfficePresets();
     await loadVoiceAssignments();
     setStatusMessage(payload.onboardingRequired ? "First run: Add a provider in Nexus Router to get started." : "Ready");
   }, []);
@@ -1695,6 +1761,62 @@ function App() {
 
     const payload = (await response.json()) as { providers?: ProviderCatalogEntry[] };
     setNxCatalog(payload.providers?.length ? payload.providers : DEFAULT_PROVIDER_PRESETS);
+  }
+
+  async function loadRouterTemplates() {
+    const response = await fetch("/api/router/templates");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as { templates?: RouterFallbackTemplate[] };
+    setNxTemplates(payload.templates ?? []);
+  }
+
+  async function loadOfficePresets() {
+    const response = await fetch("/api/tools/officecli/presets");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as { presets?: Array<{ id: string; label: string; description: string; args: string[] }> };
+    setOfficePresets(payload.presets ?? []);
+  }
+
+  async function saveStartupStrictMode(enabled: boolean) {
+    setStartupStrictModeSaving(true);
+    const response = await fetch("/api/startup/strict-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!response.ok) {
+      setStatusMessage("Failed to update strict startup mode.");
+      setStartupStrictModeSaving(false);
+      return;
+    }
+    setStartupStrictMode(enabled);
+    setStartupStrictModeSaving(false);
+    setStatusMessage(`Strict startup mode ${enabled ? "enabled" : "disabled"}.`);
+  }
+
+  async function runOfficePreset() {
+    if (!officePresetDraft.harnessId || !officePresetDraft.file.trim()) {
+      setStatusMessage("Select harness and file path for Office preset.");
+      return;
+    }
+    setOfficePresetBusy(true);
+    const response = await fetch("/api/tools/officecli/run-preset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(officePresetDraft),
+    });
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Office preset run failed.");
+    } else {
+      setStatusMessage("Office preset executed.");
+      await loadWebCapabilityDiagnostics();
+    }
+    setOfficePresetBusy(false);
   }
 
   async function loadHarnessCapabilities(harnessId: string) {
@@ -1882,6 +2004,7 @@ function App() {
 
   useEffect(() => {
     void loadProviderCatalog();
+    void loadRouterTemplates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nxCatalogTier, nxCatalogSearch]);
 
@@ -2937,6 +3060,37 @@ function App() {
                     <input type="text" value={nxCatalogSearch} onChange={(event) => setNxCatalogSearch(event.target.value)} placeholder="openrouter, groq, local..." />
                   </label>
                 </div>
+                <div className="nxr-catalog-list">
+                  {nxCatalog.slice(0, 5).map((entry) => (
+                    <article key={entry.id} className="nxr-catalog-card">
+                      <div className="nxr-catalog-head">
+                        <strong>{entry.name}</strong>
+                        <span>{entry.tier} · health {entry.healthScore}</span>
+                      </div>
+                      <p>{entry.notes}</p>
+                      <small>{entry.quotaNotes}</small>
+                      <small>{entry.rateLimitNotes}</small>
+                    </article>
+                  ))}
+                </div>
+                {nxTemplates.length > 0 ? (
+                  <div className="nxr-template-list">
+                    <h4>Quick Fallback Templates</h4>
+                    <div className="tool-action-row tool-wrap-row">
+                      {nxTemplates.map((template) => (
+                        <button
+                          key={template.id}
+                          type="button"
+                          className="ghost"
+                          onClick={() => setNxFallbackRows(template.targets.map((target) => createFallbackRow(target)))}
+                          title={template.description}
+                        >
+                          {template.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 <form className="nxr-provider-form" onSubmit={(event) => void nxSaveProvider(event)}>
                   <label>
                     Preset
@@ -4192,23 +4346,52 @@ function App() {
                               <small>Per-harness opt-in controls for Crawl4AI and OfficeCLI.</small>
 
                               {["free-claude-code", "free-code", "opencode", "freebuff"].includes(selectedPane.id) ? (
-                                <label className="extras-toggle">
-                                  <input
-                                    type="checkbox"
-                                    checked={activeHarnessCapabilities.fableMode.enabled}
-                                    onChange={(event) => setHarnessCapabilitiesByHarness((current) => ({
-                                      ...current,
-                                      [selectedPane.id]: {
-                                        ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
-                                        fableMode: {
-                                          ...(current[selectedPane.id]?.fableMode ?? defaultHarnessCapabilities().fableMode),
-                                          enabled: event.target.checked,
+                                <>
+                                  <label className="extras-toggle">
+                                    <input
+                                      type="checkbox"
+                                      checked={activeHarnessCapabilities.fableMode.enabled}
+                                      onChange={(event) => setHarnessCapabilitiesByHarness((current) => ({
+                                        ...current,
+                                        [selectedPane.id]: {
+                                          ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                          fableMode: {
+                                            ...(current[selectedPane.id]?.fableMode ?? defaultHarnessCapabilities().fableMode),
+                                            enabled: event.target.checked,
+                                            profile: event.target.checked
+                                              ? (current[selectedPane.id]?.fableMode?.profile ?? "balanced")
+                                              : "off",
+                                          },
                                         },
-                                      },
-                                    }))}
-                                  />
-                                  <span>Fable Mode (staged plan/verify/self-critique)</span>
-                                </label>
+                                      }))}
+                                    />
+                                    <span>Fable Mode (staged plan/verify/self-critique)</span>
+                                  </label>
+                                  <label>
+                                    Fable Profile
+                                    <select
+                                      value={activeHarnessCapabilities.fableMode.profile}
+                                      onChange={(event) => {
+                                        const profile = event.target.value as "off" | "balanced" | "strict";
+                                        setHarnessCapabilitiesByHarness((current) => ({
+                                          ...current,
+                                          [selectedPane.id]: {
+                                            ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                            fableMode: {
+                                              ...(current[selectedPane.id]?.fableMode ?? defaultHarnessCapabilities().fableMode),
+                                              profile,
+                                              enabled: profile !== "off",
+                                            },
+                                          },
+                                        }));
+                                      }}
+                                    >
+                                      <option value="off">Off</option>
+                                      <option value="balanced">Balanced</option>
+                                      <option value="strict">Strict</option>
+                                    </select>
+                                  </label>
+                                </>
                               ) : null}
 
                               <label className="extras-toggle">
@@ -4395,6 +4578,63 @@ function App() {
                                   }}
                                 />
                               </label>
+
+                              {activeHarnessCapabilities.officeCli.enabled ? (
+                                <div className="extras-inline-grid">
+                                  <label>
+                                    Office Preset
+                                    <select
+                                      value={officePresetDraft.preset}
+                                      onChange={(event) => setOfficePresetDraft((current) => ({
+                                        ...current,
+                                        harnessId: selectedPane.id,
+                                        preset: event.target.value as "view" | "validate" | "create",
+                                      }))}
+                                    >
+                                      {officePresets.map((preset) => (
+                                        <option key={preset.id} value={preset.id}>{preset.label}</option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                  <label>
+                                    File Path
+                                    <input
+                                      type="text"
+                                      value={officePresetDraft.harnessId === selectedPane.id ? officePresetDraft.file : ""}
+                                      onChange={(event) => setOfficePresetDraft((current) => ({
+                                        ...current,
+                                        harnessId: selectedPane.id,
+                                        file: event.target.value,
+                                      }))}
+                                      placeholder="docs/example.docx"
+                                    />
+                                  </label>
+                                  {officePresetDraft.preset === "create" ? (
+                                    <label>
+                                      Create Type
+                                      <select
+                                        value={officePresetDraft.kind}
+                                        onChange={(event) => setOfficePresetDraft((current) => ({
+                                          ...current,
+                                          harnessId: selectedPane.id,
+                                          kind: event.target.value as "docx" | "xlsx" | "pptx",
+                                        }))}
+                                      >
+                                        <option value="docx">docx</option>
+                                        <option value="xlsx">xlsx</option>
+                                        <option value="pptx">pptx</option>
+                                      </select>
+                                    </label>
+                                  ) : null}
+                                  <button
+                                    type="button"
+                                    onClick={() => void runOfficePreset()}
+                                    disabled={officePresetBusy || !officePresetDraft.file.trim() || officePresetDraft.harnessId !== selectedPane.id}
+                                  >
+                                    {officePresetBusy ? "Running..." : "Run Preset"}
+                                  </button>
+                                </div>
+                              ) : null}
 
                               <div className="tool-action-row">
                                 <button
@@ -4691,6 +4931,15 @@ function App() {
                 <button type="button" className="ghost" onClick={() => void onRunStartupCheck()} disabled={startupChecking}>
                   {startupChecking ? "Checking..." : "Run Startup Check"}
                 </button>
+                <label className="extras-toggle">
+                  <input
+                    type="checkbox"
+                    checked={startupStrictMode}
+                    onChange={(event) => void saveStartupStrictMode(event.target.checked)}
+                    disabled={startupStrictModeSaving}
+                  />
+                  <span>Strict startup mode (block chat until readiness passes)</span>
+                </label>
                 {startupCheckDetails?.managedStatuses?.length ? (
                   <ul className="diagnostic-list">
                     {startupCheckDetails.managedStatuses.map((status) => (
@@ -4699,6 +4948,23 @@ function App() {
                       </li>
                     ))}
                   </ul>
+                ) : null}
+                {startupCheckDetails?.selfRepairReport ? (
+                  <details>
+                    <summary>Self-Repair Report</summary>
+                    <ul className="diagnostic-list">
+                      <li>
+                        <strong>Attempts</strong>
+                        <small>{startupCheckDetails.selfRepairReport.attempted} attempted · {startupCheckDetails.selfRepairReport.completed} completed · {startupCheckDetails.selfRepairReport.failed} failed</small>
+                      </li>
+                      {startupCheckDetails.selfRepairReport.recent.map((job) => (
+                        <li key={job.id}>
+                          <strong>{job.action}</strong>
+                          <small>{job.status} · {new Date(job.updatedAt).toLocaleString()}{job.error ? ` · ${job.error}` : ""}</small>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
                 ) : null}
               </section>
 
@@ -4737,6 +5003,48 @@ function App() {
                         ))}
                       </ul>
                     </details>
+                    {webCapabilityDiagnostics.policyWarnings?.length ? (
+                      <details>
+                        <summary>Policy Warnings</summary>
+                        <ul className="diagnostic-list">
+                          {webCapabilityDiagnostics.policyWarnings.map((warning, idx) => (
+                            <li key={`${warning}-${idx}`}><strong>Warning</strong><small>{warning}</small></li>
+                          ))}
+                        </ul>
+                      </details>
+                    ) : null}
+                    {webCapabilityDiagnostics.history ? (
+                      <details>
+                        <summary>Recent Capability Runs</summary>
+                        <ul className="diagnostic-list">
+                          {webCapabilityDiagnostics.history.crawl4aiRuns.slice(0, 5).map((run) => (
+                            <li key={run.id}>
+                              <strong>Crawl4AI · {run.harnessId}</strong>
+                              <small>{run.status} · {run.domain} · {Math.round(run.durationMs)}ms</small>
+                            </li>
+                          ))}
+                          {webCapabilityDiagnostics.history.officeCliRuns.slice(0, 5).map((run) => (
+                            <li key={run.id}>
+                              <strong>OfficeCLI · {run.harnessId}</strong>
+                              <small>{run.status} · {run.file} · {run.preset ?? "manual"}</small>
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    ) : null}
+                    {webCapabilityDiagnostics.fableTelemetry?.length ? (
+                      <details>
+                        <summary>Fable Telemetry</summary>
+                        <ul className="diagnostic-list">
+                          {webCapabilityDiagnostics.fableTelemetry.map((entry) => (
+                            <li key={`${entry.harnessId}-${entry.profile}`}>
+                              <strong>{entry.harnessId} · {entry.profile}</strong>
+                              <small>total={entry.total} · success={entry.success} · fallback={entry.fallbackUsed}</small>
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    ) : null}
                   </>
                 ) : (
                   <p className="diagnostics-empty">No web capability diagnostics loaded yet.</p>

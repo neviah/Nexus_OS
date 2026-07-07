@@ -595,9 +595,14 @@ function buildCapabilitySummary(state: SystemState, harnessId: string): string {
   ];
 
   if (capabilities.fableMode.enabled) {
-    lines.push("- Fable mode enabled for this harness.");
+    lines.push(`- Fable mode enabled for this harness (profile=${capabilities.fableMode.profile}).`);
     lines.push("- Use staged execution for complex work: Plan -> Execute -> Verify -> Self-critique.");
-    lines.push("- Prefer explicit verification per stage and surface failures clearly before final answer.");
+    if (capabilities.fableMode.profile === "strict") {
+      lines.push("- STRICT profile: require explicit pass/fail verification per stage before moving on.");
+      lines.push("- STRICT profile: if any stage fails, stop and report remediation options before final answer.");
+    } else {
+      lines.push("- BALANCED profile: keep staged structure for non-trivial tasks, but stay concise on simple tasks.");
+    }
   } else {
     lines.push("- Fable mode disabled for this harness.");
   }

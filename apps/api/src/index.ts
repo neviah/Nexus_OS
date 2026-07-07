@@ -73,7 +73,7 @@ import {
   upsertHarnessThread,
 } from "./lib/harnessChats.js";
 import { generateLocalImageStreaming, getLocalImageStatus } from "./lib/localImageGenerator.js";
-import { listProviderCatalog } from "./lib/providerCatalog.js";
+import { listProviderCatalog, listRouterFallbackTemplates } from "./lib/providerCatalog.js";
 import { getHarnessCapabilities, updateHarnessCapabilities } from "./lib/harnessCapabilities.js";
 
 const app = express();
@@ -104,15 +104,58 @@ type RuntimeJob = {
   error?: string;
   cancelRequestedAt?: string;
   retryOfId?: string;
+  autoRetryAttempt?: number;
 };
 
 const runtimeJobs = new Map<string, RuntimeJob>();
 const runtimeJobsPath = path.join(getRootDir(), "data", "runtime-jobs.local.json");
+const webCapabilitiesHistoryPath = path.join(getRootDir(), "data", "web-capabilities-history.local.json");
+const fableTelemetryPath = path.join(getRootDir(), "data", "fable-telemetry.local.json");
 const piperAssignmentsPath = path.join(getRootDir(), "data", "piper-voice-assignments.local.json");
 const githubConnectorPath = path.join(getRootDir(), "data", "connectors.github.local.json");
 let runtimeJobsLoaded = false;
 let runtimeJobPersistQueue: Promise<void> = Promise.resolve();
 const pendingGitHubDeviceFlows = new Map<string, GitHubDeviceFlowSession>();
+
+type CrawlRunHistoryEntry = {
+  id: string;
+  harnessId: string;
+  url: string;
+  domain: string;
+  workspaceId: string;
+  outputFile?: string;
+  status: "success" | "failed";
+  durationMs: number;
+  checkedAt: string;
+  error?: string;
+};
+
+type OfficeRunHistoryEntry = {
+  id: string;
+  harnessId: string;
+  workspaceId: string;
+  file: string;
+  args: string[];
+  preset?: string;
+  status: "success" | "failed";
+  durationMs: number;
+  checkedAt: string;
+  error?: string;
+};
+
+type WebCapabilitiesHistory = {
+  crawl4aiRuns: CrawlRunHistoryEntry[];
+  officeCliRuns: OfficeRunHistoryEntry[];
+};
+
+type FableTelemetryEntry = {
+  id: string;
+  harnessId: string;
+  profile: "off" | "balanced" | "strict";
+  success: boolean;
+  fallbackUsed: boolean;
+  createdAt: string;
+};
 
 type GitHubConnectorState = {
   accessToken: string;
@@ -218,6 +261,108 @@ function scheduleRuntimeJobPersist(): void {
     });
 }
 
+function shouldAutoRetryRuntimeJob(job: RuntimeJob): boolean {
+  return ["install-ollama", "install-piper", "install-default-piper-voice", "install-acejam", "install-freebuff"].includes(job.action);
+}
+
+function runtimeJobRetryDepth(job: RuntimeJob): number {
+  let depth = 0;
+  let cursor: RuntimeJob | undefined = job;
+  while (cursor?.retryOfId) {
+    depth += 1;
+    cursor = runtimeJobs.get(cursor.retryOfId);
+  }
+  return depth;
+}
+
+function queueRuntimeJobAutoRetry(job: RuntimeJob): void {
+  const depth = runtimeJobRetryDepth(job);
+  const maxRetries = 2;
+  if (depth >= maxRetries) {
+    appendRuntimeJobLog(job, "Auto-retry budget exhausted.");
+    return;
+  }
+
+  const delayMs = 1500 * (2 ** depth);
+  appendRuntimeJobLog(job, `Scheduling automatic retry in ${delayMs}ms.`);
+  setTimeout(() => {
+    const retry = createRuntimeJob(job.action, job.model, job.id);
+    retry.autoRetryAttempt = depth + 1;
+    appendRuntimeJobLog(retry, `Automatic retry #${depth + 1} for failed job ${job.id}.`);
+    startRuntimeJob(retry);
+  }, delayMs);
+}
+
+async function readWebCapabilitiesHistory(): Promise<WebCapabilitiesHistory> {
+  try {
+    const raw = await fs.readFile(webCapabilitiesHistoryPath, "utf-8");
+    const parsed = JSON.parse(raw) as Partial<WebCapabilitiesHistory>;
+    return {
+      crawl4aiRuns: Array.isArray(parsed.crawl4aiRuns) ? parsed.crawl4aiRuns : [],
+      officeCliRuns: Array.isArray(parsed.officeCliRuns) ? parsed.officeCliRuns : [],
+    };
+  } catch {
+    return { crawl4aiRuns: [], officeCliRuns: [] };
+  }
+}
+
+async function writeWebCapabilitiesHistory(history: WebCapabilitiesHistory): Promise<void> {
+  await fs.mkdir(path.dirname(webCapabilitiesHistoryPath), { recursive: true });
+  await fs.writeFile(webCapabilitiesHistoryPath, JSON.stringify(history, null, 2), "utf-8");
+}
+
+async function appendCrawlRunHistory(entry: CrawlRunHistoryEntry): Promise<void> {
+  const history = await readWebCapabilitiesHistory();
+  history.crawl4aiRuns.unshift(entry);
+  history.crawl4aiRuns = history.crawl4aiRuns.slice(0, 120);
+  await writeWebCapabilitiesHistory(history);
+}
+
+async function appendOfficeRunHistory(entry: OfficeRunHistoryEntry): Promise<void> {
+  const history = await readWebCapabilitiesHistory();
+  history.officeCliRuns.unshift(entry);
+  history.officeCliRuns = history.officeCliRuns.slice(0, 120);
+  await writeWebCapabilitiesHistory(history);
+}
+
+async function readFableTelemetry(): Promise<FableTelemetryEntry[]> {
+  try {
+    const raw = await fs.readFile(fableTelemetryPath, "utf-8");
+    const parsed = JSON.parse(raw) as FableTelemetryEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeFableTelemetry(entries: FableTelemetryEntry[]): Promise<void> {
+  await fs.mkdir(path.dirname(fableTelemetryPath), { recursive: true });
+  await fs.writeFile(fableTelemetryPath, JSON.stringify(entries.slice(0, 400), null, 2), "utf-8");
+}
+
+async function appendFableTelemetry(entry: FableTelemetryEntry): Promise<void> {
+  const current = await readFableTelemetry();
+  current.unshift(entry);
+  await writeFableTelemetry(current);
+}
+
+function summarizeFableTelemetry(entries: FableTelemetryEntry[]): Array<{ harnessId: string; profile: string; total: number; success: number; fallbackUsed: number }> {
+  const map = new Map<string, { harnessId: string; profile: string; total: number; success: number; fallbackUsed: number }>();
+  for (const entry of entries) {
+    const key = `${entry.harnessId}::${entry.profile}`;
+    const current = map.get(key) ?? { harnessId: entry.harnessId, profile: entry.profile, total: 0, success: 0, fallbackUsed: 0 };
+    current.total += 1;
+    if (entry.success) current.success += 1;
+    if (entry.fallbackUsed) current.fallbackUsed += 1;
+    map.set(key, current);
+  }
+  return Array.from(map.values()).sort((a, b) => b.total - a.total);
+}
+
+function isStartupStrictModeEnabled(state: SystemState): boolean {
+  return Boolean(state.startupStrictMode);
+}
+
 function requestRuntimeJobCancel(job: RuntimeJob): boolean {
   if (job.status === "completed" || job.status === "failed" || job.status === "canceled") {
     return false;
@@ -296,6 +441,9 @@ function startRuntimeJob(job: RuntimeJob): void {
         job.finishedAt = new Date().toISOString();
         job.updatedAt = job.finishedAt;
         appendRuntimeJobLog(job, `Failed: ${job.error}`);
+        if (shouldAutoRetryRuntimeJob(job)) {
+          queueRuntimeJobAutoRetry(job);
+        }
       }
       scheduleRuntimeJobPersist();
     }
@@ -575,6 +723,31 @@ function buildStartupReadiness(input: {
     liveHarnesses,
     totalHarnesses,
     checkedAt: new Date().toISOString(),
+  };
+}
+
+function buildSelfRepairReport(): {
+  attempted: number;
+  completed: number;
+  failed: number;
+  recent: Array<{ id: string; action: string; status: string; updatedAt: string; error?: string }>;
+} {
+  const recent = toRuntimeJobPayload(20)
+    .filter((job) => job.logs.some((log) => log.includes("Queued by NexusOS core runtime provisioning.")))
+    .slice(0, 10)
+    .map((job) => ({
+      id: job.id,
+      action: job.action,
+      status: job.status,
+      updatedAt: job.updatedAt,
+      error: job.error,
+    }));
+
+  return {
+    attempted: recent.length,
+    completed: recent.filter((job) => job.status === "completed").length,
+    failed: recent.filter((job) => job.status === "failed").length,
+    recent,
   };
 }
 
@@ -1675,6 +1848,7 @@ app.get("/api/bootstrap", async (_req, res) => {
   res.json({
     appName: "NEXUS OS",
     onboardingRequired: !routerConfigured,
+    startupStrictMode: isStartupStrictModeEnabled(state),
     selectedPane,
     activeWorkspaceId,
     harnesses: harnessStatus,
@@ -2413,12 +2587,32 @@ app.get("/api/startup/check", async (_req, res) => {
     hasFreebuffHarness: harnesses.some((h) => h.id === "freebuff"),
   });
   await persistStartupCheck(startup);
-  res.json({ startup, conformance, runtimeStatus, managedStatuses });
+  res.json({
+    startup,
+    conformance,
+    runtimeStatus,
+    managedStatuses,
+    strictMode: isStartupStrictModeEnabled(state),
+    selfRepairReport: buildSelfRepairReport(),
+  });
 });
 
 app.get("/api/startup/check/last", async (_req, res) => {
   const last = await getLastStartupCheck();
   res.json({ last });
+});
+
+app.get("/api/startup/strict-mode", async (_req, res) => {
+  const state = await readSystemState();
+  res.json({ enabled: isStartupStrictModeEnabled(state) });
+});
+
+app.post("/api/startup/strict-mode", async (req, res) => {
+  const body = req.body as { enabled?: boolean };
+  const state = await readSystemState();
+  state.startupStrictMode = Boolean(body.enabled);
+  await writeSystemState(state);
+  return res.json({ ok: true, enabled: state.startupStrictMode });
 });
 
 app.get("/api/tools/9router/status", async (_req, res) => {
@@ -2505,6 +2699,10 @@ app.get("/api/router/catalog", (_req, res) => {
   res.json({
     providers: listProviderCatalog({ tier, search }),
   });
+});
+
+app.get("/api/router/templates", (_req, res) => {
+  res.json({ templates: listRouterFallbackTemplates() });
 });
 
 app.post("/api/router/providers", async (req, res) => {
@@ -2663,6 +2861,8 @@ app.put("/api/harnesses/:harnessId/capabilities", async (req, res) => {
 app.get("/api/tools/web-capabilities/diagnostics", async (_req, res) => {
   const state = await readSystemState();
   const harnesses = await readHarnessRegistry();
+  const history = await readWebCapabilitiesHistory();
+  const fableTelemetry = summarizeFableTelemetry(await readFableTelemetry());
 
   const probes = {
     crawl4ai: { available: false, command: "", details: "" },
@@ -2713,6 +2913,23 @@ app.get("/api/tools/web-capabilities/diagnostics", async (_req, res) => {
     };
   });
 
+  const policyWarnings = harnesses.flatMap((harness) => {
+    const capabilities = getHarnessCapabilities(state, harness.id);
+    const warnings: string[] = [];
+    if (capabilities.crawl4ai.enabled) {
+      if (capabilities.crawl4ai.allowedDomains.length === 0) {
+        warnings.push(`${harness.name}: Crawl4AI enabled with empty allowlist.`);
+      }
+      if (capabilities.crawl4ai.allowExternalDomains) {
+        warnings.push(`${harness.name}: Crawl4AI external domains enabled.`);
+      }
+    }
+    if (capabilities.officeCli.enabled && capabilities.officeCli.allowedExtensions.length > 8) {
+      warnings.push(`${harness.name}: OfficeCLI extension allowlist is very broad.`);
+    }
+    return warnings;
+  });
+
   const runtimeStatus = await getRuntimeStatus();
   const managedStatuses = getManagedHarnessRuntimeStatus();
   await writeSystemState(state);
@@ -2722,6 +2939,9 @@ app.get("/api/tools/web-capabilities/diagnostics", async (_req, res) => {
     harnessCapabilitySummary,
     runtimeStatus,
     managedStatuses,
+    history,
+    policyWarnings,
+    fableTelemetry,
     checkedAt: new Date().toISOString(),
   });
 });
@@ -2736,6 +2956,7 @@ app.post("/api/tools/crawl4ai/run", async (req, res) => {
 
   const harnessId = String(body.harnessId ?? "").trim();
   const targetUrl = String(body.url ?? "").trim();
+  const startedAt = Date.now();
   if (!harnessId || !targetUrl) {
     return res.status(400).json({ error: "harnessId and url are required" });
   }
@@ -2789,6 +3010,17 @@ app.post("/api/tools/crawl4ai/run", async (req, res) => {
       });
 
       const preview = await fs.readFile(outputFile, "utf-8").catch(() => "");
+      await appendCrawlRunHistory({
+        id: crypto.randomUUID(),
+        harnessId,
+        url: targetUrl,
+        domain,
+        workspaceId: String(body.workspaceId ?? state.activeWorkspaceId),
+        outputFile,
+        status: "success",
+        durationMs: Date.now() - startedAt,
+        checkedAt: new Date().toISOString(),
+      });
       return res.json({
         ok: true,
         harnessId,
@@ -2805,6 +3037,18 @@ app.post("/api/tools/crawl4ai/run", async (req, res) => {
     }
   }
 
+  await appendCrawlRunHistory({
+    id: crypto.randomUUID(),
+    harnessId,
+    url: targetUrl,
+    domain,
+    workspaceId: String(body.workspaceId ?? state.activeWorkspaceId),
+    status: "failed",
+    durationMs: Date.now() - startedAt,
+    checkedAt: new Date().toISOString(),
+    error: lastError,
+  });
+
   return res.status(502).json({
     error: "Crawl4AI command failed. Install crawl4ai in your local Python environment or add crawl4ai to PATH.",
     details: lastError,
@@ -2817,9 +3061,11 @@ app.post("/api/tools/officecli/run", async (req, res) => {
     workspaceId?: string;
     args?: string[];
     file?: string;
+    preset?: string;
   };
 
   const harnessId = String(body.harnessId ?? "").trim();
+  const startedAt = Date.now();
   if (!harnessId) {
     return res.status(400).json({ error: "harnessId is required" });
   }
@@ -2877,6 +3123,17 @@ app.post("/api/tools/officecli/run", async (req, res) => {
         cwd: workspacePath,
         timeout: 120000,
       });
+      await appendOfficeRunHistory({
+        id: crypto.randomUUID(),
+        harnessId,
+        workspaceId: String(body.workspaceId ?? state.activeWorkspaceId),
+        file: filePathRaw,
+        args,
+        preset: body.preset,
+        status: "success",
+        durationMs: Date.now() - startedAt,
+        checkedAt: new Date().toISOString(),
+      });
       return res.json({
         ok: true,
         harnessId,
@@ -2890,10 +3147,77 @@ app.post("/api/tools/officecli/run", async (req, res) => {
     }
   }
 
+  await appendOfficeRunHistory({
+    id: crypto.randomUUID(),
+    harnessId,
+    workspaceId: String(body.workspaceId ?? state.activeWorkspaceId),
+    file: filePathRaw,
+    args,
+    preset: body.preset,
+    status: "failed",
+    durationMs: Date.now() - startedAt,
+    checkedAt: new Date().toISOString(),
+    error: lastError,
+  });
+
   return res.status(502).json({
     error: "OfficeCLI command failed. Install officecli and ensure it is available on PATH.",
     details: lastError,
   });
+});
+
+app.get("/api/tools/officecli/presets", (_req, res) => {
+  res.json({
+    presets: [
+      { id: "view", label: "View (json)", description: "Read document structure/output safely.", args: ["view", "--json"] },
+      { id: "validate", label: "Validate", description: "Validate Office file integrity.", args: ["validate"] },
+      { id: "create", label: "Create", description: "Create file scaffold for selected type.", args: ["create"] },
+    ],
+  });
+});
+
+app.post("/api/tools/officecli/run-preset", async (req, res) => {
+  const body = req.body as {
+    harnessId?: string;
+    workspaceId?: string;
+    preset?: "view" | "validate" | "create";
+    file?: string;
+    kind?: "docx" | "xlsx" | "pptx";
+  };
+
+  const preset = body.preset;
+  if (!preset || !body.file?.trim() || !body.harnessId?.trim()) {
+    return res.status(400).json({ error: "harnessId, preset, and file are required" });
+  }
+
+  let args: string[] = [];
+  if (preset === "view") {
+    args = ["view", "--json"];
+  } else if (preset === "validate") {
+    args = ["validate"];
+  } else if (preset === "create") {
+    const kind = body.kind ?? "docx";
+    args = ["create", "--type", kind];
+  }
+
+  const proxyResponse = await fetch(`http://127.0.0.1:${port}/api/tools/officecli/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      harnessId: body.harnessId,
+      workspaceId: body.workspaceId,
+      file: body.file,
+      args,
+      preset,
+    }),
+  });
+
+  const payload = await proxyResponse.json();
+  if (!proxyResponse.ok) {
+    return res.status(proxyResponse.status).json(payload);
+  }
+
+  return res.json({ ok: true, preset, ...payload });
 });
 
 app.get("/api/harnesses/:harnessId/chats", async (req, res) => {
@@ -3206,9 +3530,27 @@ app.post("/api/chat", async (req, res) => {
     });
   }
 
+  if (isStartupStrictModeEnabled(state)) {
+    const liveHarnesses = (await resolveHarnessHealth(harnesses)).filter((entry) => entry.status === "online").length;
+    const runtimeStatus = await getRuntimeStatus();
+    const startup = buildStartupReadiness({
+      onboardingComplete: isNexusRouterConfigured(state),
+      liveHarnesses,
+      totalHarnesses: harnesses.length,
+      runtimeStatus,
+      managedStatuses: getManagedHarnessRuntimeStatus(),
+      hasFreebuffHarness: harnesses.some((h) => h.id === "freebuff"),
+    });
+    if (!startup.ready) {
+      return res.status(412).json({ error: `Strict startup mode is enabled. Resolve blockers first: ${startup.blockers.join(" ")}` });
+    }
+  }
+
   if (!harness) {
     return res.status(404).json({ error: `Unknown harness: ${harnessId}` });
   }
+
+  const fableProfile = getHarnessCapabilities(state, harnessId).fableMode.profile;
 
   await createTask({
     requestId: taskId,
@@ -3239,6 +3581,16 @@ app.post("/api/chat", async (req, res) => {
       };
     }
   } catch (error) {
+    if (fableProfile !== "off") {
+      await appendFableTelemetry({
+        id: crypto.randomUUID(),
+        harnessId,
+        profile: fableProfile,
+        success: false,
+        fallbackUsed: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
     await updateTaskStatus(taskId, "failed", { error: String(error) });
     return res.status(502).json({ error: String(error), requestId: taskId });
   }
@@ -3266,6 +3618,17 @@ app.post("/api/chat", async (req, res) => {
     finalOutput: adapterResult.content,
     meta: adapterResult.meta,
   });
+
+  if (fableProfile !== "off") {
+    await appendFableTelemetry({
+      id: crypto.randomUUID(),
+      harnessId,
+      profile: fableProfile,
+      success: true,
+      fallbackUsed: Boolean(adapterResult.meta?.fallbackUsed),
+      createdAt: new Date().toISOString(),
+    });
+  }
 
   return res.json({
     requestId: taskId,
@@ -3366,9 +3729,27 @@ app.post("/api/chat/stream", async (req, res) => {
     return res.status(412).json({ error: "Complete Nexus Router setup before starting chats." });
   }
 
+  if (isStartupStrictModeEnabled(state)) {
+    const liveHarnesses = (await resolveHarnessHealth(harnesses)).filter((entry) => entry.status === "online").length;
+    const runtimeStatus = await getRuntimeStatus();
+    const startup = buildStartupReadiness({
+      onboardingComplete: isNexusRouterConfigured(state),
+      liveHarnesses,
+      totalHarnesses: harnesses.length,
+      runtimeStatus,
+      managedStatuses: getManagedHarnessRuntimeStatus(),
+      hasFreebuffHarness: harnesses.some((h) => h.id === "freebuff"),
+    });
+    if (!startup.ready) {
+      return res.status(412).json({ error: `Strict startup mode is enabled. Resolve blockers first: ${startup.blockers.join(" ")}` });
+    }
+  }
+
   if (!harness) {
     return res.status(404).json({ error: `Unknown harness: ${harnessId}` });
   }
+
+  const fableProfile = getHarnessCapabilities(state, harnessId).fableMode.profile;
 
   const controller = new AbortController();
   activeStreams.set(requestId, controller);
@@ -3461,10 +3842,31 @@ app.post("/api/chat/stream", async (req, res) => {
       error: controller.signal.aborted ? "Stopped by user" : undefined,
     });
 
+    if (!controller.signal.aborted && fableProfile !== "off") {
+      await appendFableTelemetry({
+        id: crypto.randomUUID(),
+        harnessId,
+        profile: fableProfile,
+        success: true,
+        fallbackUsed: Boolean(latestMeta?.fallbackUsed),
+        createdAt: new Date().toISOString(),
+      });
+    }
+
     res.write("data: {\"type\":\"done\"}\n\n");
     res.end();
   } catch (error) {
     const failureMessage = String(error);
+    if (fableProfile !== "off") {
+      await appendFableTelemetry({
+        id: crypto.randomUUID(),
+        harnessId,
+        profile: fableProfile,
+        success: false,
+        fallbackUsed: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
     await updateTaskStatus(requestId, "failed", { error: failureMessage });
 
     const replayTask = await getTask(requestId);

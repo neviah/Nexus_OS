@@ -33,6 +33,7 @@ export type WorkspaceRecord = {
 
 export type SystemState = {
   onboardingComplete: boolean;
+  startupStrictMode?: boolean;
   activeWorkspaceId: string;
   selectedPane: {
     type: "agent" | "tool";
@@ -91,6 +92,7 @@ export type SystemState = {
 export type HarnessCapabilitySettings = {
   fableMode: {
     enabled: boolean;
+    profile: "off" | "balanced" | "strict";
   };
   crawl4ai: {
     enabled: boolean;
