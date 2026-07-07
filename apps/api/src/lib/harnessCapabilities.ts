@@ -1,7 +1,7 @@
 import type { HarnessCapabilitySettings, SystemState } from "../types.js";
 
 const DEFAULT_ALLOWED_EXTENSIONS = [".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv", ".json"];
-const FABLE_CODING_HARNESSES = new Set(["free-claude-code", "free-code", "opencode", "freebuff"]);
+const FABLE_CODING_HARNESSES = new Set(["free-claude-code", "free-code", "opencode"]);
 
 export function createDefaultHarnessCapabilities(harnessId?: string): HarnessCapabilitySettings {
   const defaultProfile = harnessId && FABLE_CODING_HARNESSES.has(harnessId) ? "balanced" : "off";

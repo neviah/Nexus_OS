@@ -230,8 +230,6 @@ type RuntimeStatus = {
   piperPath: string | null;
   piperVoices: string[];
   defaultVoiceInstalled: boolean;
-  freebuffInstalled?: boolean;
-  freebuffCommand?: string | null;
 };
 
 type ManagedHarnessRuntimeStatus = {
@@ -266,7 +264,6 @@ type WebCapabilityDiagnostics = {
   probes: {
     crawl4ai: { available: boolean; command: string; details: string };
     officecli: { available: boolean; command: string; details: string };
-    freebuff: { available: boolean; command: string; details: string };
   };
   harnessCapabilitySummary: Array<{
     harnessId: string;
@@ -397,7 +394,7 @@ type ImageSizePreset = {
 
 type RuntimeJob = {
   id: string;
-  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam" | "install-freebuff";
+  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam";
   model?: string;
   status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   createdAt: string;
@@ -1572,7 +1569,7 @@ function App() {
   }
 
   function defaultHarnessCapabilities(): HarnessCapabilitySettings {
-    const codingHarness = selectedPane.type === "agent" && ["free-claude-code", "free-code", "opencode", "freebuff"].includes(selectedPane.id);
+    const codingHarness = selectedPane.type === "agent" && ["free-claude-code", "free-code", "opencode"].includes(selectedPane.id);
     return {
       fableMode: {
         enabled: codingHarness,
@@ -4441,7 +4438,7 @@ function App() {
                               <strong>Extra Settings · {activeHarness?.name ?? selectedPane.id}</strong>
                               <small>Per-harness opt-in controls for Crawl4AI and OfficeCLI.</small>
 
-                              {["free-claude-code", "free-code", "opencode", "freebuff"].includes(selectedPane.id) ? (
+                              {["free-claude-code", "free-code", "opencode"].includes(selectedPane.id) ? (
                                 <>
                                   <label className="extras-toggle">
                                     <input
@@ -4504,15 +4501,6 @@ function App() {
                                     />
                                     <span>Open Design workflow</span>
                                   </label>
-                                  <div className="tool-action-row">
-                                    <button
-                                      type="button"
-                                      className="ghost"
-                                      onClick={() => window.open("https://github.com/nexu-io/open-design", "_blank", "noopener,noreferrer")}
-                                    >
-                                      Open Design Repo
-                                    </button>
-                                  </div>
                                 </>
                               ) : null}
 
@@ -5029,10 +5017,6 @@ function App() {
                       <li>
                         <strong>OfficeCLI</strong> · {webCapabilityDiagnostics.probes.officecli.available ? "available" : "missing"}
                         <small>{webCapabilityDiagnostics.probes.officecli.command}</small>
-                      </li>
-                      <li>
-                        <strong>Freebuff</strong> · {webCapabilityDiagnostics.probes.freebuff.available ? "available" : "missing"}
-                        <small>{webCapabilityDiagnostics.probes.freebuff.command}</small>
                       </li>
                     </ul>
                     <details>

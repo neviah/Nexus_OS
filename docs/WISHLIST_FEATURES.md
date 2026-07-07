@@ -122,7 +122,7 @@ Priority: P1 internal process
 
 ### 5) CodebuffAI/codebuff (Freebuff)
 
-Decision: Added as a harness. Freebuff is the fully free, ad-supported tier.
+Decision: Removed from the active NexusOS harness plan.
 
 What it is:
 
@@ -143,9 +143,9 @@ Bloat/risk:
 - Limited mode applies outside US/CA/UK/EU or when using VPN.
 - Ad-supported model may change terms; treat it like any external free service.
 
-Status: Implemented
+Status: Removed after integration review.
 
-Priority: P1 (completed)
+Priority: Deferred / not planned
 
 ---
 
@@ -395,12 +395,6 @@ Priority: P1 (high user value, practical integration path)
 - Include quota/rate-limit notes and health checks.
 
 Status: Implemented (catalog endpoint + UI filters + health/quota/rate-limit metadata + fallback templates).
-
-2. Freebuff Harness
-- Add Freebuff as a registered harness alongside Hermes/OpenClaw.
-- No API key required; `npm install -g freebuff` and point endpoint at local server.
-
-Status: Implemented.
 
 3. Fable-Mode Behavior Profile
 - Toggle in per-harness extras for coding harnesses only.

@@ -609,7 +609,9 @@ function buildCapabilitySummary(state: SystemState, harnessId: string): string {
 
   if (capabilities.openDesign.enabled) {
     lines.push("- Open Design workflow enabled for this coding harness.");
-    lines.push("- Prefer design-system-aware planning, component structure, and visual workflow handoff when the task involves UI or product design work.");
+    lines.push("- Only apply Open Design guidance when the user's task is about UI, UX, layout, styling, components, theming, branding, or design-system work.");
+    lines.push("- For those UI/design tasks, prefer design-system-aware planning, component structure, visual hierarchy, states, responsiveness, and implementation handoff.");
+    lines.push("- If the task is not UI/design related, ignore Open Design and proceed normally.");
   } else {
     lines.push("- Open Design workflow disabled for this harness.");
   }

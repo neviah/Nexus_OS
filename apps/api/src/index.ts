@@ -45,11 +45,9 @@ import {
   getRuntimeStatus,
   installAceJam,
   installDefaultPiperVoice,
-  installFreebuff,
   installOllama,
   installPiper,
   pullOllamaModel,
-  resolveFreebuffCommand,
   startAceJamIfNeeded,
   startOllamaIfNeeded,
   synthesizeWithPiper,
@@ -89,8 +87,7 @@ type RuntimeJobAction =
   | "install-piper"
   | "install-default-piper-voice"
   | "install-acejam"
-  | "start-acejam"
-  | "install-freebuff";
+  | "start-acejam";
 
 type RuntimeJob = {
   id: string;
@@ -262,7 +259,7 @@ function scheduleRuntimeJobPersist(): void {
 }
 
 function shouldAutoRetryRuntimeJob(job: RuntimeJob): boolean {
-  return ["install-ollama", "install-piper", "install-default-piper-voice", "install-acejam", "install-freebuff"].includes(job.action);
+  return ["install-ollama", "install-piper", "install-default-piper-voice", "install-acejam"].includes(job.action);
 }
 
 function runtimeJobRetryDepth(job: RuntimeJob): number {
@@ -631,15 +628,6 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
     appendRuntimeJobLog(job, "Starting AceJAM service...");
     await startAceJamIfNeeded();
     appendRuntimeJobLog(job, "AceJAM is running.");
-    return;
-  }
-
-  if (job.action === "install-freebuff") {
-    ensureRuntimeJobNotCanceled(job);
-    appendRuntimeJobLog(job, "Installing Freebuff runtime...");
-    await installFreebuff();
-    const command = await resolveFreebuffCommand();
-    appendRuntimeJobLog(job, command ? `Freebuff available via ${command}.` : "Freebuff install completed.");
     return;
   }
 
@@ -1813,6 +1801,7 @@ app.get("/api/bootstrap", async (_req, res) => {
     runtimeStatus,
     managedStatuses: getManagedHarnessRuntimeStatus(),
   });
+  const harnessIds = new Set(harnessStatus.map((harness) => harness.id));
   const selectedPane = state.selectedPane.id === "9router"
     ? { type: "tool" as const, id: "nexus-router" }
     : (state.selectedPane.id === "voice-studio"
@@ -1820,6 +1809,8 @@ app.get("/api/bootstrap", async (_req, res) => {
       || state.selectedPane.id === "image-generator"
       || state.selectedPane.id === "video-generator")
       ? { type: "tool" as const, id: "media-center" }
+      : (state.selectedPane.type === "agent" && !harnessIds.has(state.selectedPane.id))
+        ? { type: "agent" as const, id: harnessStatus[0]?.id ?? "hermes" }
       : state.selectedPane;
 
   const mediaCenterStatus: "online" | "offline" | "setup-required" = !stableAudioStatus.installed || !localImageStatus.ready
@@ -1932,7 +1923,7 @@ app.post("/api/tools/runtimes/jobs/:jobId/retry", async (req, res) => {
 });
 
 app.post("/api/tools/runtimes/install", async (req, res) => {
-  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" | "freebuff" };
+  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" };
   try {
     if (body.runtime === "ollama") {
       await installOllama();
@@ -1943,8 +1934,6 @@ app.post("/api/tools/runtimes/install", async (req, res) => {
       await installPiper();
     } else if (body.runtime === "default-piper-voice") {
       await installDefaultPiperVoice();
-    } else if (body.runtime === "freebuff") {
-      await installFreebuff();
     } else {
       return res.status(400).json({ error: "Unknown runtime target" });
     }
@@ -2813,6 +2802,9 @@ app.put("/api/harnesses/:harnessId/capabilities", async (req, res) => {
     fableMode?: {
       enabled?: boolean;
     };
+    openDesign?: {
+      enabled?: boolean;
+    };
     crawl4ai?: {
       enabled?: boolean;
       allowedDomains?: string[];
@@ -2831,6 +2823,7 @@ app.put("/api/harnesses/:harnessId/capabilities", async (req, res) => {
   const state = await readSystemState();
   const capabilities = updateHarnessCapabilities(state, harnessId, {
     fableMode: body.fableMode,
+    openDesign: body.openDesign,
     crawl4ai: body.crawl4ai,
     officeCli: body.officeCli,
   });
@@ -2847,7 +2840,6 @@ app.get("/api/tools/web-capabilities/diagnostics", async (_req, res) => {
   const probes = {
     crawl4ai: { available: false, command: "", details: "" },
     officecli: { available: false, command: "", details: "" },
-    freebuff: { available: false, command: "", details: "" },
   };
 
   const probeCandidates: Array<{ key: keyof typeof probes; command: string; args: string[] }> = [
@@ -2856,8 +2848,6 @@ app.get("/api/tools/web-capabilities/diagnostics", async (_req, res) => {
     { key: "crawl4ai", command: "py", args: ["-m", "crawl4ai", "--help"] },
     { key: "officecli", command: "officecli", args: ["--help"] },
     { key: "officecli", command: "office", args: ["--help"] },
-    { key: "freebuff", command: "freebuff", args: ["--help"] },
-    { key: "freebuff", command: "npx", args: ["-y", "freebuff", "--help"] },
   ];
 
   for (const probe of probeCandidates) {
