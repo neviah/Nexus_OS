@@ -517,13 +517,6 @@ type ProviderCatalogEntry = {
   notes: string;
 };
 
-type RouterFallbackTemplate = {
-  id: string;
-  label: string;
-  description: string;
-  targets: Array<{ providerId: string; model: string }>;
-};
-
 type HarnessCapabilitySettings = {
   fableMode: {
     enabled: boolean;
@@ -1308,10 +1301,6 @@ function App() {
 
   // Nexus Router state
   const [nxProviders, setNxProviders] = useState<NxProvider[]>([]);
-  const [nxCatalog, setNxCatalog] = useState<ProviderCatalogEntry[]>(DEFAULT_PROVIDER_PRESETS);
-  const [nxTemplates, setNxTemplates] = useState<RouterFallbackTemplate[]>([]);
-  const [nxCatalogTier, setNxCatalogTier] = useState<"all" | "free" | "mixed" | "paid">("all");
-  const [nxCatalogSearch, setNxCatalogSearch] = useState("");
   const [nxProviderForm, setNxProviderForm] = useState({ preset: "openrouter", id: "openrouter", name: "OpenRouter", type: "openrouter" as NxProvider["type"], baseUrl: "https://openrouter.ai/api/v1", apiKey: "", defaultModel: "openai/gpt-4.1-mini", enabled: true });
   const [nxSaving, setNxSaving] = useState(false);
   const [nxSyncingId, setNxSyncingId] = useState<string | null>(null);
@@ -1759,7 +1748,6 @@ function App() {
     await loadFailedTasks();
     await loadLastStartupCheck();
     await loadNxRouter();
-    await loadRouterTemplates();
     await loadOfficePresets();
     await loadVoiceAssignments();
     setStatusMessage(payload.onboardingRequired ? "First run: Add a provider in Nexus Router to get started." : "Ready");
@@ -1794,33 +1782,6 @@ function App() {
         setNxConsoleLogs(data.logs);
       }
     } catch { /* silent */ }
-  }
-
-  async function loadProviderCatalog() {
-    const query = new URLSearchParams();
-    if (nxCatalogTier !== "all") {
-      query.set("tier", nxCatalogTier);
-    }
-    if (nxCatalogSearch.trim()) {
-      query.set("search", nxCatalogSearch.trim());
-    }
-
-    const response = await fetch(`/api/router/catalog${query.toString() ? `?${query.toString()}` : ""}`);
-    if (!response.ok) {
-      return;
-    }
-
-    const payload = (await response.json()) as { providers?: ProviderCatalogEntry[] };
-    setNxCatalog(payload.providers?.length ? payload.providers : DEFAULT_PROVIDER_PRESETS);
-  }
-
-  async function loadRouterTemplates() {
-    const response = await fetch("/api/router/templates");
-    if (!response.ok) {
-      return;
-    }
-    const payload = (await response.json()) as { templates?: RouterFallbackTemplate[] };
-    setNxTemplates(payload.templates ?? []);
   }
 
   async function loadOfficePresets() {
@@ -2052,12 +2013,6 @@ function App() {
     void loadWebCapabilityDiagnostics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rightTab]);
-
-  useEffect(() => {
-    void loadProviderCatalog();
-    void loadRouterTemplates();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nxCatalogTier, nxCatalogSearch]);
 
   useEffect(() => {
     if (selectedPane.type !== "agent") {
@@ -3095,53 +3050,7 @@ function App() {
 
               {/* ── Provider Form ── */}
               <section className="nxr-section">
-                <h3>Add / Update Provider</h3>
-                <div className="nxr-catalog-controls">
-                  <label>
-                    Catalog Tier
-                    <select value={nxCatalogTier} onChange={(event) => setNxCatalogTier(event.target.value as "all" | "free" | "mixed" | "paid")}>
-                      <option value="all">All</option>
-                      <option value="free">Free</option>
-                      <option value="mixed">Mixed</option>
-                      <option value="paid">Paid</option>
-                    </select>
-                  </label>
-                  <label>
-                    Search Catalog
-                    <input type="text" value={nxCatalogSearch} onChange={(event) => setNxCatalogSearch(event.target.value)} placeholder="openrouter, groq, local..." />
-                  </label>
-                </div>
-                <div className="nxr-catalog-list">
-                  {nxCatalog.slice(0, 5).map((entry) => (
-                    <article key={entry.id} className="nxr-catalog-card">
-                      <div className="nxr-catalog-head">
-                        <strong>{entry.name}</strong>
-                        <span>{entry.tier} · health {entry.healthScore}</span>
-                      </div>
-                      <p>{entry.notes}</p>
-                      <small>{entry.quotaNotes}</small>
-                      <small>{entry.rateLimitNotes}</small>
-                    </article>
-                  ))}
-                </div>
-                {nxTemplates.length > 0 ? (
-                  <div className="nxr-template-list">
-                    <h4>Quick Fallback Templates</h4>
-                    <div className="tool-action-row tool-wrap-row">
-                      {nxTemplates.map((template) => (
-                        <button
-                          key={template.id}
-                          type="button"
-                          className="ghost"
-                          onClick={() => setNxFallbackRows(template.targets.map((target) => createFallbackRow(target)))}
-                          title={template.description}
-                        >
-                          {template.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
+                <h3>Provider Setup</h3>
                 <form className="nxr-provider-form" onSubmit={(event) => void nxSaveProvider(event)}>
                   <label>
                     Preset
@@ -3149,11 +3058,11 @@ function App() {
                       <select
                         value={nxProviderForm.preset}
                         onChange={(event) => {
-                          const preset = nxCatalog.find((p) => p.id === event.target.value) ?? nxCatalog[0] ?? DEFAULT_PROVIDER_PRESETS[0];
+                          const preset = DEFAULT_PROVIDER_PRESETS.find((p) => p.id === event.target.value) ?? DEFAULT_PROVIDER_PRESETS[0];
                           setNxProviderForm((c) => ({ ...c, preset: preset.id, id: preset.id, name: preset.name, type: preset.type, baseUrl: preset.baseUrl, defaultModel: preset.defaultModel }));
                         }}
                       >
-                        {nxCatalog.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        {DEFAULT_PROVIDER_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                       </select>
                       {getProviderApiKeyUrl({ id: nxProviderForm.id, name: nxProviderForm.name, baseUrl: nxProviderForm.baseUrl }) ? (
                         <button
