@@ -71,6 +71,8 @@ import {
   upsertHarnessThread,
 } from "./lib/harnessChats.js";
 import { generateLocalImageStreaming, getLocalImageStatus } from "./lib/localImageGenerator.js";
+import { listProviderCatalog } from "./lib/providerCatalog.js";
+import { getHarnessCapabilities, updateHarnessCapabilities } from "./lib/harnessCapabilities.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -145,6 +147,38 @@ type WorkspaceWriteAction = {
   path: string;
   content: string;
 };
+
+async function resolveWorkspacePathFromState(state: SystemState, workspaceId?: string): Promise<string> {
+  const resolvedId = String(workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
+  const workspace = await getWorkspaceById(resolvedId);
+  if (!workspace) {
+    throw new Error(`Workspace not found: ${resolvedId}`);
+  }
+  return workspace.path;
+}
+
+function safeWorkspaceJoin(workspacePath: string, relativePath: string): string {
+  const normalized = path.normalize(relativePath).replace(/^([/\\])+/, "");
+  const absolute = path.resolve(workspacePath, normalized);
+  const rel = path.relative(workspacePath, absolute);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error("Path escapes active workspace");
+  }
+  return absolute;
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function extractDomain(urlValue: string): string {
+  return new URL(urlValue).hostname.toLowerCase();
+}
 
 function toRuntimeJobPayload(limit = 80): RuntimeJob[] {
   return Array.from(runtimeJobs.values())
@@ -2382,6 +2416,14 @@ app.get("/api/router/providers", async (_req, res) => {
   res.json({ providers: getRouterProviders(state) });
 });
 
+app.get("/api/router/catalog", (_req, res) => {
+  const tier = String(_req.query.tier ?? "").trim();
+  const search = String(_req.query.search ?? "").trim();
+  res.json({
+    providers: listProviderCatalog({ tier, search }),
+  });
+});
+
 app.post("/api/router/providers", async (req, res) => {
   const body = req.body as {
     id?: string;
@@ -2494,6 +2536,211 @@ app.post("/api/router/chat", async (req, res) => {
     await writeSystemState(state);
     return res.status(502).json({ error: String(error) });
   }
+});
+
+app.get("/api/harnesses/:harnessId/capabilities", async (req, res) => {
+  const { harnessId } = req.params;
+  const state = await readSystemState();
+  const capabilities = getHarnessCapabilities(state, harnessId);
+  await writeSystemState(state);
+  return res.json({ harnessId, capabilities });
+});
+
+app.put("/api/harnesses/:harnessId/capabilities", async (req, res) => {
+  const { harnessId } = req.params;
+  const body = req.body as {
+    crawl4ai?: {
+      enabled?: boolean;
+      allowedDomains?: string[];
+      allowExternalDomains?: boolean;
+      obeyRobotsTxt?: boolean;
+      maxPages?: number;
+      timeoutMs?: number;
+    };
+    officeCli?: {
+      enabled?: boolean;
+      allowedExtensions?: string[];
+      maxFileSizeMb?: number;
+    };
+  };
+
+  const state = await readSystemState();
+  const capabilities = updateHarnessCapabilities(state, harnessId, {
+    crawl4ai: body.crawl4ai,
+    officeCli: body.officeCli,
+  });
+  await writeSystemState(state);
+  return res.json({ ok: true, harnessId, capabilities });
+});
+
+app.post("/api/tools/crawl4ai/run", async (req, res) => {
+  const body = req.body as {
+    harnessId?: string;
+    url?: string;
+    workspaceId?: string;
+    maxPages?: number;
+  };
+
+  const harnessId = String(body.harnessId ?? "").trim();
+  const targetUrl = String(body.url ?? "").trim();
+  if (!harnessId || !targetUrl) {
+    return res.status(400).json({ error: "harnessId and url are required" });
+  }
+  if (!isHttpUrl(targetUrl)) {
+    return res.status(400).json({ error: "url must be an http(s) URL" });
+  }
+
+  const state = await readSystemState();
+  const capabilities = getHarnessCapabilities(state, harnessId);
+  if (!capabilities.crawl4ai.enabled) {
+    return res.status(403).json({ error: "Crawl4AI is disabled for this harness" });
+  }
+
+  const domain = extractDomain(targetUrl);
+  const inAllowList = capabilities.crawl4ai.allowedDomains.includes(domain);
+  if (!capabilities.crawl4ai.allowExternalDomains && capabilities.crawl4ai.allowedDomains.length > 0 && !inAllowList) {
+    return res.status(403).json({ error: `Domain ${domain} is not in this harness allowlist` });
+  }
+
+  let workspacePath = "";
+  try {
+    workspacePath = await resolveWorkspacePathFromState(state, body.workspaceId);
+  } catch (error) {
+    return res.status(400).json({ error: String(error) });
+  }
+
+  const outputFile = path.join(workspacePath, `crawl4ai-${Date.now()}.json`);
+  const maxPages = Math.max(1, Math.min(Number(body.maxPages ?? capabilities.crawl4ai.maxPages), capabilities.crawl4ai.maxPages));
+
+  const commandCandidates: Array<{ cmd: string; args: string[] }> = [
+    {
+      cmd: "crawl4ai",
+      args: ["crawl", targetUrl, "--max-pages", String(maxPages), "--output", outputFile],
+    },
+    {
+      cmd: "python",
+      args: ["-m", "crawl4ai", "crawl", targetUrl, "--max-pages", String(maxPages), "--output", outputFile],
+    },
+    {
+      cmd: "py",
+      args: ["-m", "crawl4ai", "crawl", targetUrl, "--max-pages", String(maxPages), "--output", outputFile],
+    },
+  ];
+
+  let lastError = "";
+  for (const candidate of commandCandidates) {
+    try {
+      const { stdout, stderr } = await execFileAsync(candidate.cmd, candidate.args, {
+        cwd: workspacePath,
+        timeout: capabilities.crawl4ai.timeoutMs,
+      });
+
+      const preview = await fs.readFile(outputFile, "utf-8").catch(() => "");
+      return res.json({
+        ok: true,
+        harnessId,
+        url: targetUrl,
+        outputFile,
+        domain,
+        command: [candidate.cmd, ...candidate.args].join(" "),
+        stdout,
+        stderr,
+        preview: preview.slice(0, 60_000),
+      });
+    } catch (error) {
+      lastError = String(error);
+    }
+  }
+
+  return res.status(502).json({
+    error: "Crawl4AI command failed. Install crawl4ai in your local Python environment or add crawl4ai to PATH.",
+    details: lastError,
+  });
+});
+
+app.post("/api/tools/officecli/run", async (req, res) => {
+  const body = req.body as {
+    harnessId?: string;
+    workspaceId?: string;
+    args?: string[];
+    file?: string;
+  };
+
+  const harnessId = String(body.harnessId ?? "").trim();
+  if (!harnessId) {
+    return res.status(400).json({ error: "harnessId is required" });
+  }
+
+  const state = await readSystemState();
+  const capabilities = getHarnessCapabilities(state, harnessId);
+  if (!capabilities.officeCli.enabled) {
+    return res.status(403).json({ error: "OfficeCLI is disabled for this harness" });
+  }
+
+  let workspacePath = "";
+  try {
+    workspacePath = await resolveWorkspacePathFromState(state, body.workspaceId);
+  } catch (error) {
+    return res.status(400).json({ error: String(error) });
+  }
+
+  const args = Array.isArray(body.args) ? body.args.map((entry) => String(entry)) : [];
+  const filePathRaw = String(body.file ?? "").trim();
+  if (!filePathRaw) {
+    return res.status(400).json({ error: "file is required (workspace-relative path)" });
+  }
+
+  let absoluteFilePath = "";
+  try {
+    absoluteFilePath = safeWorkspaceJoin(workspacePath, filePathRaw);
+  } catch (error) {
+    return res.status(400).json({ error: String(error) });
+  }
+
+  const extension = path.extname(absoluteFilePath).toLowerCase();
+  if (!capabilities.officeCli.allowedExtensions.includes(extension)) {
+    return res.status(403).json({ error: `Extension ${extension || "(none)"} is blocked for this harness` });
+  }
+
+  const stat = await fs.stat(absoluteFilePath).catch(() => null);
+  if (!stat) {
+    return res.status(404).json({ error: "file does not exist in workspace" });
+  }
+
+  const maxBytes = capabilities.officeCli.maxFileSizeMb * 1024 * 1024;
+  if (stat.size > maxBytes) {
+    return res.status(413).json({ error: `file exceeds maxFileSizeMb (${capabilities.officeCli.maxFileSizeMb} MB)` });
+  }
+
+  const commandCandidates: Array<{ cmd: string; args: string[] }> = [
+    { cmd: "officecli", args: [...args, absoluteFilePath] },
+    { cmd: "office", args: [...args, absoluteFilePath] },
+  ];
+
+  let lastError = "";
+  for (const candidate of commandCandidates) {
+    try {
+      const { stdout, stderr } = await execFileAsync(candidate.cmd, candidate.args, {
+        cwd: workspacePath,
+        timeout: 120000,
+      });
+      return res.json({
+        ok: true,
+        harnessId,
+        file: filePathRaw,
+        command: [candidate.cmd, ...candidate.args].join(" "),
+        stdout,
+        stderr,
+      });
+    } catch (error) {
+      lastError = String(error);
+    }
+  }
+
+  return res.status(502).json({
+    error: "OfficeCLI command failed. Install officecli and ensure it is available on PATH.",
+    details: lastError,
+  });
 });
 
 app.get("/api/harnesses/:harnessId/chats", async (req, res) => {

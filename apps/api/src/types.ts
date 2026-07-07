@@ -85,6 +85,23 @@ export type SystemState = {
   };
   harnessAutomation?: HarnessAutomationStore;
   harnessChats?: HarnessChatStore;
+  harnessCapabilities?: Record<string, HarnessCapabilitySettings>;
+};
+
+export type HarnessCapabilitySettings = {
+  crawl4ai: {
+    enabled: boolean;
+    allowedDomains: string[];
+    allowExternalDomains: boolean;
+    obeyRobotsTxt: boolean;
+    maxPages: number;
+    timeoutMs: number;
+  };
+  officeCli: {
+    enabled: boolean;
+    allowedExtensions: string[];
+    maxFileSizeMb: number;
+  };
 };
 
 export type NexusRouterProvider = {

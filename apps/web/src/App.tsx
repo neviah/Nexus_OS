@@ -428,17 +428,44 @@ type NxFallbackRow = {
   model: string;
 };
 
-const PRESET_PROVIDERS: Array<{ id: string; name: string; type: NxProvider["type"]; baseUrl: string; defaultModel: string }> = [
-  { id: "openrouter", name: "OpenRouter", type: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "openai/gpt-4.1-mini" },
-  { id: "openai", name: "OpenAI", type: "openai-compatible", baseUrl: "https://api.openai.com/v1", defaultModel: "gpt-4.1-mini" },
-  { id: "iflow", name: "iFlow AI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "iflow/default" },
-  { id: "qwencode", name: "Qwen Code (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "qwencode/default" },
-  { id: "gemini-cli", name: "Gemini CLI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "gemini-cli/default" },
-  { id: "kiro-ai", name: "Kiro AI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "kiro-ai/default" },
-  { id: "anthropic-compat", name: "Anthropic (via OpenRouter)", type: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "anthropic/claude-sonnet-4-5" },
-  { id: "together", name: "Together AI", type: "openai-compatible", baseUrl: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3-8b-chat-hf" },
-  { id: "groq", name: "Groq", type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama3-8b-8192" },
-  { id: "custom", name: "Custom / Local", type: "openai-compatible", baseUrl: "http://localhost:11434/v1", defaultModel: "llama3" },
+type ProviderCatalogEntry = {
+  id: string;
+  name: string;
+  type: NxProvider["type"];
+  baseUrl: string;
+  defaultModel: string;
+  tier: "free" | "paid" | "mixed";
+  tags: string[];
+  notes: string;
+};
+
+type HarnessCapabilitySettings = {
+  crawl4ai: {
+    enabled: boolean;
+    allowedDomains: string[];
+    allowExternalDomains: boolean;
+    obeyRobotsTxt: boolean;
+    maxPages: number;
+    timeoutMs: number;
+  };
+  officeCli: {
+    enabled: boolean;
+    allowedExtensions: string[];
+    maxFileSizeMb: number;
+  };
+};
+
+const DEFAULT_PROVIDER_PRESETS: Array<{ id: string; name: string; type: NxProvider["type"]; baseUrl: string; defaultModel: string; tier: "free" | "paid" | "mixed"; tags: string[]; notes: string }> = [
+  { id: "openrouter", name: "OpenRouter", type: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "openai/gpt-4.1-mini", tier: "mixed", tags: ["multi-provider"], notes: "Large model marketplace." },
+  { id: "openai", name: "OpenAI", type: "openai-compatible", baseUrl: "https://api.openai.com/v1", defaultModel: "gpt-4.1-mini", tier: "paid", tags: ["reliable"], notes: "Direct OpenAI endpoint." },
+  { id: "iflow", name: "iFlow AI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "iflow/default", tier: "free", tags: ["local-gateway"], notes: "Local free profile." },
+  { id: "qwencode", name: "Qwen Code (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "qwencode/default", tier: "free", tags: ["coding"], notes: "Local coding profile." },
+  { id: "gemini-cli", name: "Gemini CLI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "gemini-cli/default", tier: "free", tags: ["general"], notes: "Local Gemini profile." },
+  { id: "kiro-ai", name: "Kiro AI (free)", type: "openai-compatible", baseUrl: "http://localhost:20128/v1", defaultModel: "kiro-ai/default", tier: "free", tags: ["assistant"], notes: "Local assistant profile." },
+  { id: "anthropic-compat", name: "Anthropic (via OpenRouter)", type: "openrouter", baseUrl: "https://openrouter.ai/api/v1", defaultModel: "anthropic/claude-sonnet-4-5", tier: "paid", tags: ["claude"], notes: "Anthropic via OpenRouter." },
+  { id: "together", name: "Together AI", type: "openai-compatible", baseUrl: "https://api.together.xyz/v1", defaultModel: "meta-llama/Llama-3-8b-chat-hf", tier: "mixed", tags: ["open-models"], notes: "Open model API." },
+  { id: "groq", name: "Groq", type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", defaultModel: "llama3-8b-8192", tier: "mixed", tags: ["low-latency"], notes: "Fast inference endpoint." },
+  { id: "custom", name: "Custom / Local", type: "openai-compatible", baseUrl: "http://localhost:11434/v1", defaultModel: "llama3", tier: "free", tags: ["self-hosted"], notes: "Bring your own endpoint." },
 ];
 
 const PROVIDER_API_KEY_LINKS: Record<string, string> = {
@@ -1172,6 +1199,9 @@ function App() {
 
   // Nexus Router state
   const [nxProviders, setNxProviders] = useState<NxProvider[]>([]);
+  const [nxCatalog, setNxCatalog] = useState<ProviderCatalogEntry[]>(DEFAULT_PROVIDER_PRESETS);
+  const [nxCatalogTier, setNxCatalogTier] = useState<"all" | "free" | "mixed" | "paid">("all");
+  const [nxCatalogSearch, setNxCatalogSearch] = useState("");
   const [nxProviderForm, setNxProviderForm] = useState({ preset: "openrouter", id: "openrouter", name: "OpenRouter", type: "openrouter" as NxProvider["type"], baseUrl: "https://openrouter.ai/api/v1", apiKey: "", defaultModel: "openai/gpt-4.1-mini", enabled: true });
   const [nxSaving, setNxSaving] = useState(false);
   const [nxSyncingId, setNxSyncingId] = useState<string | null>(null);
@@ -1183,6 +1213,9 @@ function App() {
   const [nxTestResult, setNxTestResult] = useState<{ content: string; model: string; providerId: string; elapsedMs: number; attempts: Array<{ providerId: string; model: string; status: string; details: string }> } | null>(null);
   const [nxTestBusy, setNxTestBusy] = useState(false);
   const [nxConsoleLogs, setNxConsoleLogs] = useState<Array<{ timestamp: string; level: string; message: string }>>([]);
+  const [harnessCapabilitiesByHarness, setHarnessCapabilitiesByHarness] = useState<Record<string, HarnessCapabilitySettings>>({});
+  const [harnessExtrasOpenByHarness, setHarnessExtrasOpenByHarness] = useState<Record<string, boolean>>({});
+  const [harnessCapabilitySavingId, setHarnessCapabilitySavingId] = useState<string | null>(null);
   const nxAutoSyncStarted = useRef(false);
 
   const activeHarness = useMemo(
@@ -1426,6 +1459,31 @@ function App() {
     return { providerId: trimmedProvider, model };
   }
 
+  function defaultHarnessCapabilities(): HarnessCapabilitySettings {
+    return {
+      crawl4ai: {
+        enabled: false,
+        allowedDomains: [],
+        allowExternalDomains: false,
+        obeyRobotsTxt: true,
+        maxPages: 8,
+        timeoutMs: 45000,
+      },
+      officeCli: {
+        enabled: false,
+        allowedExtensions: [".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv", ".json"],
+        maxFileSizeMb: 32,
+      },
+    };
+  }
+
+  function parseCommaList(value: string): string[] {
+    return value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
   function recommendationSymbol(recommendation: CookbookRecommendation): string {
     if (recommendation.category === "coding") return "</>";
     if (recommendation.category === "chat") return "[]";
@@ -1570,6 +1628,55 @@ function App() {
     } catch { /* silent */ }
   }
 
+  async function loadProviderCatalog() {
+    const query = new URLSearchParams();
+    if (nxCatalogTier !== "all") {
+      query.set("tier", nxCatalogTier);
+    }
+    if (nxCatalogSearch.trim()) {
+      query.set("search", nxCatalogSearch.trim());
+    }
+
+    const response = await fetch(`/api/router/catalog${query.toString() ? `?${query.toString()}` : ""}`);
+    if (!response.ok) {
+      return;
+    }
+
+    const payload = (await response.json()) as { providers?: ProviderCatalogEntry[] };
+    setNxCatalog(payload.providers?.length ? payload.providers : DEFAULT_PROVIDER_PRESETS);
+  }
+
+  async function loadHarnessCapabilities(harnessId: string) {
+    const response = await fetch(`/api/harnesses/${encodeURIComponent(harnessId)}/capabilities`);
+    if (!response.ok) {
+      return;
+    }
+
+    const payload = (await response.json()) as { capabilities: HarnessCapabilitySettings };
+    setHarnessCapabilitiesByHarness((current) => ({
+      ...current,
+      [harnessId]: payload.capabilities ?? defaultHarnessCapabilities(),
+    }));
+  }
+
+  async function saveHarnessCapabilities(harnessId: string) {
+    const capabilities = harnessCapabilitiesByHarness[harnessId] ?? defaultHarnessCapabilities();
+    setHarnessCapabilitySavingId(harnessId);
+    const response = await fetch(`/api/harnesses/${encodeURIComponent(harnessId)}/capabilities`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(capabilities),
+    });
+    if (!response.ok) {
+      setStatusMessage("Failed to save harness extra settings.");
+      pushToast("Harness settings save failed.", "err");
+    } else {
+      setStatusMessage("Harness extra settings saved.");
+      pushToast("Harness settings saved.", "ok");
+    }
+    setHarnessCapabilitySavingId(null);
+  }
+
   useEffect(() => {
     if (nxAutoSyncStarted.current || nxProviders.length === 0) {
       return;
@@ -1701,6 +1808,19 @@ function App() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadBootstrap();
   }, [loadBootstrap]);
+
+  useEffect(() => {
+    void loadProviderCatalog();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nxCatalogTier, nxCatalogSearch]);
+
+  useEffect(() => {
+    if (selectedPane.type !== "agent") {
+      return;
+    }
+    void loadHarnessCapabilities(selectedPane.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPane.type, selectedPane.id]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", themeId);
@@ -2602,6 +2722,12 @@ function App() {
   const activeHarnessDraft = selectedPane.type === "agent"
     ? getScheduleDraft(selectedPane.id)
     : { title: "", prompt: "", intervalMinutes: 30 };
+  const activeHarnessCapabilities = selectedPane.type === "agent"
+    ? (harnessCapabilitiesByHarness[selectedPane.id] ?? defaultHarnessCapabilities())
+    : defaultHarnessCapabilities();
+  const activeHarnessExtrasOpen = selectedPane.type === "agent"
+    ? Boolean(harnessExtrasOpenByHarness[selectedPane.id])
+    : false;
 
   return (
     <main className="app-shell">
@@ -2719,6 +2845,21 @@ function App() {
               {/* ── Provider Form ── */}
               <section className="nxr-section">
                 <h3>Add / Update Provider</h3>
+                <div className="nxr-catalog-controls">
+                  <label>
+                    Catalog Tier
+                    <select value={nxCatalogTier} onChange={(event) => setNxCatalogTier(event.target.value as "all" | "free" | "mixed" | "paid")}>
+                      <option value="all">All</option>
+                      <option value="free">Free</option>
+                      <option value="mixed">Mixed</option>
+                      <option value="paid">Paid</option>
+                    </select>
+                  </label>
+                  <label>
+                    Search Catalog
+                    <input type="text" value={nxCatalogSearch} onChange={(event) => setNxCatalogSearch(event.target.value)} placeholder="openrouter, groq, local..." />
+                  </label>
+                </div>
                 <form className="nxr-provider-form" onSubmit={(event) => void nxSaveProvider(event)}>
                   <label>
                     Preset
@@ -2726,11 +2867,11 @@ function App() {
                       <select
                         value={nxProviderForm.preset}
                         onChange={(event) => {
-                          const preset = PRESET_PROVIDERS.find((p) => p.id === event.target.value) ?? PRESET_PROVIDERS[0];
+                          const preset = nxCatalog.find((p) => p.id === event.target.value) ?? nxCatalog[0] ?? DEFAULT_PROVIDER_PRESETS[0];
                           setNxProviderForm((c) => ({ ...c, preset: preset.id, id: preset.id, name: preset.name, type: preset.type, baseUrl: preset.baseUrl, defaultModel: preset.defaultModel }));
                         }}
                       >
-                        {PRESET_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        {nxCatalog.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                       </select>
                       {getProviderApiKeyUrl({ id: nxProviderForm.id, name: nxProviderForm.name, baseUrl: nxProviderForm.baseUrl }) ? (
                         <button
@@ -3956,6 +4097,228 @@ function App() {
                       >
                         failed tasks: {failedTasks.length}
                       </button>
+                      {selectedPane.type === "agent" ? (
+                        <div className="harness-extras-wrap">
+                          <button
+                            type="button"
+                            className="ghost chip-button"
+                            onClick={() => setHarnessExtrasOpenByHarness((current) => ({
+                              ...current,
+                              [selectedPane.id]: !current[selectedPane.id],
+                            }))}
+                          >
+                            ⚙ extras
+                          </button>
+                          {activeHarnessExtrasOpen ? (
+                            <div className="harness-extras-popover drop-up">
+                              <strong>Extra Settings · {activeHarness?.name ?? selectedPane.id}</strong>
+                              <small>Per-harness opt-in controls for Crawl4AI and OfficeCLI.</small>
+
+                              <label className="extras-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={activeHarnessCapabilities.crawl4ai.enabled}
+                                  onChange={(event) => setHarnessCapabilitiesByHarness((current) => ({
+                                    ...current,
+                                    [selectedPane.id]: {
+                                      ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                      crawl4ai: {
+                                        ...(current[selectedPane.id]?.crawl4ai ?? defaultHarnessCapabilities().crawl4ai),
+                                        enabled: event.target.checked,
+                                      },
+                                    },
+                                  }))}
+                                />
+                                <span>Crawl4AI Enabled</span>
+                              </label>
+                              <label>
+                                Allowed Domains (csv)
+                                <input
+                                  type="text"
+                                  value={activeHarnessCapabilities.crawl4ai.allowedDomains.join(", ")}
+                                  onChange={(event) => {
+                                    const domains = parseCommaList(event.target.value).map((entry) => entry.toLowerCase());
+                                    setHarnessCapabilitiesByHarness((current) => ({
+                                      ...current,
+                                      [selectedPane.id]: {
+                                        ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                        crawl4ai: {
+                                          ...(current[selectedPane.id]?.crawl4ai ?? defaultHarnessCapabilities().crawl4ai),
+                                          allowedDomains: domains,
+                                        },
+                                      },
+                                    }));
+                                  }}
+                                  placeholder="example.com, docs.example.com"
+                                />
+                              </label>
+                              <div className="extras-inline-grid">
+                                <label className="extras-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={activeHarnessCapabilities.crawl4ai.allowExternalDomains}
+                                    onChange={(event) => setHarnessCapabilitiesByHarness((current) => ({
+                                      ...current,
+                                      [selectedPane.id]: {
+                                        ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                        crawl4ai: {
+                                          ...(current[selectedPane.id]?.crawl4ai ?? defaultHarnessCapabilities().crawl4ai),
+                                          allowExternalDomains: event.target.checked,
+                                        },
+                                      },
+                                    }))}
+                                  />
+                                  <span>Allow External Domains</span>
+                                </label>
+                                <label className="extras-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={activeHarnessCapabilities.crawl4ai.obeyRobotsTxt}
+                                    onChange={(event) => setHarnessCapabilitiesByHarness((current) => ({
+                                      ...current,
+                                      [selectedPane.id]: {
+                                        ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                        crawl4ai: {
+                                          ...(current[selectedPane.id]?.crawl4ai ?? defaultHarnessCapabilities().crawl4ai),
+                                          obeyRobotsTxt: event.target.checked,
+                                        },
+                                      },
+                                    }))}
+                                  />
+                                  <span>Obey robots.txt</span>
+                                </label>
+                              </div>
+                              <div className="extras-inline-grid">
+                                <label>
+                                  Max Pages
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    max={200}
+                                    value={activeHarnessCapabilities.crawl4ai.maxPages}
+                                    onChange={(event) => {
+                                      const next = Number(event.target.value) || 1;
+                                      setHarnessCapabilitiesByHarness((current) => ({
+                                        ...current,
+                                        [selectedPane.id]: {
+                                          ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                          crawl4ai: {
+                                            ...(current[selectedPane.id]?.crawl4ai ?? defaultHarnessCapabilities().crawl4ai),
+                                            maxPages: Math.max(1, Math.min(200, next)),
+                                          },
+                                        },
+                                      }));
+                                    }}
+                                  />
+                                </label>
+                                <label>
+                                  Timeout (ms)
+                                  <input
+                                    type="number"
+                                    min={1000}
+                                    max={180000}
+                                    step={1000}
+                                    value={activeHarnessCapabilities.crawl4ai.timeoutMs}
+                                    onChange={(event) => {
+                                      const next = Number(event.target.value) || 1000;
+                                      setHarnessCapabilitiesByHarness((current) => ({
+                                        ...current,
+                                        [selectedPane.id]: {
+                                          ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                          crawl4ai: {
+                                            ...(current[selectedPane.id]?.crawl4ai ?? defaultHarnessCapabilities().crawl4ai),
+                                            timeoutMs: Math.max(1000, Math.min(180000, next)),
+                                          },
+                                        },
+                                      }));
+                                    }}
+                                  />
+                                </label>
+                              </div>
+
+                              <label className="extras-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={activeHarnessCapabilities.officeCli.enabled}
+                                  onChange={(event) => setHarnessCapabilitiesByHarness((current) => ({
+                                    ...current,
+                                    [selectedPane.id]: {
+                                      ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                      officeCli: {
+                                        ...(current[selectedPane.id]?.officeCli ?? defaultHarnessCapabilities().officeCli),
+                                        enabled: event.target.checked,
+                                      },
+                                    },
+                                  }))}
+                                />
+                                <span>OfficeCLI Enabled</span>
+                              </label>
+                              <label>
+                                Office Allowed Extensions (csv)
+                                <input
+                                  type="text"
+                                  value={activeHarnessCapabilities.officeCli.allowedExtensions.join(", ")}
+                                  onChange={(event) => {
+                                    const ext = parseCommaList(event.target.value)
+                                      .map((entry) => entry.toLowerCase())
+                                      .map((entry) => entry.startsWith(".") ? entry : `.${entry}`);
+                                    setHarnessCapabilitiesByHarness((current) => ({
+                                      ...current,
+                                      [selectedPane.id]: {
+                                        ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                        officeCli: {
+                                          ...(current[selectedPane.id]?.officeCli ?? defaultHarnessCapabilities().officeCli),
+                                          allowedExtensions: ext,
+                                        },
+                                      },
+                                    }));
+                                  }}
+                                  placeholder=".docx, .xlsx, .pptx"
+                                />
+                              </label>
+                              <label>
+                                Office Max File Size (MB)
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={512}
+                                  value={activeHarnessCapabilities.officeCli.maxFileSizeMb}
+                                  onChange={(event) => {
+                                    const next = Number(event.target.value) || 1;
+                                    setHarnessCapabilitiesByHarness((current) => ({
+                                      ...current,
+                                      [selectedPane.id]: {
+                                        ...(current[selectedPane.id] ?? defaultHarnessCapabilities()),
+                                        officeCli: {
+                                          ...(current[selectedPane.id]?.officeCli ?? defaultHarnessCapabilities().officeCli),
+                                          maxFileSizeMb: Math.max(1, Math.min(512, next)),
+                                        },
+                                      },
+                                    }));
+                                  }}
+                                />
+                              </label>
+
+                              <div className="tool-action-row">
+                                <button
+                                  type="button"
+                                  onClick={() => void saveHarnessCapabilities(selectedPane.id)}
+                                  disabled={harnessCapabilitySavingId === selectedPane.id}
+                                >
+                                  {harnessCapabilitySavingId === selectedPane.id ? "Saving..." : "Save Extras"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={() => setHarnessExtrasOpenByHarness((current) => ({ ...current, [selectedPane.id]: false }))}
+                                >
+                                  Close
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   </header>
 

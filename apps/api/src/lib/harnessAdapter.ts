@@ -1,5 +1,6 @@
 import type { ChatMessage, HarnessConfig, SystemState } from "../types.js";
 import { buildRouterBody, buildRouterHeaders, createRouterContext } from "./routerContract.js";
+import { getHarnessCapabilities } from "./harnessCapabilities.js";
 
 type AdapterRequest = {
   harness: HarnessConfig;
@@ -296,7 +297,12 @@ async function requestOpenAiJson(
 ): Promise<AttemptResult | null> {
   const config = getAdapterConfig(harness);
   const context = createRouterContext(state, model, workspace);
-  const nexusCtx: NexusInjectedContext = { workspacePath: workspace?.path, githubLogin };
+  const nexusCtx: NexusInjectedContext = {
+    harnessId: harness.id,
+    workspacePath: workspace?.path,
+    githubLogin,
+    capabilitySummary: buildCapabilitySummary(state, harness.id),
+  };
 
   try {
     const response = await fetchWithTimeout(
@@ -344,7 +350,12 @@ async function requestOpenAiStream(
 ): Promise<AsyncGenerator<string> | null> {
   const config = getAdapterConfig(harness);
   const context = createRouterContext(state, model, workspace);
-  const nexusCtx: NexusInjectedContext = { workspacePath: workspace?.path, githubLogin };
+  const nexusCtx: NexusInjectedContext = {
+    harnessId: harness.id,
+    workspacePath: workspace?.path,
+    githubLogin,
+    capabilitySummary: buildCapabilitySummary(state, harness.id),
+  };
 
   try {
     const response = await fetchWithTimeout(
@@ -550,13 +561,16 @@ function resolveModelOrder(harness: HarnessConfig, state: SystemState): string[]
 }
 
 type NexusInjectedContext = {
+  harnessId: string;
   workspacePath?: string;
   githubLogin?: string;
+  capabilitySummary?: string;
 };
 
 function buildNexusSystemMessage(ctx: NexusInjectedContext): string {
   const lines: string[] = [
     "You are running inside Nexus OS, a local AI workspace.",
+    `Active harness id: ${ctx.harnessId}`,
   ];
   if (ctx.workspacePath) {
     lines.push(`Active workspace path: ${ctx.workspacePath}`);
@@ -568,6 +582,41 @@ function buildNexusSystemMessage(ctx: NexusInjectedContext): string {
   } else {
     lines.push("GitHub is not connected. Advise the user to connect GitHub in Nexus OS Settings > Connectors if they need repo access.");
   }
+  if (ctx.capabilitySummary) {
+    lines.push(ctx.capabilitySummary);
+  }
+  return lines.join("\n");
+}
+
+function buildCapabilitySummary(state: SystemState, harnessId: string): string {
+  const capabilities = getHarnessCapabilities(state, harnessId);
+  const lines: string[] = [
+    "Harness extra capabilities:",
+  ];
+
+  if (capabilities.crawl4ai.enabled) {
+    lines.push(
+      `- Crawl4AI enabled (maxPages=${capabilities.crawl4ai.maxPages}, allowExternalDomains=${capabilities.crawl4ai.allowExternalDomains}, obeyRobotsTxt=${capabilities.crawl4ai.obeyRobotsTxt}).`,
+    );
+    if (capabilities.crawl4ai.allowedDomains.length > 0) {
+      lines.push(`- Crawl domain allowlist: ${capabilities.crawl4ai.allowedDomains.join(", ")}`);
+    } else {
+      lines.push("- Crawl domain allowlist: none configured (explicit domain approval recommended).");
+    }
+    lines.push("- Use Nexus API POST /api/tools/crawl4ai/run with harnessId + url when crawl output is needed.");
+  } else {
+    lines.push("- Crawl4AI disabled for this harness.");
+  }
+
+  if (capabilities.officeCli.enabled) {
+    lines.push(
+      `- OfficeCLI enabled (extensions: ${capabilities.officeCli.allowedExtensions.join(", ")}, maxFileSizeMb=${capabilities.officeCli.maxFileSizeMb}).`,
+    );
+    lines.push("- Use Nexus API POST /api/tools/officecli/run with harnessId and workspace-relative file paths.");
+  } else {
+    lines.push("- OfficeCLI disabled for this harness.");
+  }
+
   return lines.join("\n");
 }
 

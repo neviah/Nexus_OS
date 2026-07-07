@@ -1289,6 +1289,47 @@ textarea {
   flex-wrap: wrap;
 }
 
+.harness-extras-wrap {
+  position: relative;
+}
+
+.harness-extras-popover {
+  position: absolute;
+  right: 0;
+  width: min(420px, 84vw);
+  border: 1px solid rgba(47, 71, 79, 0.52);
+  border-radius: 10px;
+  background: rgba(10, 19, 25, 0.97);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.34);
+  padding: 10px;
+  z-index: 30;
+  display: grid;
+  gap: 8px;
+}
+
+.harness-extras-popover.drop-up {
+  bottom: calc(100% + 8px);
+}
+
+.harness-extras-popover label {
+  display: grid;
+  gap: 4px;
+  font-size: 0.76rem;
+  color: var(--ink-3);
+}
+
+.extras-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.extras-inline-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .chip {
   border-radius: 999px;
   padding: 3px 8px;
@@ -1717,6 +1758,20 @@ textarea {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.nxr-catalog-controls {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.nxr-catalog-controls label {
+  display: grid;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: var(--ink-3);
 }
 
 .nxr-provider-form label {
