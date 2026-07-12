@@ -575,6 +575,7 @@ const PROVIDER_API_KEY_LINKS: Record<string, string> = {
 
 const THEME_PRESETS: ThemePreset[] = [
   { id: "ember", name: "Ember Ops", hint: "default warm cyber theme" },
+  { id: "daybreak", name: "Daybreak Light", hint: "clean bright workspace mode" },
   { id: "ocean", name: "Ocean Grid", hint: "cool steel + cyan accents" },
   { id: "forest", name: "Forest Signal", hint: "green tactical terminal tone" },
   { id: "sunset", name: "Sunset Neon", hint: "gold + coral high contrast" },
@@ -2969,62 +2970,101 @@ function App() {
             <small className="side-status">{statusMessage}</small>
           </section>
 
-          <div className="pane-title-row">
-            <h2>Agents</h2>
-          </div>
+          <section className="side-nav-group">
+            <div className="pane-title-row">
+              <h2>Core Agents</h2>
+            </div>
 
-          <ul className="nav-list">
-            {boot?.harnesses.map((harness) => {
-              const isLocked = onboardingRequired;
-              const isActive = selectedPane.type === "agent" && selectedPane.id === harness.id;
-              return (
-                <li key={harness.id}>
-                  <button
-                    type="button"
-                    disabled={isLocked}
-                    className={`nav-item ${isActive ? "active" : ""}`}
-                    onClick={() => {
-                      setSelectedPane({ type: "agent", id: harness.id });
-                    }}
-                  >
-                    <span className={`health ${harness.health}`} />
-                    <span className="meta-block">
-                      <strong>{harness.name}</strong>
-                      <small>{harness.status} | {harnessDisplayModel[harness.id] ?? harness.defaultModel}</small>
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-
-          <div className="pane-title-row split">
-            <h2>Tools</h2>
-            <button type="button" className="ghost" onClick={() => setToolsOpen((current) => !current)}>
-              {toolsOpen ? "Collapse" : "Expand"}
-            </button>
-          </div>
-
-          {toolsOpen ? (
             <ul className="nav-list">
-              {boot?.tools.filter((tool) => tool.id !== "9router" && tool.id !== "settings").map((tool) => {
-                const isActive = selectedPane.type === "tool" && selectedPane.id === tool.id;
+              {boot?.harnesses.map((harness) => {
+                const isLocked = onboardingRequired;
+                const isActive = selectedPane.type === "agent" && selectedPane.id === harness.id;
                 return (
-                  <li key={tool.id}>
+                  <li key={harness.id}>
                     <button
                       type="button"
+                      disabled={isLocked}
                       className={`nav-item ${isActive ? "active" : ""}`}
-                      onClick={() => setSelectedPane({ type: "tool", id: tool.id })}
+                      onClick={() => {
+                        setSelectedPane({ type: "agent", id: harness.id });
+                      }}
                     >
-                      <span className={`health ${tool.status === "online" ? "healthy" : "degraded"}`} />
+                      <span className={`health ${harness.health}`} />
                       <span className="meta-block">
-                        <strong>{tool.name}</strong>
-                        <small>{tool.status}</small>
+                        <strong>{harness.name}</strong>
+                        <small>{harness.status} | {harnessDisplayModel[harness.id] ?? harness.defaultModel}</small>
                       </span>
                     </button>
                   </li>
                 );
               })}
+            </ul>
+          </section>
+
+          <section className="side-nav-group">
+            <div className="pane-title-row split">
+              <h2>Tools</h2>
+              <button type="button" className="ghost" onClick={() => setToolsOpen((current) => !current)}>
+                {toolsOpen ? "Collapse" : "Expand"}
+              </button>
+            </div>
+
+            {toolsOpen ? (
+              <ul className="nav-list">
+                {boot?.tools.filter((tool) => tool.id !== "9router" && tool.id !== "settings").map((tool) => {
+                  const isActive = selectedPane.type === "tool" && selectedPane.id === tool.id;
+                  return (
+                    <li key={tool.id}>
+                      <button
+                        type="button"
+                        className={`nav-item ${isActive ? "active" : ""}`}
+                        onClick={() => setSelectedPane({ type: "tool", id: tool.id })}
+                      >
+                        <span className={`health ${tool.status === "online" ? "healthy" : "degraded"}`} />
+                        <span className="meta-block">
+                          <strong>{tool.name}</strong>
+                          <small>{tool.status}</small>
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
+          </section>
+
+          <section className="side-nav-group">
+            <div className="pane-title-row split">
+              <h2>Orchestration</h2>
+              <small className="side-group-note">coming soon</small>
+            </div>
+            <ul className="nav-list">
+              <li>
+                <button type="button" className="nav-item nav-item-placeholder" disabled>
+                  <span className="health setup-required" />
+                  <span className="meta-block">
+                    <strong>Social Media Center</strong>
+                    <small>coming soon</small>
+                  </span>
+                </button>
+              </li>
+              <li>
+                <button type="button" className="nav-item nav-item-placeholder" disabled>
+                  <span className="health setup-required" />
+                  <span className="meta-block">
+                    <strong>Game Creator</strong>
+                    <small>coming soon</small>
+                  </span>
+                </button>
+              </li>
+            </ul>
+          </section>
+
+          <section className="side-nav-group">
+            <div className="pane-title-row split">
+              <h2>Settings/System</h2>
+            </div>
+            <ul className="nav-list">
               <li>
                 <button
                   type="button"
@@ -3033,13 +3073,13 @@ function App() {
                 >
                   <span className="health healthy" />
                   <span className="meta-block">
-                    <strong>⚙ Settings</strong>
-                    <small>theme + git</small>
+                    <strong>Settings</strong>
+                    <small>theme + git + connectors</small>
                   </span>
                 </button>
               </li>
             </ul>
-          ) : null}
+          </section>
         </aside>
 
         <section className="pane pane-middle">
