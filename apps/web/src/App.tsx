@@ -337,30 +337,74 @@ type ImageGeneratedResult = {
   prompt: string;
   provider: string;
   model: string;
-  resolvedModel?: string;
   width: number;
   height: number;
   steps?: number;
-  guidanceScale?: number;
   seed?: number;
+  profile?: number;
   negativePrompt?: string;
   createdAt: string;
   relativePath?: string;
 };
 
-type LocalImageStatus = {
-  ready: boolean;
-  uvInstalled: boolean;
-  models: Array<{
-    id: string;
-    label: string;
-    repoId: string;
-    defaultWidth: number;
-    defaultHeight: number;
-    recommendedMaxSide: number;
-    notes: string;
-    installed: boolean;
-  }>;
+type VideoGeneratedResult = {
+  videoUrl: string;
+  prompt: string;
+  provider: string;
+  model: string;
+  width: number;
+  height: number;
+  steps?: number;
+  seed?: number;
+  profile?: number;
+  durationSeconds?: number;
+  fps?: number;
+  frameCount?: number;
+  negativePrompt?: string;
+  createdAt: string;
+  relativePath?: string;
+};
+
+type Wan2GpStatus = {
+  installed: boolean;
+  envReady: boolean;
+  apiReady: boolean;
+  appRoot: string;
+  pythonPath: string | null;
+  supports: {
+    image: boolean;
+    video: boolean;
+    tts: boolean;
+    stt: boolean;
+  };
+  notes: string[];
+  machine: {
+    logicalCores: number;
+    totalRamGb: number;
+    recommendedProfile: number;
+  };
+  recommended: {
+    profile: number;
+    image: {
+      model: string;
+      width: number;
+      height: number;
+      steps: number;
+    };
+    video: {
+      model: string;
+      width: number;
+      height: number;
+      steps: number;
+      durationSeconds: number;
+      fps: number;
+      frameCount: number;
+    };
+  };
+  modelHints: {
+    image: string[];
+    video: string[];
+  };
 };
 
 type LocalImageStreamEnvelope =
@@ -373,12 +417,35 @@ type LocalImageStreamEnvelope =
       workspaceId: string;
       provider: string;
       model: string;
-      resolvedModel: string;
       width: number;
       height: number;
       steps: number;
-      guidanceScale: number;
       seed: number;
+      profile: number;
+      prompt: string;
+      negativePrompt: string;
+    };
+  }
+  | { type: "error"; message: string };
+
+type Wan2GpVideoStreamEnvelope =
+  | { type: "status"; message: string }
+  | {
+    type: "done";
+    result: {
+      videoUrl: string;
+      relativePath: string;
+      workspaceId: string;
+      provider: string;
+      model: string;
+      width: number;
+      height: number;
+      steps: number;
+      seed: number;
+      profile: number;
+      durationSeconds?: number;
+      fps?: number;
+      frameCount?: number;
       prompt: string;
       negativePrompt: string;
     };
@@ -394,7 +461,7 @@ type ImageSizePreset = {
 
 type RuntimeJob = {
   id: string;
-  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam";
+  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam" | "install-wan2gp" | "start-wan2gp";
   model?: string;
   status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   createdAt: string;
@@ -646,18 +713,33 @@ function App() {
   const [stableAudioGenerated, setStableAudioGenerated] = useState<StableAudioGeneratedClip[]>([]);
   const [imagePrompt, setImagePrompt] = useState("pixel-art hero sprite sheet, transparent background, game-ready");
   const [imageNegativePrompt, setImageNegativePrompt] = useState("blurry, low quality, watermark, text");
-  const [imageModel, setImageModel] = useState<"sd15" | "dreamshaper-8">("sd15");
-  const [imageWidth, setImageWidth] = useState(512);
-  const [imageHeight, setImageHeight] = useState(512);
-  const [imageSteps, setImageSteps] = useState(18);
-  const [imageGuidanceScale, setImageGuidanceScale] = useState(6.5);
+  const [imageModel, setImageModel] = useState("auto");
+  const [imageWidth, setImageWidth] = useState(768);
+  const [imageHeight, setImageHeight] = useState(768);
+  const [imageSteps, setImageSteps] = useState(6);
+  const [wanProfile, setWanProfile] = useState(4);
   const [imageSeed, setImageSeed] = useState(-1);
   const [imageBusyAction, setImageBusyAction] = useState<"generate" | "save" | null>(null);
   const [imageResult, setImageResult] = useState<ImageGeneratedResult | null>(null);
   const [recentImages, setRecentImages] = useState<ImageGeneratedResult[]>([]);
   const [imageStatusTrace, setImageStatusTrace] = useState("");
-  const [localImageStatus, setLocalImageStatus] = useState<LocalImageStatus | null>(null);
+  const [wan2GpStatus, setWan2GpStatus] = useState<Wan2GpStatus | null>(null);
   const imageGenerationAbortRef = useRef<AbortController | null>(null);
+  const [videoPrompt, setVideoPrompt] = useState("cinematic flythrough of a neon city at dusk, volumetric fog, smooth camera");
+  const [videoNegativePrompt, setVideoNegativePrompt] = useState("blurry, flicker, low quality, artifacts, text watermark");
+  const [videoModel, setVideoModel] = useState("auto");
+  const [videoWidth, setVideoWidth] = useState(640);
+  const [videoHeight, setVideoHeight] = useState(384);
+  const [videoSteps, setVideoSteps] = useState(6);
+  const [videoDurationSeconds, setVideoDurationSeconds] = useState(3);
+  const [videoFps, setVideoFps] = useState(16);
+  const [videoFrameCount, setVideoFrameCount] = useState(49);
+  const [videoSeed, setVideoSeed] = useState(-1);
+  const [videoBusyAction, setVideoBusyAction] = useState<"generate" | null>(null);
+  const [videoStatusTrace, setVideoStatusTrace] = useState("");
+  const [videoResult, setVideoResult] = useState<VideoGeneratedResult | null>(null);
+  const [recentVideos, setRecentVideos] = useState<VideoGeneratedResult[]>([]);
+  const videoGenerationAbortRef = useRef<AbortController | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -713,7 +795,7 @@ function App() {
   }
 
   async function loadRuntimeJobs() {
-    const response = await fetch("/api/runtime/jobs");
+    const response = await fetch("/api/tools/runtimes/jobs");
     if (!response.ok) {
       return;
     }
@@ -722,7 +804,7 @@ function App() {
   }
 
   async function loadRuntimeStatus() {
-    const response = await fetch("/api/runtime/status");
+    const response = await fetch("/api/tools/runtimes/status");
     if (!response.ok) {
       return;
     }
@@ -1087,7 +1169,7 @@ function App() {
     const controller = new AbortController();
     imageGenerationAbortRef.current = controller;
     setImageBusyAction("generate");
-    setImageStatusTrace("Starting local generation...\n");
+    setImageStatusTrace("Starting Wan2GP image generation...\n");
     const seedToUse = imageSeed < 0 ? Math.floor(Math.random() * 2147483647) : imageSeed;
     const params = new URLSearchParams({
       prompt: imagePrompt,
@@ -1096,18 +1178,18 @@ function App() {
       width: String(imageWidth),
       height: String(imageHeight),
       steps: String(imageSteps),
-      guidanceScale: String(imageGuidanceScale),
       seed: String(seedToUse),
+      profile: String(wanProfile),
       workspaceId: boot?.activeWorkspaceId ?? "default",
     });
 
     try {
-      const response = await fetch(`/api/tools/image/local/stream?${params.toString()}`, {
+      const response = await fetch(`/api/tools/wan2gp/image/stream?${params.toString()}`, {
         signal: controller.signal,
       });
       if (!response.ok || !response.body) {
         const payload = (await response.json()) as { error?: string };
-        const message = payload.error ?? "Local image generation failed.";
+        const message = payload.error ?? "Wan2GP image generation failed.";
         setStatusMessage(message);
         pushToast(message, "err");
         setImageBusyAction(null);
@@ -1163,34 +1245,33 @@ function App() {
               prompt: envelope.result.prompt,
               provider: envelope.result.provider,
               model: envelope.result.model,
-              resolvedModel: envelope.result.resolvedModel,
               width: envelope.result.width,
               height: envelope.result.height,
               steps: envelope.result.steps,
-              guidanceScale: envelope.result.guidanceScale,
               seed: envelope.result.seed,
+              profile: envelope.result.profile,
               negativePrompt: envelope.result.negativePrompt,
               relativePath: envelope.result.relativePath,
               createdAt: new Date().toISOString(),
             };
             setImageResult(generated);
             setRecentImages((current) => [generated, ...current].slice(0, 10));
-            setStatusMessage(`Local image generated (${envelope.result.model}).`);
-            pushToast("Local image generated and saved.", "ok");
+            setStatusMessage(`Wan2GP image generated (${envelope.result.model}).`);
+            pushToast("Wan2GP image generated and saved.", "ok");
             completed = true;
             await refreshActiveWorkspaceTree(envelope.result.workspaceId);
-            void loadLocalImageStatus();
+            void loadWan2GpStatus();
           }
         }
       }
 
       if (!completed && !controller.signal.aborted) {
-        setStatusMessage("Local generation stream ended before completion.");
+        setStatusMessage("Wan2GP image stream ended before completion.");
       }
     } catch (error) {
       if (controller.signal.aborted) {
         setImageStatusTrace((current) => `${current}Generation canceled by user.\n`.slice(-12000));
-        setStatusMessage("Local generation stopped.");
+        setStatusMessage("Wan2GP image generation stopped.");
         pushToast("Image generation canceled.", "warn");
       } else {
         const message = String(error);
@@ -1262,23 +1343,175 @@ function App() {
   function openRecentImage(image: ImageGeneratedResult) {
     setImagePrompt(image.prompt);
     setImageNegativePrompt(image.negativePrompt ?? "");
-    setImageModel(image.model === "dreamshaper-8" ? "dreamshaper-8" : "sd15");
+    setImageModel(image.model || "auto");
     setImageWidth(image.width);
     setImageHeight(image.height);
-    setImageSteps(image.steps ?? 18);
-    setImageGuidanceScale(image.guidanceScale ?? 6.5);
+    setImageSteps(image.steps ?? 6);
+    setWanProfile(image.profile ?? wan2GpStatus?.recommended.profile ?? 4);
     setImageSeed(image.seed ?? -1);
     setImageResult(image);
     setStatusMessage("Loaded recent image into preview.");
   }
 
-  async function loadLocalImageStatus() {
-    const response = await fetch("/api/tools/image/local/status");
+  async function loadWan2GpStatus() {
+    const response = await fetch("/api/tools/wan2gp/status");
     if (!response.ok) {
       return;
     }
-    const payload = (await response.json()) as LocalImageStatus;
-    setLocalImageStatus(payload);
+    const payload = (await response.json()) as Wan2GpStatus;
+    setWan2GpStatus(payload);
+    setWanProfile((current) => current > 0 ? current : payload.recommended.profile);
+  }
+
+  async function generateVideo() {
+    if (videoGenerationAbortRef.current) {
+      videoGenerationAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    videoGenerationAbortRef.current = controller;
+    setVideoBusyAction("generate");
+    setVideoStatusTrace("Starting Wan2GP video generation...\n");
+    const seedToUse = videoSeed < 0 ? Math.floor(Math.random() * 2147483647) : videoSeed;
+    const params = new URLSearchParams({
+      prompt: videoPrompt,
+      model: videoModel,
+      negativePrompt: videoNegativePrompt,
+      width: String(videoWidth),
+      height: String(videoHeight),
+      steps: String(videoSteps),
+      seed: String(seedToUse),
+      profile: String(wanProfile),
+      durationSeconds: String(videoDurationSeconds),
+      fps: String(videoFps),
+      frameCount: String(videoFrameCount),
+      workspaceId: boot?.activeWorkspaceId ?? "default",
+    });
+
+    try {
+      const response = await fetch(`/api/tools/wan2gp/video/stream?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        const payload = (await response.json()) as { error?: string };
+        const message = payload.error ?? "Wan2GP video generation failed.";
+        setStatusMessage(message);
+        pushToast(message, "err");
+        setVideoBusyAction(null);
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completed = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          const split = buffer.indexOf("\n\n");
+          if (split === -1) {
+            break;
+          }
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+          if (!dataLine) {
+            continue;
+          }
+          const raw = dataLine.slice(5).trim();
+          let envelope: Wan2GpVideoStreamEnvelope;
+          try {
+            envelope = JSON.parse(raw) as Wan2GpVideoStreamEnvelope;
+          } catch {
+            continue;
+          }
+
+          if (envelope.type === "status") {
+            setVideoStatusTrace((current) => `${current}${envelope.message}\n`.slice(-12000));
+            continue;
+          }
+
+          if (envelope.type === "error") {
+            setVideoStatusTrace((current) => `${current}[error] ${envelope.message}\n`.slice(-12000));
+            setStatusMessage(envelope.message);
+            pushToast(envelope.message, "err");
+            continue;
+          }
+
+          if (envelope.type === "done") {
+            const generated: VideoGeneratedResult = {
+              videoUrl: envelope.result.videoUrl,
+              prompt: envelope.result.prompt,
+              provider: envelope.result.provider,
+              model: envelope.result.model,
+              width: envelope.result.width,
+              height: envelope.result.height,
+              steps: envelope.result.steps,
+              seed: envelope.result.seed,
+              profile: envelope.result.profile,
+              durationSeconds: envelope.result.durationSeconds,
+              fps: envelope.result.fps,
+              frameCount: envelope.result.frameCount,
+              negativePrompt: envelope.result.negativePrompt,
+              relativePath: envelope.result.relativePath,
+              createdAt: new Date().toISOString(),
+            };
+            setVideoResult(generated);
+            setRecentVideos((current) => [generated, ...current].slice(0, 10));
+            setStatusMessage(`Wan2GP video generated (${envelope.result.model}).`);
+            pushToast("Wan2GP video generated and saved.", "ok");
+            completed = true;
+            await refreshActiveWorkspaceTree(envelope.result.workspaceId);
+            void loadWan2GpStatus();
+          }
+        }
+      }
+
+      if (!completed && !controller.signal.aborted) {
+        setStatusMessage("Wan2GP video stream ended before completion.");
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        setVideoStatusTrace((current) => `${current}Generation canceled by user.\n`.slice(-12000));
+        setStatusMessage("Wan2GP video generation stopped.");
+        pushToast("Video generation canceled.", "warn");
+      } else {
+        const message = String(error);
+        setVideoStatusTrace((current) => `${current}[error] ${message}\n`.slice(-12000));
+        setStatusMessage(message);
+        pushToast(message, "err");
+      }
+    } finally {
+      if (videoGenerationAbortRef.current === controller) {
+        videoGenerationAbortRef.current = null;
+      }
+      setVideoBusyAction(null);
+    }
+  }
+
+  function stopVideoGeneration() {
+    videoGenerationAbortRef.current?.abort();
+  }
+
+  function openRecentVideo(video: VideoGeneratedResult) {
+    setVideoPrompt(video.prompt);
+    setVideoNegativePrompt(video.negativePrompt ?? "");
+    setVideoModel(video.model || "auto");
+    setVideoWidth(video.width);
+    setVideoHeight(video.height);
+    setVideoSteps(video.steps ?? 6);
+    setVideoSeed(video.seed ?? -1);
+    setVideoDurationSeconds(video.durationSeconds ?? 3);
+    setVideoFps(video.fps ?? 16);
+    setVideoFrameCount(video.frameCount ?? 49);
+    setWanProfile(video.profile ?? wan2GpStatus?.recommended.profile ?? 4);
+    setVideoResult(video);
+    setStatusMessage("Loaded recent video into preview.");
   }
 
   async function openActiveWorkspaceFolder() {
@@ -2058,12 +2291,12 @@ function App() {
       void loadStableAudioStatus();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "image-generator") {
-      void loadLocalImageStatus();
+      void loadWan2GpStatus();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "media-center") {
       void loadVoiceStatus();
       void loadStableAudioStatus();
-      void loadLocalImageStatus();
+      void loadWan2GpStatus();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "settings") {
       void loadGitStatus();
@@ -3698,7 +3931,7 @@ function App() {
               <div className="tool-header-row">
                 <div>
                   <h2>Media Center</h2>
-                  <p className="subtitle">Local-only generation tuned for 6-8GB VRAM devices with first-run model install and live status stream.</p>
+                  <p className="subtitle">Wan2GP headless image generation with low-VRAM profile defaults and first-run model downloads.</p>
                 </div>
               </div>
 
@@ -3707,8 +3940,8 @@ function App() {
               <section className="tool-section">
                 <h3>Generate Image</h3>
                 <div className="stable-audio-form">
-                  {!localImageStatus?.ready ? (
-                    <small>Local image runtime is not ready. Install uv first, then refresh this pane.</small>
+                  {!wan2GpStatus?.apiReady ? (
+                    <small>Wan2GP is not ready yet. Install runtime job: install-wan2gp, then start-wan2gp.</small>
                   ) : null}
                   <div>
                     <span>Size Presets</span>
@@ -3722,38 +3955,34 @@ function App() {
                   </div>
                   <label>
                     <span>Model</span>
-                    <select value={imageModel} onChange={(event) => setImageModel(event.target.value as "sd15" | "dreamshaper-8")}> 
-                      <option value="sd15">Stable Diffusion 1.5</option>
-                      <option value="dreamshaper-8">DreamShaper 8</option>
+                    <select value={imageModel} onChange={(event) => setImageModel(event.target.value)}>
+                      {(wan2GpStatus?.modelHints.image ?? ["auto"]).map((modelName) => (
+                        <option key={modelName} value={modelName}>{modelName}</option>
+                      ))}
                     </select>
                   </label>
-                  {localImageStatus?.models?.length ? (
-                    <small>
-                      {localImageStatus.models.find((entry) => entry.id === imageModel)?.installed
-                        ? "Model is installed locally."
-                        : "Model will auto-install on first run."}
-                    </small>
+                  <label>
+                    <span>VRAM Profile</span>
+                    <input type="number" min={1} max={5} value={wanProfile} onChange={(event) => setWanProfile(Number(event.target.value || 4))} />
+                  </label>
+                  <small>Recommended profile: {wan2GpStatus?.recommended.profile ?? 4} (higher is safer for low VRAM).</small>
+                  {wan2GpStatus?.notes?.length ? (
+                    <small>{wan2GpStatus.notes[wan2GpStatus.notes.length - 1]}</small>
                   ) : null}
                   <div className="image-size-grid">
                     <label>
                       <span>Width</span>
-                      <input type="number" min={256} max={768} step={64} value={imageWidth} onChange={(event) => setImageWidth(Number(event.target.value || 512))} />
+                      <input type="number" min={256} max={1280} step={64} value={imageWidth} onChange={(event) => setImageWidth(Number(event.target.value || 768))} />
                     </label>
                     <label>
                       <span>Height</span>
-                      <input type="number" min={256} max={768} step={64} value={imageHeight} onChange={(event) => setImageHeight(Number(event.target.value || 512))} />
+                      <input type="number" min={256} max={1280} step={64} value={imageHeight} onChange={(event) => setImageHeight(Number(event.target.value || 768))} />
                     </label>
                   </div>
-                  <div className="image-size-grid">
-                    <label>
-                      <span>Steps</span>
-                      <input type="number" min={4} max={50} value={imageSteps} onChange={(event) => setImageSteps(Number(event.target.value || 18))} />
-                    </label>
-                    <label>
-                      <span>Guidance</span>
-                      <input type="number" min={0} max={20} step={0.5} value={imageGuidanceScale} onChange={(event) => setImageGuidanceScale(Number(event.target.value || 6.5))} />
-                    </label>
-                  </div>
+                  <label>
+                    <span>Steps</span>
+                    <input type="number" min={1} max={60} value={imageSteps} onChange={(event) => setImageSteps(Number(event.target.value || 6))} />
+                  </label>
                   <label>
                     <span>Seed (-1 = random)</span>
                     <input type="number" value={imageSeed} onChange={(event) => setImageSeed(Number(event.target.value || -1))} />
@@ -3767,7 +3996,7 @@ function App() {
                     <textarea rows={2} value={imageNegativePrompt} onChange={(event) => setImageNegativePrompt(event.target.value)} placeholder="blurry, low quality, artifacts..." />
                   </label>
                   <div className="tool-action-row">
-                    <button type="button" onClick={() => void generateImage()} disabled={imageBusyAction !== null || !imagePrompt.trim() || !localImageStatus?.ready}>
+                    <button type="button" onClick={() => void generateImage()} disabled={imageBusyAction !== null || !imagePrompt.trim() || !wan2GpStatus?.apiReady}>
                       {imageBusyAction === "generate" ? "Generating..." : "Generate"}
                     </button>
                     <button type="button" className="ghost" onClick={stopImageGeneration} disabled={imageBusyAction !== "generate"}>
@@ -3785,7 +4014,7 @@ function App() {
                 {imageResult?.imageUrl ? (
                   <div className="image-preview-panel">
                     <img src={imageResult.imageUrl} alt="Generated output preview" />
-                    <small>{imageResult.provider} · {imageResult.model} · {imageResult.width}x{imageResult.height} · steps {imageResult.steps ?? "-"} · cfg {imageResult.guidanceScale ?? "-"} · seed {imageResult.seed ?? "-"}</small>
+                    <small>{imageResult.provider} · {imageResult.model} · {imageResult.width}x{imageResult.height} · steps {imageResult.steps ?? "-"} · profile {imageResult.profile ?? "-"} · seed {imageResult.seed ?? "-"}</small>
                     {imageResult.relativePath ? <small>Saved: {imageResult.relativePath}</small> : null}
                   </div>
                 ) : (
@@ -3830,16 +4059,121 @@ function App() {
               <div className="tool-header-row">
                 <div>
                   <h2>Media Center</h2>
-                  <p className="subtitle">Video generation slot reserved for a future local or connector-backed pipeline.</p>
+                  <p className="subtitle">Wan2GP headless video generation with low-VRAM defaults and live progress streaming.</p>
                 </div>
               </div>
 
               {renderMediaCenterTabs()}
 
-              <section className="coming-soon-panel">
-                <h2>Video Generator</h2>
-                <p>Coming Soon</p>
-                <small>This pane is reserved for a future repo-backed local video generator.</small>
+              <section className="tool-section">
+                <h3>Generate Video</h3>
+                <div className="stable-audio-form">
+                  {!wan2GpStatus?.apiReady ? (
+                    <small>Wan2GP is not ready yet. Install runtime job: install-wan2gp, then start-wan2gp.</small>
+                  ) : null}
+                  <label>
+                    <span>Model</span>
+                    <select value={videoModel} onChange={(event) => setVideoModel(event.target.value)}>
+                      {(wan2GpStatus?.modelHints.video ?? ["auto"]).map((modelName) => (
+                        <option key={modelName} value={modelName}>{modelName}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>VRAM Profile</span>
+                    <input type="number" min={1} max={5} value={wanProfile} onChange={(event) => setWanProfile(Number(event.target.value || 4))} />
+                  </label>
+                  <div className="image-size-grid">
+                    <label>
+                      <span>Width</span>
+                      <input type="number" min={320} max={1024} step={64} value={videoWidth} onChange={(event) => setVideoWidth(Number(event.target.value || 640))} />
+                    </label>
+                    <label>
+                      <span>Height</span>
+                      <input type="number" min={192} max={1024} step={64} value={videoHeight} onChange={(event) => setVideoHeight(Number(event.target.value || 384))} />
+                    </label>
+                  </div>
+                  <div className="image-size-grid">
+                    <label>
+                      <span>Steps</span>
+                      <input type="number" min={1} max={60} value={videoSteps} onChange={(event) => setVideoSteps(Number(event.target.value || 6))} />
+                    </label>
+                    <label>
+                      <span>Duration (s)</span>
+                      <input type="number" min={1} max={12} value={videoDurationSeconds} onChange={(event) => setVideoDurationSeconds(Number(event.target.value || 3))} />
+                    </label>
+                  </div>
+                  <div className="image-size-grid">
+                    <label>
+                      <span>FPS</span>
+                      <input type="number" min={8} max={32} value={videoFps} onChange={(event) => setVideoFps(Number(event.target.value || 16))} />
+                    </label>
+                    <label>
+                      <span>Frames</span>
+                      <input type="number" min={17} max={193} value={videoFrameCount} onChange={(event) => setVideoFrameCount(Number(event.target.value || 49))} />
+                    </label>
+                  </div>
+                  <label>
+                    <span>Seed (-1 = random)</span>
+                    <input type="number" value={videoSeed} onChange={(event) => setVideoSeed(Number(event.target.value || -1))} />
+                  </label>
+                  <label>
+                    <span>Prompt</span>
+                    <textarea rows={4} value={videoPrompt} onChange={(event) => setVideoPrompt(event.target.value)} placeholder="Describe the video you want to generate..." />
+                  </label>
+                  <label>
+                    <span>Negative Prompt</span>
+                    <textarea rows={2} value={videoNegativePrompt} onChange={(event) => setVideoNegativePrompt(event.target.value)} placeholder="blurry, flicker, artifacts..." />
+                  </label>
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => void generateVideo()} disabled={videoBusyAction !== null || !videoPrompt.trim() || !wan2GpStatus?.apiReady}>
+                      {videoBusyAction === "generate" ? "Generating..." : "Generate Video"}
+                    </button>
+                    <button type="button" className="ghost" onClick={stopVideoGeneration} disabled={videoBusyAction !== "generate"}>
+                      Stop
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section className="tool-section">
+                <h3>Preview</h3>
+                {videoResult?.videoUrl ? (
+                  <div className="image-preview-panel">
+                    <video controls preload="metadata" src={videoResult.videoUrl} />
+                    <small>{videoResult.provider} · {videoResult.model} · {videoResult.width}x{videoResult.height} · steps {videoResult.steps ?? "-"} · profile {videoResult.profile ?? "-"} · fps {videoResult.fps ?? "-"} · frames {videoResult.frameCount ?? "-"}</small>
+                    {videoResult.relativePath ? <small>Saved: {videoResult.relativePath}</small> : null}
+                  </div>
+                ) : (
+                  <small>Generate a video to preview it here.</small>
+                )}
+              </section>
+
+              <section className="tool-section">
+                <h3>Status Stream</h3>
+                <pre className="image-status-stream">{videoStatusTrace || "No status yet."}</pre>
+              </section>
+
+              <section className="tool-section">
+                <h3>Recent Videos</h3>
+                {recentVideos.length === 0 ? (
+                  <small>No recent generations yet.</small>
+                ) : (
+                  <ul className="tool-list">
+                    {recentVideos.map((video) => (
+                      <li key={`${video.videoUrl}-${video.createdAt}`}>
+                        {video.model} · {video.width}x{video.height} · {new Date(video.createdAt).toLocaleTimeString()}
+                        <small>{video.prompt}</small>
+                        {video.relativePath ? <small>Saved: {video.relativePath}</small> : null}
+                        <div className="tool-action-row">
+                          <button type="button" className="ghost" onClick={() => openRecentVideo(video)}>
+                            Open
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </section>
             </div>
           ) : null}

@@ -71,6 +71,15 @@ import {
   upsertHarnessThread,
 } from "./lib/harnessChats.js";
 import { generateLocalImageStreaming, getLocalImageStatus } from "./lib/localImageGenerator.js";
+import {
+  generateWithWan2GpStreaming,
+  getMachineProfileHint,
+  getWan2GpStatus,
+  inferMediaExtension,
+  installWan2Gp,
+  readMediaBytes,
+  startWan2GpIfNeeded,
+} from "./lib/wan2gpRuntime.js";
 import { listProviderCatalog, listRouterFallbackTemplates } from "./lib/providerCatalog.js";
 import { getHarnessCapabilities, updateHarnessCapabilities } from "./lib/harnessCapabilities.js";
 
@@ -87,7 +96,9 @@ type RuntimeJobAction =
   | "install-piper"
   | "install-default-piper-voice"
   | "install-acejam"
-  | "start-acejam";
+  | "start-acejam"
+  | "install-wan2gp"
+  | "start-wan2gp";
 
 type RuntimeJob = {
   id: string;
@@ -259,7 +270,7 @@ function scheduleRuntimeJobPersist(): void {
 }
 
 function shouldAutoRetryRuntimeJob(job: RuntimeJob): boolean {
-  return ["install-ollama", "install-piper", "install-default-piper-voice", "install-acejam"].includes(job.action);
+  return ["install-ollama", "install-piper", "install-default-piper-voice", "install-acejam", "install-wan2gp"].includes(job.action);
 }
 
 function runtimeJobRetryDepth(job: RuntimeJob): number {
@@ -508,7 +519,7 @@ async function ensureWorkspaceAssetsDir(workspaceId?: string): Promise<{ workspa
 
 async function saveBufferToWorkspaceAssets(input: {
   workspaceId?: string;
-  category: "images" | "voice" | "music";
+  category: "images" | "videos" | "voice" | "music";
   baseName: string;
   extension: string;
   bytes: Buffer;
@@ -628,6 +639,22 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
     appendRuntimeJobLog(job, "Starting AceJAM service...");
     await startAceJamIfNeeded();
     appendRuntimeJobLog(job, "AceJAM is running.");
+    return;
+  }
+
+  if (job.action === "install-wan2gp") {
+    ensureRuntimeJobNotCanceled(job);
+    appendRuntimeJobLog(job, "Installing Wan2GP runtime...");
+    await installWan2Gp();
+    appendRuntimeJobLog(job, "Wan2GP install completed.");
+    return;
+  }
+
+  if (job.action === "start-wan2gp") {
+    ensureRuntimeJobNotCanceled(job);
+    appendRuntimeJobLog(job, "Checking Wan2GP readiness...");
+    await startWan2GpIfNeeded();
+    appendRuntimeJobLog(job, "Wan2GP API is ready.");
     return;
   }
 
@@ -1923,7 +1950,7 @@ app.post("/api/tools/runtimes/jobs/:jobId/retry", async (req, res) => {
 });
 
 app.post("/api/tools/runtimes/install", async (req, res) => {
-  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" };
+  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" | "wan2gp" };
   try {
     if (body.runtime === "ollama") {
       await installOllama();
@@ -1934,6 +1961,8 @@ app.post("/api/tools/runtimes/install", async (req, res) => {
       await installPiper();
     } else if (body.runtime === "default-piper-voice") {
       await installDefaultPiperVoice();
+    } else if (body.runtime === "wan2gp") {
+      await installWan2Gp();
     } else {
       return res.status(400).json({ error: "Unknown runtime target" });
     }
@@ -1959,6 +1988,16 @@ app.post("/api/tools/runtimes/acejam/start", async (_req, res) => {
   try {
     await startAceJamIfNeeded();
     const status = await getRuntimeStatus();
+    return res.json({ ok: true, status });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/runtimes/wan2gp/start", async (_req, res) => {
+  try {
+    await startWan2GpIfNeeded();
+    const status = await getWan2GpStatus();
     return res.json({ ok: true, status });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
@@ -2075,6 +2114,85 @@ app.get("/api/tools/image/local/status", async (_req, res) => {
   }
 });
 
+app.get("/api/tools/wan2gp/status", async (_req, res) => {
+  try {
+    const [status, machine] = await Promise.all([
+      getWan2GpStatus(),
+      getMachineProfileHint(),
+    ]);
+    return res.json({
+      ...status,
+      machine,
+      recommended: {
+        profile: machine.recommendedProfile,
+        image: {
+          model: "auto",
+          width: 768,
+          height: 768,
+          steps: 6,
+        },
+        video: {
+          model: "auto",
+          width: 640,
+          height: 384,
+          steps: 6,
+          durationSeconds: 3,
+          fps: 16,
+          frameCount: 49,
+        },
+      },
+      modelHints: {
+        image: ["auto", "qwen_image_20B", "flux1_schnell"],
+        video: ["auto", "ltx2_22B_distilled", "wan2.2_t2v_1.3B"],
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/tools/wan2gp/file", async (req, res) => {
+  const relativePath = String(req.query.relativePath ?? "").trim();
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+  if (!relativePath) {
+    return res.status(400).json({ error: "relativePath is required" });
+  }
+
+  try {
+    const state = await readSystemState();
+    const workspace = await resolveWorkspaceContext(state, workspaceId);
+    if (!workspace.path) {
+      return res.status(404).json({ error: "Workspace path is unavailable." });
+    }
+
+    const absolutePath = resolveWorkspaceTargetPath(workspace.path, relativePath);
+    await fs.access(absolutePath);
+    const extension = path.extname(absolutePath).toLowerCase();
+    const imageTypes: Record<string, string> = {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+    };
+    const videoTypes: Record<string, string> = {
+      ".mp4": "video/mp4",
+      ".webm": "video/webm",
+      ".mov": "video/quicktime",
+      ".mkv": "video/x-matroska",
+      ".avi": "video/x-msvideo",
+    };
+    const contentType = imageTypes[extension] ?? videoTypes[extension];
+    if (!contentType) {
+      return res.status(400).json({ error: "Unsupported media extension." });
+    }
+
+    res.setHeader("Content-Type", contentType);
+    return res.sendFile(absolutePath);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
 app.get("/api/tools/image/local/file", async (req, res) => {
   const relativePath = String(req.query.relativePath ?? "").trim();
   const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
@@ -2179,6 +2297,189 @@ app.get("/api/tools/image/local/stream", async (req, res) => {
         steps: generated.steps,
         guidanceScale: generated.guidanceScale,
         seed: generated.seed,
+        prompt: generated.prompt,
+        negativePrompt: generated.negativePrompt,
+      },
+    });
+    return res.end();
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      send({ type: "error", message: String(error) });
+    }
+    return res.end();
+  } finally {
+    req.off("close", onClientDisconnect);
+  }
+});
+
+app.get("/api/tools/wan2gp/image/stream", async (req, res) => {
+  const prompt = String(req.query.prompt ?? "").trim();
+  const model = String(req.query.model ?? "auto").trim();
+  const negativePrompt = String(req.query.negativePrompt ?? "").trim();
+  const width = Number(req.query.width ?? 768);
+  const height = Number(req.query.height ?? 768);
+  const steps = Number(req.query.steps ?? 6);
+  const seed = Number(req.query.seed ?? Date.now() % 2147483647);
+  const profile = Number(req.query.profile ?? 4);
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+
+  if (!prompt) {
+    return res.status(400).json({ error: "prompt is required" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const send = (payload: unknown) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const controller = new AbortController();
+  const onClientDisconnect = () => {
+    controller.abort();
+  };
+  req.on("close", onClientDisconnect);
+
+  try {
+    send({ type: "status", message: "Starting Wan2GP image generation..." });
+    const generated = await generateWithWan2GpStreaming(
+      {
+        mode: "image",
+        prompt,
+        negativePrompt,
+        model,
+        width,
+        height,
+        steps,
+        seed,
+        profile,
+      },
+      (message) => send({ type: "status", message }),
+      controller.signal,
+    );
+
+    send({ type: "status", message: "Saving generated image into workspace assets..." });
+    const bytes = await readMediaBytes(generated.outputPath);
+    const extension = inferMediaExtension(generated.outputPath, "png");
+    const saved = await saveBufferToWorkspaceAssets({
+      workspaceId,
+      category: "images",
+      baseName: "wan2gp-image",
+      extension,
+      bytes,
+    });
+
+    send({
+      type: "done",
+      result: {
+        imageUrl: `/api/tools/wan2gp/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        relativePath: saved.relativePath,
+        workspaceId: saved.workspaceId,
+        provider: generated.provider,
+        model: generated.model,
+        width: generated.width,
+        height: generated.height,
+        steps: generated.steps,
+        seed: generated.seed,
+        profile: generated.profile,
+        prompt: generated.prompt,
+        negativePrompt: generated.negativePrompt,
+      },
+    });
+    return res.end();
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      send({ type: "error", message: String(error) });
+    }
+    return res.end();
+  } finally {
+    req.off("close", onClientDisconnect);
+  }
+});
+
+app.get("/api/tools/wan2gp/video/stream", async (req, res) => {
+  const prompt = String(req.query.prompt ?? "").trim();
+  const model = String(req.query.model ?? "auto").trim();
+  const negativePrompt = String(req.query.negativePrompt ?? "").trim();
+  const width = Number(req.query.width ?? 640);
+  const height = Number(req.query.height ?? 384);
+  const steps = Number(req.query.steps ?? 6);
+  const seed = Number(req.query.seed ?? Date.now() % 2147483647);
+  const profile = Number(req.query.profile ?? 4);
+  const durationSeconds = Number(req.query.durationSeconds ?? 3);
+  const fps = Number(req.query.fps ?? 16);
+  const frameCount = Number(req.query.frameCount ?? 49);
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+
+  if (!prompt) {
+    return res.status(400).json({ error: "prompt is required" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const send = (payload: unknown) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const controller = new AbortController();
+  const onClientDisconnect = () => {
+    controller.abort();
+  };
+  req.on("close", onClientDisconnect);
+
+  try {
+    send({ type: "status", message: "Starting Wan2GP video generation..." });
+    const generated = await generateWithWan2GpStreaming(
+      {
+        mode: "video",
+        prompt,
+        negativePrompt,
+        model,
+        width,
+        height,
+        steps,
+        seed,
+        profile,
+        durationSeconds,
+        fps,
+        frameCount,
+      },
+      (message) => send({ type: "status", message }),
+      controller.signal,
+    );
+
+    send({ type: "status", message: "Saving generated video into workspace assets..." });
+    const bytes = await readMediaBytes(generated.outputPath);
+    const extension = inferMediaExtension(generated.outputPath, "mp4");
+    const saved = await saveBufferToWorkspaceAssets({
+      workspaceId,
+      category: "videos",
+      baseName: "wan2gp-video",
+      extension,
+      bytes,
+    });
+
+    send({
+      type: "done",
+      result: {
+        videoUrl: `/api/tools/wan2gp/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        relativePath: saved.relativePath,
+        workspaceId: saved.workspaceId,
+        provider: generated.provider,
+        model: generated.model,
+        width: generated.width,
+        height: generated.height,
+        steps: generated.steps,
+        seed: generated.seed,
+        profile: generated.profile,
+        durationSeconds: generated.durationSeconds,
+        fps: generated.fps,
+        frameCount: generated.frameCount,
         prompt: generated.prompt,
         negativePrompt: generated.negativePrompt,
       },
