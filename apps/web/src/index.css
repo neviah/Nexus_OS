@@ -52,6 +52,20 @@
   --bad: #d66060;
 }
 
+:root[data-theme="daybreak"] * {
+  scrollbar-color: rgba(47, 127, 227, 0.45) transparent;
+}
+
+:root[data-theme="daybreak"] *::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(47, 127, 227, 0.56), rgba(70, 169, 150, 0.4));
+  background-clip: padding-box;
+}
+
+:root[data-theme="daybreak"] *::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(47, 127, 227, 0.72), rgba(70, 169, 150, 0.56));
+  background-clip: padding-box;
+}
+
 :root[data-theme="forest"] {
   --ink-1: #f2f8ed;
   --ink-2: #c7d9b8;
@@ -253,7 +267,7 @@ h3 {
 }
 
 .pane-left h2 {
-  font-size: 0.76rem;
+  font-size: 0.78rem;
   letter-spacing: 0.07em;
 }
 
@@ -284,7 +298,7 @@ h3 {
 
 .side-group-note {
   color: var(--ink-3);
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -346,7 +360,7 @@ h3 {
 }
 
 .meta-block strong {
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
@@ -355,7 +369,7 @@ h3 {
 
 .meta-block small {
   color: var(--ink-3);
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -649,6 +663,130 @@ button:disabled {
 .theme-card small {
   color: var(--ink-3);
   font-size: 0.76rem;
+}
+
+:root[data-theme="daybreak"] body {
+  background:
+    radial-gradient(1200px 700px at 10% -20%, rgba(47, 127, 227, 0.16), transparent 60%),
+    radial-gradient(1300px 700px at 90% 120%, rgba(70, 169, 150, 0.12), transparent 56%),
+    linear-gradient(160deg, #eef3f7, #e6edf3 50%, #dde7f0);
+}
+
+:root[data-theme="daybreak"] .app-shell {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(185, 204, 220, 0.8);
+  box-shadow: 0 14px 28px rgba(93, 119, 142, 0.18);
+}
+
+:root[data-theme="daybreak"] .orb-left {
+  background: rgba(47, 127, 227, 0.14);
+}
+
+:root[data-theme="daybreak"] .orb-right {
+  background: rgba(70, 169, 150, 0.12);
+}
+
+:root[data-theme="daybreak"] .pane,
+:root[data-theme="daybreak"] .pane-left,
+:root[data-theme="daybreak"] .pane-right {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(191, 208, 221, 0.7);
+}
+
+:root[data-theme="daybreak"] .pane-middle {
+  background: rgba(250, 253, 255, 0.86);
+}
+
+:root[data-theme="daybreak"] .side-nav-group + .side-nav-group {
+  border-top-color: rgba(191, 208, 221, 0.72);
+}
+
+:root[data-theme="daybreak"] .nav-item:hover {
+  background: rgba(47, 127, 227, 0.08);
+}
+
+:root[data-theme="daybreak"] .nav-item.active {
+  background: rgba(47, 127, 227, 0.11);
+  box-shadow: inset 2px 0 0 var(--signal);
+}
+
+:root[data-theme="daybreak"] .nav-item-placeholder {
+  border-color: rgba(191, 208, 221, 0.9);
+  background: rgba(241, 247, 252, 0.86);
+}
+
+:root[data-theme="daybreak"] .tool-card,
+:root[data-theme="daybreak"] .tool-section,
+:root[data-theme="daybreak"] .recommendation-list li,
+:root[data-theme="daybreak"] .chat-thread-item,
+:root[data-theme="daybreak"] .workspace-browser,
+:root[data-theme="daybreak"] .workspace-list li,
+:root[data-theme="daybreak"] .connector-placeholder-card,
+:root[data-theme="daybreak"] .stable-audio-card,
+:root[data-theme="daybreak"] .runtime-job-card,
+:root[data-theme="daybreak"] .cookbook-recommendation-line,
+:root[data-theme="daybreak"] .automation-list li,
+:root[data-theme="daybreak"] .startup-panel {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(191, 208, 221, 0.82);
+}
+
+:root[data-theme="daybreak"] .tool-tab,
+:root[data-theme="daybreak"] .harness-tab,
+:root[data-theme="daybreak"] .theme-card,
+:root[data-theme="daybreak"] .ghost,
+:root[data-theme="daybreak"] .tab-btn {
+  background: rgba(236, 244, 251, 0.92);
+  border-color: rgba(191, 208, 221, 0.9);
+  color: var(--ink-2);
+}
+
+:root[data-theme="daybreak"] .tool-tab.active,
+:root[data-theme="daybreak"] .harness-tab.active,
+:root[data-theme="daybreak"] .theme-card.active,
+:root[data-theme="daybreak"] .tab-btn.active {
+  background: rgba(47, 127, 227, 0.14);
+  border-color: rgba(47, 127, 227, 0.56);
+  color: var(--ink-1);
+}
+
+:root[data-theme="daybreak"] button {
+  background: rgba(47, 127, 227, 0.14);
+  color: var(--ink-1);
+}
+
+:root[data-theme="daybreak"] input,
+:root[data-theme="daybreak"] textarea,
+:root[data-theme="daybreak"] select,
+:root[data-theme="daybreak"] .git-entry-list,
+:root[data-theme="daybreak"] .github-device-card,
+:root[data-theme="daybreak"] .github-advanced-details,
+:root[data-theme="daybreak"] .image-status-stream,
+:root[data-theme="daybreak"] .runtime-job-log,
+:root[data-theme="daybreak"] .router-unavailable,
+:root[data-theme="daybreak"] .router-panels article,
+:root[data-theme="daybreak"] .harness-extras-popover,
+:root[data-theme="daybreak"] .stream-trace,
+:root[data-theme="daybreak"] .message,
+:root[data-theme="daybreak"] .message.assistant,
+:root[data-theme="daybreak"] .workspace-root-list button,
+:root[data-theme="daybreak"] .workspace-folder-list button {
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(191, 208, 221, 0.86);
+  color: var(--ink-1);
+}
+
+:root[data-theme="daybreak"] .chat-status,
+:root[data-theme="daybreak"] .chat-composer,
+:root[data-theme="daybreak"] .chat-thread-pane,
+:root[data-theme="daybreak"] .tree-panel,
+:root[data-theme="daybreak"] .logs li {
+  border-color: rgba(191, 208, 221, 0.86);
+}
+
+:root[data-theme="daybreak"] .message.user {
+  background: linear-gradient(180deg, rgba(47, 127, 227, 0.16), rgba(47, 127, 227, 0.1));
+  border-color: rgba(47, 127, 227, 0.42);
 }
 
 .git-status-grid {
