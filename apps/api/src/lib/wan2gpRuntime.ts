@@ -7,10 +7,11 @@ import { getRootDir } from "./stateStore.js";
 
 const execFileAsync = promisify(execFile);
 
-const wanRoot = path.join(getRootDir(), "data", "runtime-tools", "wan2gp");
+const wanRoot = path.join(getRootDir(), "vendor", "wan2gp");
 const wanAppRoot = path.join(wanRoot, "app");
 const wanVenvRoot = path.join(wanAppRoot, "env");
 const wanRepoUrl = "https://github.com/deepbeepmeep/Wan2GP";
+let lastWanReadinessError: string | null = null;
 
 type Wan2GpMode = "image" | "video";
 
@@ -83,18 +84,49 @@ async function commandWorks(command: string, args: string[]): Promise<boolean> {
   }
 }
 
-async function resolveSystemPython(): Promise<string> {
-  const candidates: Array<[string, string[]]> = process.platform === "win32"
-    ? [["py", ["-3.11", "-V"]], ["py", ["-3", "-V"]], ["python", ["-V"]]]
-    : [["python3", ["-V"]], ["python", ["-V"]]];
-
-  for (const [command, args] of candidates) {
-    if (await commandWorks(command, args)) {
-      return command;
-    }
+async function ensurePython311OnWindows(): Promise<void> {
+  if (process.platform !== "win32") {
+    return;
   }
 
-  throw new Error("Python 3.11+ is required to install Wan2GP.");
+  if (await commandWorks("py", ["-3.11", "-V"])) {
+    return;
+  }
+
+  try {
+    await execFileAsync("winget", [
+      "install",
+      "--id",
+      "Python.Python.3.11",
+      "-e",
+      "--silent",
+      "--disable-interactivity",
+      "--accept-package-agreements",
+      "--accept-source-agreements",
+    ], {
+      windowsHide: true,
+      timeout: 20 * 60 * 1000,
+      maxBuffer: 1024 * 1024 * 8,
+    });
+  } catch {
+    // If winget install fails, we surface a clear error in resolver below.
+  }
+}
+
+async function resolveSystemPython(): Promise<{ command: string; argsPrefix: string[] }> {
+  if (process.platform === "win32") {
+    await ensurePython311OnWindows();
+    if (await commandWorks("py", ["-3.11", "-V"])) {
+      return { command: "py", argsPrefix: ["-3.11"] };
+    }
+    throw new Error("Python 3.11 is required for Wan2GP on Windows. Install Python 3.11 and retry.");
+  }
+
+  if (await commandWorks("python3.11", ["-V"])) {
+    return { command: "python3.11", argsPrefix: [] };
+  }
+
+  throw new Error("Python 3.11 is required for Wan2GP. Install python3.11 and retry.");
 }
 
 async function ensureWanRepo(): Promise<void> {
@@ -132,12 +164,19 @@ async function ensureWanEnv(): Promise<void> {
     await fs.access(pythonPath);
   } catch {
     const python = await resolveSystemPython();
-    await execFileAsync(python, ["-m", "venv", wanVenvRoot], {
+    await execFileAsync(python.command, [...python.argsPrefix, "-m", "venv", wanVenvRoot], {
       windowsHide: true,
       timeout: 10 * 60 * 1000,
       maxBuffer: 1024 * 1024 * 8,
     });
   }
+
+  await execFileAsync(pythonPath, ["-m", "pip", "install", "--upgrade", "pip", "setuptools<75", "wheel"], {
+    cwd: wanAppRoot,
+    windowsHide: true,
+    timeout: 10 * 60 * 1000,
+    maxBuffer: 1024 * 1024 * 16,
+  });
 
   await execFileAsync(pythonPath, ["-m", "pip", "install", "--upgrade", "pip"], {
     cwd: wanAppRoot,
@@ -146,7 +185,7 @@ async function ensureWanEnv(): Promise<void> {
     maxBuffer: 1024 * 1024 * 16,
   });
 
-  await execFileAsync(pythonPath, ["-m", "pip", "install", "-r", "requirements.txt"], {
+  await execFileAsync(pythonPath, ["-m", "pip", "install", "--prefer-binary", "-r", "requirements.txt"], {
     cwd: wanAppRoot,
     windowsHide: true,
     timeout: 90 * 60 * 1000,
@@ -162,8 +201,8 @@ async function checkWanApiReady(): Promise<boolean> {
     return false;
   }
 
-  const smokeScript = path.join(wanRoot, "api_smoke.py");
-  await fs.mkdir(wanRoot, { recursive: true });
+  const smokeScript = path.join(wanAppRoot, ".nexus_api_smoke.py");
+  await fs.mkdir(wanAppRoot, { recursive: true });
   await fs.writeFile(smokeScript, [
     "from shared.api import init",
     "print('ok')",
@@ -176,8 +215,10 @@ async function checkWanApiReady(): Promise<boolean> {
       timeout: 10000,
       maxBuffer: 256 * 1024,
     });
+    lastWanReadinessError = null;
     return true;
-  } catch {
+  } catch (error) {
+    lastWanReadinessError = error instanceof Error ? error.message : String(error);
     return false;
   }
 }
@@ -298,6 +339,9 @@ export async function getWan2GpStatus(): Promise<Wan2GpStatus> {
   }
   if (installed && envReady && !apiReady) {
     notes.push("Wan2GP environment exists but shared API import failed. Reinstall dependencies.");
+    if (lastWanReadinessError) {
+      notes.push(`Readiness check error: ${lastWanReadinessError}`);
+    }
   }
   if (apiReady) {
     notes.push("Image + video generation is available via in-process WanGP API.");
@@ -336,7 +380,7 @@ export async function startWan2GpIfNeeded(): Promise<void> {
   }
   const ready = await checkWanApiReady();
   if (!ready) {
-    throw new Error("Wan2GP API readiness check failed.");
+    throw new Error(`Wan2GP API readiness check failed.${lastWanReadinessError ? ` ${lastWanReadinessError}` : ""}`);
   }
 }
 
@@ -360,8 +404,8 @@ export async function generateWithWan2GpStreaming(
   const durationSeconds = clampInt(input.durationSeconds ?? 4, 1, 12);
   const frameCount = clampInt(input.frameCount ?? (fps * durationSeconds + 1), 17, 193);
 
-  await fs.mkdir(wanRoot, { recursive: true });
-  const scriptPath = path.join(wanRoot, `generate-${mode}.py`);
+  await fs.mkdir(wanAppRoot, { recursive: true });
+  const scriptPath = path.join(wanAppRoot, `.nexus-generate-${mode}.py`);
   await fs.writeFile(scriptPath, buildWanScript({
     ...input,
     width,

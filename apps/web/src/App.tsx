@@ -1407,6 +1407,10 @@ function App() {
     }
     const payload = (await refreshed.json()) as Wan2GpStatus;
     setWan2GpStatus(payload);
+    if (!payload.apiReady) {
+      const detail = payload.notes?.[payload.notes.length - 1] ?? "Wan2GP readiness check failed.";
+      setStatusMessage(detail);
+    }
     return payload.apiReady;
   }
 
