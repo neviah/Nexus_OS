@@ -199,16 +199,27 @@ async function hasNvidiaGpu(): Promise<boolean> {
   return await commandWorks("nvidia-smi", ["-L"]);
 }
 
-async function readTorchBuildInfo(pythonPath: string): Promise<{ version: string; cuda: string; available: boolean }> {
+async function readTorchBuildInfo(
+  pythonPath: string,
+): Promise<{ version: string; cuda: string; available: boolean; torchaudioOk: boolean; torchaudioVersion: string }> {
   const { stdout } = await execFileAsync(pythonPath, [
     "-c",
     [
       "import json",
       "import torch",
+      "torchaudio_ok = True",
+      "torchaudio_version = ''",
+      "try:",
+      "  import torchaudio",
+      "  torchaudio_version = str(getattr(torchaudio, '__version__', ''))",
+      "except Exception:",
+      "  torchaudio_ok = False",
       "print('NEXUS_TORCH:' + json.dumps({",
       "  'version': str(getattr(torch, '__version__', '')),",
       "  'cuda': str(getattr(getattr(torch, 'version', object()), 'cuda', '') or ''),",
-      "  'available': bool(getattr(torch.cuda, 'is_available', lambda: False)())",
+      "  'available': bool(getattr(torch.cuda, 'is_available', lambda: False)()),",
+      "  'torchaudio_ok': torchaudio_ok,",
+      "  'torchaudio_version': torchaudio_version",
       "}))",
     ].join("\n"),
   ], {
@@ -221,18 +232,26 @@ async function readTorchBuildInfo(pythonPath: string): Promise<{ version: string
   const marker = "NEXUS_TORCH:";
   const line = stdout.split(/\r?\n/).map((item) => item.trim()).find((item) => item.startsWith(marker));
   if (!line) {
-    return { version: "", cuda: "", available: false };
+    return { version: "", cuda: "", available: false, torchaudioOk: false, torchaudioVersion: "" };
   }
 
   try {
-    const parsed = JSON.parse(line.slice(marker.length)) as { version?: unknown; cuda?: unknown; available?: unknown };
+    const parsed = JSON.parse(line.slice(marker.length)) as {
+      version?: unknown;
+      cuda?: unknown;
+      available?: unknown;
+      torchaudio_ok?: unknown;
+      torchaudio_version?: unknown;
+    };
     return {
       version: String(parsed.version ?? ""),
       cuda: String(parsed.cuda ?? ""),
       available: Boolean(parsed.available),
+      torchaudioOk: Boolean(parsed.torchaudio_ok),
+      torchaudioVersion: String(parsed.torchaudio_version ?? ""),
     };
   } catch {
-    return { version: "", cuda: "", available: false };
+    return { version: "", cuda: "", available: false, torchaudioOk: false, torchaudioVersion: "" };
   }
 }
 
@@ -241,8 +260,14 @@ async function ensureCudaTorchWhenNvidiaPresent(pythonPath: string): Promise<voi
     return;
   }
 
-  const before = await readTorchBuildInfo(pythonPath).catch(() => ({ version: "", cuda: "", available: false }));
-  if (before.cuda) {
+  const before = await readTorchBuildInfo(pythonPath).catch(() => ({
+    version: "",
+    cuda: "",
+    available: false,
+    torchaudioOk: false,
+    torchaudioVersion: "",
+  }));
+  if (before.cuda && before.torchaudioOk) {
     return;
   }
 
@@ -259,6 +284,7 @@ async function ensureCudaTorchWhenNvidiaPresent(pythonPath: string): Promise<voi
         "pip",
         "install",
         "--upgrade",
+        "--force-reinstall",
         "--index-url",
         indexUrl,
         "torch",
@@ -274,8 +300,14 @@ async function ensureCudaTorchWhenNvidiaPresent(pythonPath: string): Promise<voi
       continue;
     }
 
-    const after = await readTorchBuildInfo(pythonPath).catch(() => ({ version: "", cuda: "", available: false }));
-    if (after.cuda) {
+    const after = await readTorchBuildInfo(pythonPath).catch(() => ({
+      version: "",
+      cuda: "",
+      available: false,
+      torchaudioOk: false,
+      torchaudioVersion: "",
+    }));
+    if (after.cuda && after.torchaudioOk) {
       return;
     }
   }
