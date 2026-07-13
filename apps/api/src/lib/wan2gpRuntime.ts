@@ -69,6 +69,17 @@ function clampInt(value: number, min: number, max: number): number {
   return Math.min(Math.max(Math.round(value), min), max);
 }
 
+function normalizeWanModel(value: string | undefined): string {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.toLowerCase() === "auto") {
+    return "";
+  }
+  return trimmed;
+}
+
 function getWanPythonPath(): string {
   return process.platform === "win32"
     ? path.join(wanVenvRoot, "Scripts", "python.exe")
@@ -566,6 +577,7 @@ export async function generateWithWan2GpStreaming(
   const fps = clampInt(input.fps ?? 16, 8, 32);
   const durationSeconds = clampInt(input.durationSeconds ?? 4, 1, 12);
   const frameCount = clampInt(input.frameCount ?? (fps * durationSeconds + 1), 17, 193);
+  const normalizedModel = normalizeWanModel(input.model);
 
   await fs.mkdir(wanAppRoot, { recursive: true });
   const scriptPath = path.join(wanAppRoot, `.nexus-generate-${mode}.py`);
@@ -593,7 +605,7 @@ export async function generateWithWan2GpStreaming(
       NEXUS_WAN_MODE: mode,
       NEXUS_WAN_PROMPT: input.prompt,
       NEXUS_WAN_NEGATIVE_PROMPT: input.negativePrompt ?? "",
-      NEXUS_WAN_MODEL: input.model?.trim() ?? "",
+      NEXUS_WAN_MODEL: normalizedModel,
       NEXUS_WAN_WIDTH: String(width),
       NEXUS_WAN_HEIGHT: String(height),
       NEXUS_WAN_STEPS: String(steps),
@@ -686,7 +698,7 @@ export async function generateWithWan2GpStreaming(
         outputPath: resultPayload.output_path,
         mode,
         provider: "wan2gp",
-        model: (input.model?.trim() || "auto"),
+        model: (normalizedModel || "auto"),
         width,
         height,
         steps,

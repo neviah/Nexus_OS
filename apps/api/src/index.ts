@@ -2332,7 +2332,8 @@ app.get("/api/tools/image/local/stream", async (req, res) => {
 
 app.get("/api/tools/wan2gp/image/stream", async (req, res) => {
   const prompt = String(req.query.prompt ?? "").trim();
-  const model = String(req.query.model ?? "auto").trim();
+  const requestedModel = String(req.query.model ?? "").trim();
+  const model = requestedModel.toLowerCase() === "auto" ? "" : requestedModel;
   const negativePrompt = String(req.query.negativePrompt ?? "").trim();
   const width = Number(req.query.width ?? 768);
   const height = Number(req.query.height ?? 768);
@@ -2419,7 +2420,8 @@ app.get("/api/tools/wan2gp/image/stream", async (req, res) => {
 
 app.get("/api/tools/wan2gp/video/stream", async (req, res) => {
   const prompt = String(req.query.prompt ?? "").trim();
-  const model = String(req.query.model ?? "auto").trim();
+  const requestedModel = String(req.query.model ?? "").trim();
+  const model = requestedModel.toLowerCase() === "auto" ? "" : requestedModel;
   const negativePrompt = String(req.query.negativePrompt ?? "").trim();
   const width = Number(req.query.width ?? 640);
   const height = Number(req.query.height ?? 384);
