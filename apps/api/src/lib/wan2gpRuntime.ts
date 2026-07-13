@@ -191,6 +191,96 @@ async function ensureWanEnv(): Promise<void> {
     timeout: 90 * 60 * 1000,
     maxBuffer: 1024 * 1024 * 32,
   });
+
+  await ensureCudaTorchWhenNvidiaPresent(pythonPath);
+}
+
+async function hasNvidiaGpu(): Promise<boolean> {
+  return await commandWorks("nvidia-smi", ["-L"]);
+}
+
+async function readTorchBuildInfo(pythonPath: string): Promise<{ version: string; cuda: string; available: boolean }> {
+  const { stdout } = await execFileAsync(pythonPath, [
+    "-c",
+    [
+      "import json",
+      "import torch",
+      "print('NEXUS_TORCH:' + json.dumps({",
+      "  'version': str(getattr(torch, '__version__', '')),",
+      "  'cuda': str(getattr(getattr(torch, 'version', object()), 'cuda', '') or ''),",
+      "  'available': bool(getattr(torch.cuda, 'is_available', lambda: False)())",
+      "}))",
+    ].join("\n"),
+  ], {
+    cwd: wanAppRoot,
+    windowsHide: true,
+    timeout: 60 * 1000,
+    maxBuffer: 1024 * 1024,
+  });
+
+  const marker = "NEXUS_TORCH:";
+  const line = stdout.split(/\r?\n/).map((item) => item.trim()).find((item) => item.startsWith(marker));
+  if (!line) {
+    return { version: "", cuda: "", available: false };
+  }
+
+  try {
+    const parsed = JSON.parse(line.slice(marker.length)) as { version?: unknown; cuda?: unknown; available?: unknown };
+    return {
+      version: String(parsed.version ?? ""),
+      cuda: String(parsed.cuda ?? ""),
+      available: Boolean(parsed.available),
+    };
+  } catch {
+    return { version: "", cuda: "", available: false };
+  }
+}
+
+async function ensureCudaTorchWhenNvidiaPresent(pythonPath: string): Promise<void> {
+  if (!(await hasNvidiaGpu())) {
+    return;
+  }
+
+  const before = await readTorchBuildInfo(pythonPath).catch(() => ({ version: "", cuda: "", available: false }));
+  if (before.cuda) {
+    return;
+  }
+
+  const cudaIndexes = [
+    "https://download.pytorch.org/whl/cu128",
+    "https://download.pytorch.org/whl/cu126",
+    "https://download.pytorch.org/whl/cu124",
+  ];
+
+  for (const indexUrl of cudaIndexes) {
+    try {
+      await execFileAsync(pythonPath, [
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--index-url",
+        indexUrl,
+        "torch",
+        "torchvision",
+        "torchaudio",
+      ], {
+        cwd: wanAppRoot,
+        windowsHide: true,
+        timeout: 60 * 60 * 1000,
+        maxBuffer: 1024 * 1024 * 32,
+      });
+    } catch {
+      continue;
+    }
+
+    const after = await readTorchBuildInfo(pythonPath).catch(() => ({ version: "", cuda: "", available: false }));
+    if (after.cuda) {
+      return;
+    }
+  }
+
+  throw new Error("Wan2GP detected an NVIDIA GPU, but CUDA-enabled PyTorch could not be installed in the runtime environment.");
 }
 
 async function patchWanAttentionCudaFallback(): Promise<void> {
