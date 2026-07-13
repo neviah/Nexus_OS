@@ -2144,13 +2144,13 @@ app.get("/api/tools/wan2gp/status", async (_req, res) => {
       recommended: {
         profile: machine.recommendedProfile,
         image: {
-          model: "auto",
+          model: "flux_schnell",
           width: 768,
           height: 768,
           steps: 6,
         },
         video: {
-          model: "auto",
+          model: "t2v_1.3B",
           width: 640,
           height: 384,
           steps: 6,
@@ -2160,8 +2160,8 @@ app.get("/api/tools/wan2gp/status", async (_req, res) => {
         },
       },
       modelHints: {
-        image: ["auto", "qwen_image_20B", "flux1_schnell"],
-        video: ["auto", "ltx2_22B_distilled", "wan2.2_t2v_1.3B"],
+        image: ["auto", "flux_schnell", "alpha_sf", "qwen_image_20B"],
+        video: ["auto", "t2v_1.3B", "t2v_sf", "ltx2_22B_distilled"],
       },
     });
   } catch (error) {

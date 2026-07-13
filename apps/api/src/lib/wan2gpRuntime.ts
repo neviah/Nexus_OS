@@ -203,6 +203,18 @@ async function ensureWanEnv(): Promise<void> {
     maxBuffer: 1024 * 1024 * 32,
   });
 
+  // Optional accelerator for Hugging Face Xet-backed repos; avoids repeated fallback warnings.
+  try {
+    await execFileAsync(pythonPath, ["-m", "pip", "install", "--upgrade", "hf_xet"], {
+      cwd: wanAppRoot,
+      windowsHide: true,
+      timeout: 20 * 60 * 1000,
+      maxBuffer: 1024 * 1024 * 16,
+    });
+  } catch {
+    // Not fatal; WanGP can still download via regular HTTP.
+  }
+
   await ensureCudaTorchWhenNvidiaPresent(pythonPath);
 }
 
@@ -442,8 +454,8 @@ function buildWanScript(input: Wan2GpGenerateInput): string {
     "    available_model_types = [item for item in available_model_types if item]",
     "except Exception:",
     "    available_model_types = []",
-    "preferred_image_models = ['qwen_image_20B', 'flux1_schnell', 'flux', 'alpha2', 'alpha']",
-    "preferred_video_models = ['ltx2_22B_distilled', 'wan2.2_t2v_1.3B', 'hunyuan', 'animate', 'alpha2']",
+    "preferred_image_models = ['flux_schnell', 'alpha_sf', 'alpha2_sf', 'flux', 'alpha2', 'alpha', 'qwen_image_20B']",
+    "preferred_video_models = ['t2v_1.3B', 't2v_sf', 'fun_inp_1.3B', 'hunyuan', 'animate', 'alpha2']",
     "if model_type:",
     "    if available_model_types and model_type not in available_model_types:",
     "        preview = ', '.join(available_model_types[:24])",
