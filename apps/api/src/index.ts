@@ -545,7 +545,10 @@ function findActiveRuntimeJobByAction(action: RuntimeJobAction): RuntimeJob | un
 
 async function ensureCoreRuntimeProvisioning(): Promise<void> {
   await loadRuntimeJobsFromDisk();
-  const status = await getRuntimeStatus();
+  const [status, wan2gpStatus] = await Promise.all([
+    getRuntimeStatus(),
+    getWan2GpStatus(),
+  ]);
   if (!status.ollamaInstalled) {
     if (!findActiveRuntimeJobByAction("install-ollama")) {
       const ollamaJob = createRuntimeJob("install-ollama");
@@ -571,6 +574,20 @@ async function ensureCoreRuntimeProvisioning(): Promise<void> {
       const voiceJob = createRuntimeJob("install-default-piper-voice");
       appendRuntimeJobLog(voiceJob, "Queued by NexusOS core runtime provisioning.");
       startRuntimeJob(voiceJob);
+    }
+  }
+
+  if (!wan2gpStatus.installed || !wan2gpStatus.envReady) {
+    if (!findActiveRuntimeJobByAction("install-wan2gp")) {
+      const wanInstallJob = createRuntimeJob("install-wan2gp");
+      appendRuntimeJobLog(wanInstallJob, "Queued by NexusOS core runtime provisioning.");
+      startRuntimeJob(wanInstallJob);
+    }
+  } else if (!wan2gpStatus.apiReady) {
+    if (!findActiveRuntimeJobByAction("start-wan2gp")) {
+      const wanStartJob = createRuntimeJob("start-wan2gp");
+      appendRuntimeJobLog(wanStartJob, "Queued by NexusOS core runtime provisioning.");
+      startRuntimeJob(wanStartJob);
     }
   }
 
@@ -1808,7 +1825,7 @@ app.get("/api/bootstrap", async (_req, res) => {
   const harnessStatus = await resolveHarnessHealth(harnesses);
   const runtimeStatus = await getRuntimeStatus();
   const stableAudioStatus = await getStableAudioStatus();
-  const localImageStatus = await getLocalImageStatus();
+  const wan2gpStatus = await getWan2GpStatus();
   const workspaces = await listWorkspaces({
     [state.activeWorkspaceId]: harnessStatus.filter((h) => h.status === "online").map((h) => h.id),
   });
@@ -1840,7 +1857,7 @@ app.get("/api/bootstrap", async (_req, res) => {
         ? { type: "agent" as const, id: harnessStatus[0]?.id ?? "hermes" }
       : state.selectedPane;
 
-  const mediaCenterStatus: "online" | "offline" | "setup-required" = !stableAudioStatus.installed || !localImageStatus.ready
+  const mediaCenterStatus: "online" | "offline" | "setup-required" = !stableAudioStatus.installed || !wan2gpStatus.apiReady
     ? "setup-required"
     : "online";
 
@@ -2115,6 +2132,7 @@ app.get("/api/tools/image/local/status", async (_req, res) => {
 });
 
 app.get("/api/tools/wan2gp/status", async (_req, res) => {
+  void ensureCoreRuntimeProvisioning();
   try {
     const [status, machine] = await Promise.all([
       getWan2GpStatus(),

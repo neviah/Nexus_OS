@@ -1170,6 +1170,13 @@ function App() {
     imageGenerationAbortRef.current = controller;
     setImageBusyAction("generate");
     setImageStatusTrace("Starting Wan2GP image generation...\n");
+    const ready = await ensureWan2GpReadyForGeneration();
+    if (!ready) {
+      setImageStatusTrace((current) => `${current}Wan2GP is still not ready after provisioning.\n`.slice(-12000));
+      setStatusMessage("Wan2GP is still provisioning. Please retry in a moment.");
+      setImageBusyAction(null);
+      return;
+    }
     const seedToUse = imageSeed < 0 ? Math.floor(Math.random() * 2147483647) : imageSeed;
     const params = new URLSearchParams({
       prompt: imagePrompt,
@@ -1363,6 +1370,31 @@ function App() {
     setWanProfile((current) => current > 0 ? current : payload.recommended.profile);
   }
 
+  async function ensureWan2GpReadyForGeneration(): Promise<boolean> {
+    const current = wan2GpStatus;
+    if (current?.apiReady) {
+      return true;
+    }
+
+    setStatusMessage("Wan2GP is not ready yet. Starting automatic runtime provisioning...");
+    pushToast("Provisioning Wan2GP runtime now.", "warn");
+
+    const needsInstall = !current?.installed || !current?.envReady;
+    if (needsInstall) {
+      await runRuntimeJob("wan2gp-install", "install-wan2gp", "Wan2GP installed.");
+    }
+
+    await runRuntimeJob("wan2gp-start", "start-wan2gp", "Wan2GP ready.");
+
+    const refreshed = await fetch("/api/tools/wan2gp/status");
+    if (!refreshed.ok) {
+      return false;
+    }
+    const payload = (await refreshed.json()) as Wan2GpStatus;
+    setWan2GpStatus(payload);
+    return payload.apiReady;
+  }
+
   async function generateVideo() {
     if (videoGenerationAbortRef.current) {
       videoGenerationAbortRef.current.abort();
@@ -1371,6 +1403,13 @@ function App() {
     videoGenerationAbortRef.current = controller;
     setVideoBusyAction("generate");
     setVideoStatusTrace("Starting Wan2GP video generation...\n");
+    const ready = await ensureWan2GpReadyForGeneration();
+    if (!ready) {
+      setVideoStatusTrace((current) => `${current}Wan2GP is still not ready after provisioning.\n`.slice(-12000));
+      setStatusMessage("Wan2GP is still provisioning. Please retry in a moment.");
+      setVideoBusyAction(null);
+      return;
+    }
     const seedToUse = videoSeed < 0 ? Math.floor(Math.random() * 2147483647) : videoSeed;
     const params = new URLSearchParams({
       prompt: videoPrompt,
@@ -3996,7 +4035,7 @@ function App() {
                     <textarea rows={2} value={imageNegativePrompt} onChange={(event) => setImageNegativePrompt(event.target.value)} placeholder="blurry, low quality, artifacts..." />
                   </label>
                   <div className="tool-action-row">
-                    <button type="button" onClick={() => void generateImage()} disabled={imageBusyAction !== null || !imagePrompt.trim() || !wan2GpStatus?.apiReady}>
+                    <button type="button" onClick={() => void generateImage()} disabled={imageBusyAction !== null || !imagePrompt.trim()}>
                       {imageBusyAction === "generate" ? "Generating..." : "Generate"}
                     </button>
                     <button type="button" className="ghost" onClick={stopImageGeneration} disabled={imageBusyAction !== "generate"}>
@@ -4126,7 +4165,7 @@ function App() {
                     <textarea rows={2} value={videoNegativePrompt} onChange={(event) => setVideoNegativePrompt(event.target.value)} placeholder="blurry, flicker, artifacts..." />
                   </label>
                   <div className="tool-action-row">
-                    <button type="button" onClick={() => void generateVideo()} disabled={videoBusyAction !== null || !videoPrompt.trim() || !wan2GpStatus?.apiReady}>
+                    <button type="button" onClick={() => void generateVideo()} disabled={videoBusyAction !== null || !videoPrompt.trim()}>
                       {videoBusyAction === "generate" ? "Generating..." : "Generate Video"}
                     </button>
                     <button type="button" className="ghost" onClick={stopVideoGeneration} disabled={videoBusyAction !== "generate"}>
@@ -4387,7 +4426,7 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator", "image-generator", "settings"].includes(selectedPane.id) ? (
+          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator", "image-generator", "media-center", "settings"].includes(selectedPane.id) ? (
             <div className="placeholder-view">
               <h2>{boot?.tools.find((tool) => tool.id === selectedPane.id)?.name ?? "Tool"}</h2>
               <p>Tool plugin slot ready. Hook this panel to a future backend module.</p>
