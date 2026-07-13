@@ -948,13 +948,13 @@ function App() {
     setStatusMessage("Harness voice assignments saved.");
   }
 
-  async function waitForRuntimeJobCompletion(jobId: string, successMessage: string) {
+  async function waitForRuntimeJobCompletion(jobId: string, successMessage: string): Promise<{ ok: boolean; error?: string }> {
     while (true) {
       const poll = await fetch(`/api/tools/runtimes/jobs/${encodeURIComponent(jobId)}`);
       if (!poll.ok) {
         setStatusMessage("Runtime job disappeared before completion.");
         setRuntimeBusyAction(null);
-        return;
+        return { ok: false, error: "Runtime job disappeared before completion." };
       }
 
       const pollPayload = (await poll.json()) as { job: RuntimeJob };
@@ -965,26 +965,27 @@ function App() {
         await Promise.all([loadRuntimeStatus(), loadCookbookSnapshot(), loadVoiceStatus(), loadRuntimeJobs()]);
         setStatusMessage(successMessage);
         setRuntimeBusyAction(null);
-        return;
+        return { ok: true };
       }
 
       if (job.status === "failed") {
-        setStatusMessage(job.error ?? "Runtime job failed");
+        const failureMessage = job.error ?? job.logs[job.logs.length - 1] ?? "Runtime job failed";
+        setStatusMessage(failureMessage);
         setRuntimeBusyAction(null);
-        return;
+        return { ok: false, error: failureMessage };
       }
 
       if (job.status === "canceled") {
         setStatusMessage("Runtime job canceled.");
         setRuntimeBusyAction(null);
-        return;
+        return { ok: false, error: "Runtime job canceled." };
       }
 
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
 
-  async function runRuntimeJob(actionId: string, action: RuntimeJob["action"], successMessage: string, model?: string) {
+  async function runRuntimeJob(actionId: string, action: RuntimeJob["action"], successMessage: string, model?: string): Promise<{ ok: boolean; error?: string }> {
     setRuntimeBusyAction(actionId);
     const response = await fetch("/api/tools/runtimes/jobs", {
       method: "POST",
@@ -996,14 +997,14 @@ function App() {
       const payload = (await response.json()) as { error?: string };
       setStatusMessage(payload.error ?? "Runtime job failed to start");
       setRuntimeBusyAction(null);
-      return;
+      return { ok: false, error: payload.error ?? "Runtime job failed to start" };
     }
 
     const payload = (await response.json()) as { job: RuntimeJob };
     const jobId = payload.job.id;
     setStatusMessage(`${action} queued...`);
     await loadRuntimeJobs();
-    await waitForRuntimeJobCompletion(jobId, successMessage);
+    return await waitForRuntimeJobCompletion(jobId, successMessage);
   }
 
   async function cancelRuntimeJob(job: RuntimeJob) {
@@ -1371,7 +1372,13 @@ function App() {
   }
 
   async function ensureWan2GpReadyForGeneration(): Promise<boolean> {
-    const current = wan2GpStatus;
+    let current = wan2GpStatus;
+    const fresh = await fetch("/api/tools/wan2gp/status").catch(() => null);
+    if (fresh?.ok) {
+      current = await fresh.json() as Wan2GpStatus;
+      setWan2GpStatus(current);
+    }
+
     if (current?.apiReady) {
       return true;
     }
@@ -1381,10 +1388,18 @@ function App() {
 
     const needsInstall = !current?.installed || !current?.envReady;
     if (needsInstall) {
-      await runRuntimeJob("wan2gp-install", "install-wan2gp", "Wan2GP installed.");
+      const installResult = await runRuntimeJob("wan2gp-install", "install-wan2gp", "Wan2GP installed.");
+      if (!installResult.ok) {
+        setStatusMessage(installResult.error ?? "Wan2GP install failed.");
+        return false;
+      }
     }
 
-    await runRuntimeJob("wan2gp-start", "start-wan2gp", "Wan2GP ready.");
+    const startResult = await runRuntimeJob("wan2gp-start", "start-wan2gp", "Wan2GP ready.");
+    if (!startResult.ok) {
+      setStatusMessage(startResult.error ?? "Wan2GP start/check failed.");
+      return false;
+    }
 
     const refreshed = await fetch("/api/tools/wan2gp/status");
     if (!refreshed.ok) {

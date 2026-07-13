@@ -8,7 +8,8 @@ module.exports = {
           "git pull",
           "npm install",
           "npm --prefix apps/api install",
-          "npm --prefix apps/web install"
+          "npm --prefix apps/web install",
+          "npm --prefix apps/api run provision:wan2gp"
         ]
       }
     }
