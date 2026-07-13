@@ -195,13 +195,10 @@ async function ensureWanEnv(): Promise<void> {
 
 async function patchWanAttentionCudaFallback(): Promise<void> {
   const attentionPath = path.join(wanAppRoot, "shared", "attention.py");
-  const source = await fs.readFile(attentionPath, "utf-8");
-  const needle = "major, minor = (0, 0) if _is_mps else torch.cuda.get_device_capability(None)";
-  if (!source.includes(needle)) {
-    return;
-  }
+  let source = await fs.readFile(attentionPath, "utf-8");
+  let patched = false;
 
-  const replacement = [
+  const replacementTopLevel = [
     "if _is_mps:",
     "    major, minor = (0, 0)",
     "else:",
@@ -211,7 +208,27 @@ async function patchWanAttentionCudaFallback(): Promise<void> {
     "        major, minor = (0, 0)",
   ].join("\n");
 
-  await fs.writeFile(attentionPath, source.replace(needle, replacement), "utf-8");
+  const topLevelNeedle = "major, minor = (0, 0) if _is_mps else torch.cuda.get_device_capability(None)";
+  if (source.includes(topLevelNeedle)) {
+    source = source.replace(topLevelNeedle, replacementTopLevel);
+    patched = true;
+  }
+
+  const replacementModes = [
+    "    try:",
+    "        major, minor = torch.cuda.get_device_capability()",
+    "    except Exception:",
+    "        major, minor = (0, 0)",
+  ].join("\n");
+  const modesNeedle = "    major, minor = torch.cuda.get_device_capability()";
+  if (source.includes(modesNeedle)) {
+    source = source.replace(modesNeedle, replacementModes);
+    patched = true;
+  }
+
+  if (patched) {
+    await fs.writeFile(attentionPath, source, "utf-8");
+  }
 }
 
 async function checkWanApiReady(): Promise<boolean> {
