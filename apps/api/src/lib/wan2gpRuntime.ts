@@ -193,6 +193,27 @@ async function ensureWanEnv(): Promise<void> {
   });
 }
 
+async function patchWanAttentionCudaFallback(): Promise<void> {
+  const attentionPath = path.join(wanAppRoot, "shared", "attention.py");
+  const source = await fs.readFile(attentionPath, "utf-8");
+  const needle = "major, minor = (0, 0) if _is_mps else torch.cuda.get_device_capability(None)";
+  if (!source.includes(needle)) {
+    return;
+  }
+
+  const replacement = [
+    "if _is_mps:",
+    "    major, minor = (0, 0)",
+    "else:",
+    "    try:",
+    "        major, minor = torch.cuda.get_device_capability(None)",
+    "    except Exception:",
+    "        major, minor = (0, 0)",
+  ].join("\n");
+
+  await fs.writeFile(attentionPath, source.replace(needle, replacement), "utf-8");
+}
+
 async function checkWanApiReady(): Promise<boolean> {
   const pythonPath = getWanPythonPath();
   try {
@@ -205,6 +226,8 @@ async function checkWanApiReady(): Promise<boolean> {
   await fs.mkdir(wanAppRoot, { recursive: true });
   await fs.writeFile(smokeScript, [
     "from shared.api import init",
+    "session = init(root='.', cli_args=['--attention', 'sdpa', '--profile', '4'], console_output=False, console_isatty=False)",
+    "session.close()",
     "print('ok')",
   ].join("\n"), "utf-8");
 
@@ -212,7 +235,7 @@ async function checkWanApiReady(): Promise<boolean> {
     await execFileAsync(pythonPath, [smokeScript], {
       cwd: wanAppRoot,
       windowsHide: true,
-      timeout: 10000,
+      timeout: 120000,
       maxBuffer: 256 * 1024,
     });
     lastWanReadinessError = null;
@@ -368,6 +391,7 @@ export async function getWan2GpStatus(): Promise<Wan2GpStatus> {
 export async function installWan2Gp(): Promise<void> {
   await ensureWanRepo();
   await ensureWanEnv();
+  await patchWanAttentionCudaFallback();
 }
 
 export async function startWan2GpIfNeeded(): Promise<void> {
