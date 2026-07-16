@@ -457,6 +457,59 @@ type Wan2GpVideoStreamEnvelope =
   }
   | { type: "error"; message: string };
 
+type Hunyuan3dStatus = {
+  installed: boolean;
+  envReady: boolean;
+  apiReady: boolean;
+  appRoot: string;
+  pythonPath: string | null;
+  notes: string[];
+  recommended: {
+    modelPath: string;
+    subfolder: string;
+    numInferenceSteps: number;
+    octreeResolution: number;
+    guidanceScale: number;
+  };
+};
+
+type Hunyuan3dStreamEnvelope =
+  | { type: "status"; message: string }
+  | {
+    type: "done";
+    result: {
+      modelUrl: string;
+      relativePath: string;
+      workspaceId: string;
+      provider: string;
+      modelPath: string;
+      subfolder: string;
+      numInferenceSteps: number;
+      octreeResolution: number;
+      guidanceScale: number;
+      seed: number;
+      format: "glb" | "obj";
+      device: string;
+    };
+  }
+  | { type: "error"; message: string };
+
+type Model3dGeneratedResult = {
+  modelUrl: string;
+  provider: string;
+  modelPath: string;
+  subfolder: string;
+  numInferenceSteps: number;
+  octreeResolution: number;
+  guidanceScale: number;
+  seed: number;
+  format: "glb" | "obj";
+  device: string;
+  sourceImageUrl: string;
+  createdAt: string;
+  relativePath?: string;
+};
+
 type ImageSizePreset = {
   id: string;
   label: string;
@@ -466,7 +519,7 @@ type ImageSizePreset = {
 
 type RuntimeJob = {
   id: string;
-  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam" | "install-wan2gp" | "start-wan2gp";
+  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam" | "install-wan2gp" | "start-wan2gp" | "install-hunyuan3d" | "start-hunyuan3d";
   model?: string;
   status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   createdAt: string;
@@ -521,7 +574,7 @@ type GitHubDeviceFlow = {
 
 type SettingsTab = "connectors" | "appearance" | "automation";
 
-type MediaCenterTab = "voice" | "music" | "image" | "video";
+type MediaCenterTab = "voice" | "music" | "image" | "video" | "models";
 
 type ConnectorCard = {
   id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox";
@@ -745,6 +798,20 @@ function App() {
   const [videoResult, setVideoResult] = useState<VideoGeneratedResult | null>(null);
   const [recentVideos, setRecentVideos] = useState<VideoGeneratedResult[]>([]);
   const videoGenerationAbortRef = useRef<AbortController | null>(null);
+  const [hunyuan3dStatus, setHunyuan3dStatus] = useState<Hunyuan3dStatus | null>(null);
+  const [model3dSourceImageUrl, setModel3dSourceImageUrl] = useState("");
+  const [model3dModelPath, setModel3dModelPath] = useState("tencent/Hunyuan3D-2mini");
+  const [model3dSubfolder, setModel3dSubfolder] = useState("hunyuan3d-dit-v2-mini-turbo");
+  const [model3dNumInferenceSteps, setModel3dNumInferenceSteps] = useState(20);
+  const [model3dOctreeResolution, setModel3dOctreeResolution] = useState(192);
+  const [model3dGuidanceScale, setModel3dGuidanceScale] = useState(5);
+  const [model3dSeed, setModel3dSeed] = useState(-1);
+  const [model3dFormat, setModel3dFormat] = useState<"glb" | "obj">("glb");
+  const [model3dBusyAction, setModel3dBusyAction] = useState<"generate" | null>(null);
+  const [model3dStatusTrace, setModel3dStatusTrace] = useState("");
+  const [model3dResult, setModel3dResult] = useState<Model3dGeneratedResult | null>(null);
+  const [recentModels3d, setRecentModels3d] = useState<Model3dGeneratedResult[]>([]);
+  const model3dGenerationAbortRef = useRef<AbortController | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -1577,6 +1644,230 @@ function App() {
     setStatusMessage("Loaded recent video into preview.");
   }
 
+  async function loadHunyuan3dStatus() {
+    const response = await fetch("/api/tools/hunyuan3d/status");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as Hunyuan3dStatus;
+    setHunyuan3dStatus(payload);
+    setModel3dModelPath((current) => current.trim() ? current : payload.recommended.modelPath);
+    setModel3dSubfolder((current) => current.trim() ? current : payload.recommended.subfolder);
+  }
+
+  async function ensureHunyuan3dReadyForGeneration(): Promise<boolean> {
+    let current = hunyuan3dStatus;
+    const fresh = await fetch("/api/tools/hunyuan3d/status").catch(() => null);
+    if (fresh?.ok) {
+      current = await fresh.json() as Hunyuan3dStatus;
+      setHunyuan3dStatus(current);
+    }
+
+    if (current?.apiReady) {
+      return true;
+    }
+
+    setStatusMessage("Hunyuan3D-2GP is not ready yet. Starting automatic runtime provisioning...");
+    pushToast("Provisioning Hunyuan3D-2GP runtime now.", "warn");
+
+    const needsInstall = !current?.installed || !current?.envReady;
+    if (needsInstall) {
+      const installResult = await runRuntimeJob("hunyuan3d-install", "install-hunyuan3d", "Hunyuan3D-2GP installed.");
+      if (!installResult.ok) {
+        setStatusMessage(installResult.error ?? "Hunyuan3D-2GP install failed.");
+        return false;
+      }
+    }
+
+    const startResult = await runRuntimeJob("hunyuan3d-start", "start-hunyuan3d", "Hunyuan3D-2GP ready.");
+    if (!startResult.ok) {
+      setStatusMessage(startResult.error ?? "Hunyuan3D-2GP readiness check failed.");
+      return false;
+    }
+
+    const refreshed = await fetch("/api/tools/hunyuan3d/status");
+    if (!refreshed.ok) {
+      return false;
+    }
+    const payload = (await refreshed.json()) as Hunyuan3dStatus;
+    setHunyuan3dStatus(payload);
+    if (!payload.apiReady) {
+      const detail = payload.notes?.[payload.notes.length - 1] ?? "Hunyuan3D-2GP readiness check failed.";
+      setStatusMessage(detail);
+    }
+    return payload.apiReady;
+  }
+
+  async function generateModel3d() {
+    if (model3dGenerationAbortRef.current) {
+      model3dGenerationAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    model3dGenerationAbortRef.current = controller;
+    setModel3dBusyAction("generate");
+    setModel3dStatusTrace("Starting Hunyuan3D-2GP generation...\n");
+
+    const sourceImageUrl = model3dSourceImageUrl.trim();
+    if (!sourceImageUrl) {
+      setStatusMessage("A source image URL is required for 3D generation.");
+      pushToast("Provide a source image URL first.", "warn");
+      setModel3dBusyAction(null);
+      return;
+    }
+
+    const ready = await ensureHunyuan3dReadyForGeneration();
+    if (!ready) {
+      setModel3dStatusTrace((current) => `${current}Hunyuan3D-2GP is still not ready after provisioning.\n`.slice(-16000));
+      setStatusMessage("Hunyuan3D-2GP is still provisioning. Please retry in a moment.");
+      setModel3dBusyAction(null);
+      return;
+    }
+
+    const seedToUse = model3dSeed < 0 ? Math.floor(Math.random() * 2147483647) : model3dSeed;
+    const params = new URLSearchParams({
+      imageUrl: sourceImageUrl,
+      modelPath: model3dModelPath,
+      subfolder: model3dSubfolder,
+      numInferenceSteps: String(model3dNumInferenceSteps),
+      octreeResolution: String(model3dOctreeResolution),
+      guidanceScale: String(model3dGuidanceScale),
+      seed: String(seedToUse),
+      format: model3dFormat,
+      workspaceId: boot?.activeWorkspaceId ?? "default",
+    });
+
+    try {
+      const response = await fetch(`/api/tools/hunyuan3d/generate/stream?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        const payload = (await response.json()) as { error?: string };
+        const message = payload.error ?? "Hunyuan3D generation failed.";
+        setStatusMessage(message);
+        pushToast(message, "err");
+        setModel3dBusyAction(null);
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completed = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          const split = buffer.indexOf("\n\n");
+          if (split === -1) {
+            break;
+          }
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+          if (!dataLine) {
+            continue;
+          }
+          const raw = dataLine.slice(5).trim();
+          let envelope: Hunyuan3dStreamEnvelope;
+          try {
+            envelope = JSON.parse(raw) as Hunyuan3dStreamEnvelope;
+          } catch {
+            continue;
+          }
+
+          if (envelope.type === "status") {
+            setModel3dStatusTrace((current) => `${current}${envelope.message}\n`.slice(-16000));
+            continue;
+          }
+
+          if (envelope.type === "error") {
+            setModel3dStatusTrace((current) => `${current}[error] ${envelope.message}\n`.slice(-16000));
+            setStatusMessage(envelope.message);
+            pushToast(envelope.message, "err");
+            continue;
+          }
+
+          if (envelope.type === "done") {
+            const generated: Model3dGeneratedResult = {
+              modelUrl: envelope.result.modelUrl,
+              provider: envelope.result.provider,
+              modelPath: envelope.result.modelPath,
+              subfolder: envelope.result.subfolder,
+              numInferenceSteps: envelope.result.numInferenceSteps,
+              octreeResolution: envelope.result.octreeResolution,
+              guidanceScale: envelope.result.guidanceScale,
+              seed: envelope.result.seed,
+              format: envelope.result.format,
+              device: envelope.result.device,
+              sourceImageUrl,
+              relativePath: envelope.result.relativePath,
+              createdAt: new Date().toISOString(),
+            };
+            setModel3dResult(generated);
+            setRecentModels3d((current) => [generated, ...current].slice(0, 10));
+            setStatusMessage("Hunyuan3D mesh generated and saved.");
+            pushToast("Hunyuan3D mesh generated and saved.", "ok");
+            completed = true;
+            await refreshActiveWorkspaceTree(envelope.result.workspaceId);
+            void loadHunyuan3dStatus();
+          }
+        }
+      }
+
+      if (!completed && !controller.signal.aborted) {
+        setStatusMessage("Hunyuan3D stream ended before completion.");
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        setModel3dStatusTrace((current) => `${current}Generation canceled by user.\n`.slice(-16000));
+        setStatusMessage("Hunyuan3D generation stopped.");
+        pushToast("3D generation canceled.", "warn");
+      } else {
+        const message = String(error);
+        setModel3dStatusTrace((current) => `${current}[error] ${message}\n`.slice(-16000));
+        setStatusMessage(message);
+        pushToast(message, "err");
+      }
+    } finally {
+      if (model3dGenerationAbortRef.current === controller) {
+        model3dGenerationAbortRef.current = null;
+      }
+      setModel3dBusyAction(null);
+    }
+  }
+
+  function stopModel3dGeneration() {
+    model3dGenerationAbortRef.current?.abort();
+  }
+
+  function useLatestGeneratedImageFor3d() {
+    const candidate = imageResult?.imageUrl ?? recentImages[0]?.imageUrl ?? "";
+    if (!candidate) {
+      setStatusMessage("Generate an image first, then use it as 3D source.");
+      return;
+    }
+    setModel3dSourceImageUrl(candidate);
+    setStatusMessage("Loaded latest generated image as 3D source.");
+  }
+
+  function openRecentModel3d(model: Model3dGeneratedResult) {
+    setModel3dSourceImageUrl(model.sourceImageUrl);
+    setModel3dModelPath(model.modelPath);
+    setModel3dSubfolder(model.subfolder);
+    setModel3dNumInferenceSteps(model.numInferenceSteps);
+    setModel3dOctreeResolution(model.octreeResolution);
+    setModel3dGuidanceScale(model.guidanceScale);
+    setModel3dSeed(model.seed);
+    setModel3dFormat(model.format);
+    setModel3dResult(model);
+    setStatusMessage("Loaded recent 3D generation into preview.");
+  }
+
   async function openActiveWorkspaceFolder() {
     const workspaceId = boot?.activeWorkspaceId ?? "default";
     const response = await fetch("/api/workspaces/open", {
@@ -2028,6 +2319,8 @@ function App() {
         setMediaCenterTab("image");
       } else if (payloadPane.id === "video-generator") {
         setMediaCenterTab("video");
+      } else if (payloadPane.id === "models-generator") {
+        setMediaCenterTab("models");
       }
     }
 
@@ -2035,7 +2328,8 @@ function App() {
       && (payloadPane.id === "voice-studio"
         || payloadPane.id === "music-generator"
         || payloadPane.id === "image-generator"
-        || payloadPane.id === "video-generator")
+        || payloadPane.id === "video-generator"
+        || payloadPane.id === "models-generator")
       ? { type: "tool", id: "media-center" }
       : payloadPane;
 
@@ -2362,6 +2656,7 @@ function App() {
       void loadVoiceStatus();
       void loadStableAudioStatus();
       void loadWan2GpStatus();
+      void loadHunyuan3dStatus();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "settings") {
       void loadGitStatus();
@@ -2396,6 +2691,7 @@ function App() {
         <button type="button" className={`tool-tab ${mediaCenterTab === "music" ? "active" : ""}`} onClick={() => setMediaCenterTab("music")}>Music</button>
         <button type="button" className={`tool-tab ${mediaCenterTab === "image" ? "active" : ""}`} onClick={() => setMediaCenterTab("image")}>Image</button>
         <button type="button" className={`tool-tab ${mediaCenterTab === "video" ? "active" : ""}`} onClick={() => setMediaCenterTab("video")}>Video</button>
+        <button type="button" className={`tool-tab ${mediaCenterTab === "models" ? "active" : ""}`} onClick={() => setMediaCenterTab("models")}>3D Models</button>
       </div>
     );
   }
@@ -4234,6 +4530,134 @@ function App() {
                           <button type="button" className="ghost" onClick={() => openRecentVideo(video)}>
                             Open
                           </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </div>
+          ) : null}
+
+          {selectedPane.type === "tool" && selectedPane.id === "media-center" && mediaCenterTab === "models" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Media Center</h2>
+                  <p className="subtitle">Hunyuan3D-2GP local image-to-3D mesh generation tuned for lower VRAM systems.</p>
+                </div>
+              </div>
+
+              {renderMediaCenterTabs()}
+
+              <section className="tool-section">
+                <h3>Generate 3D Mesh</h3>
+                <div className="stable-audio-form">
+                  {!hunyuan3dStatus?.apiReady ? (
+                    <small>Hunyuan3D-2GP is not ready yet. Install runtime job: install-hunyuan3d, then start-hunyuan3d.</small>
+                  ) : null}
+                  {hunyuan3dStatus?.notes?.length ? (
+                    <small>{hunyuan3dStatus.notes[hunyuan3dStatus.notes.length - 1]}</small>
+                  ) : null}
+                  <label>
+                    <span>Source Image URL</span>
+                    <input
+                      type="text"
+                      value={model3dSourceImageUrl}
+                      onChange={(event) => setModel3dSourceImageUrl(event.target.value)}
+                      placeholder="Use a generated image URL or any reachable PNG/JPG/WEBP URL"
+                    />
+                  </label>
+                  <div className="tool-action-row">
+                    <button type="button" className="ghost" onClick={useLatestGeneratedImageFor3d}>
+                      Use Latest Generated Image
+                    </button>
+                  </div>
+                  <label>
+                    <span>Model Path</span>
+                    <input type="text" value={model3dModelPath} onChange={(event) => setModel3dModelPath(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>Subfolder</span>
+                    <input type="text" value={model3dSubfolder} onChange={(event) => setModel3dSubfolder(event.target.value)} />
+                  </label>
+                  <div className="image-size-grid">
+                    <label>
+                      <span>Inference Steps</span>
+                      <input type="number" min={5} max={60} value={model3dNumInferenceSteps} onChange={(event) => setModel3dNumInferenceSteps(Number(event.target.value || 20))} />
+                    </label>
+                    <label>
+                      <span>Octree Resolution</span>
+                      <input type="number" min={128} max={512} step={32} value={model3dOctreeResolution} onChange={(event) => setModel3dOctreeResolution(Number(event.target.value || 192))} />
+                    </label>
+                  </div>
+                  <div className="image-size-grid">
+                    <label>
+                      <span>Guidance Scale</span>
+                      <input type="number" min={1} max={10} step={0.1} value={model3dGuidanceScale} onChange={(event) => setModel3dGuidanceScale(Number(event.target.value || 5))} />
+                    </label>
+                    <label>
+                      <span>Output Format</span>
+                      <select value={model3dFormat} onChange={(event) => setModel3dFormat(event.target.value === "obj" ? "obj" : "glb")}>
+                        <option value="glb">glb</option>
+                        <option value="obj">obj</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label>
+                    <span>Seed (-1 = random)</span>
+                    <input type="number" value={model3dSeed} onChange={(event) => setModel3dSeed(Number(event.target.value || -1))} />
+                  </label>
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => void generateModel3d()} disabled={model3dBusyAction !== null || !model3dSourceImageUrl.trim()}>
+                      {model3dBusyAction === "generate" ? "Generating..." : "Generate 3D Mesh"}
+                    </button>
+                    <button type="button" className="ghost" onClick={stopModel3dGeneration} disabled={model3dBusyAction !== "generate"}>
+                      Stop
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section className="tool-section">
+                <h3>Preview</h3>
+                {model3dResult?.modelUrl ? (
+                  <div className="image-preview-panel">
+                    <small>{model3dResult.provider} · {model3dResult.modelPath}/{model3dResult.subfolder} · {model3dResult.format.toUpperCase()} · device {model3dResult.device}</small>
+                    {model3dResult.relativePath ? <small>Saved: {model3dResult.relativePath}</small> : null}
+                    <div className="tool-action-row">
+                      <a href={model3dResult.modelUrl} target="_blank" rel="noreferrer">
+                        Download / Open Mesh File
+                      </a>
+                    </div>
+                  </div>
+                ) : (
+                  <small>Generate a mesh to get the model file link here.</small>
+                )}
+              </section>
+
+              <section className="tool-section">
+                <h3>Status Stream</h3>
+                <pre className="image-status-stream">{model3dStatusTrace || "No status yet."}</pre>
+              </section>
+
+              <section className="tool-section">
+                <h3>Recent 3D Models</h3>
+                {recentModels3d.length === 0 ? (
+                  <small>No recent 3D generations yet.</small>
+                ) : (
+                  <ul className="tool-list">
+                    {recentModels3d.map((model) => (
+                      <li key={`${model.modelUrl}-${model.createdAt}`}>
+                        {model.modelPath} · {model.format.toUpperCase()} · seed {model.seed} · {new Date(model.createdAt).toLocaleTimeString()}
+                        {model.relativePath ? <small>Saved: {model.relativePath}</small> : null}
+                        <div className="tool-action-row">
+                          <button type="button" className="ghost" onClick={() => openRecentModel3d(model)}>
+                            Open
+                          </button>
+                          <a href={model.modelUrl} target="_blank" rel="noreferrer">
+                            Download
+                          </a>
                         </div>
                       </li>
                     ))}

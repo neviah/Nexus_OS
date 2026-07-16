@@ -72,6 +72,14 @@ import {
 } from "./lib/harnessChats.js";
 import { generateLocalImageStreaming, getLocalImageStatus } from "./lib/localImageGenerator.js";
 import {
+  generateWithHunyuan3dStreaming,
+  getHunyuan3dStatus,
+  inferMeshExtension,
+  installHunyuan3d,
+  readMeshBytes,
+  startHunyuan3dIfNeeded,
+} from "./lib/hunyuan3dRuntime.js";
+import {
   generateWithWan2GpStreaming,
   getMachineProfileHint,
   getWan2GpModelCatalog,
@@ -99,7 +107,9 @@ type RuntimeJobAction =
   | "install-acejam"
   | "start-acejam"
   | "install-wan2gp"
-  | "start-wan2gp";
+  | "start-wan2gp"
+  | "install-hunyuan3d"
+  | "start-hunyuan3d";
 
 type RuntimeJob = {
   id: string;
@@ -271,7 +281,7 @@ function scheduleRuntimeJobPersist(): void {
 }
 
 function shouldAutoRetryRuntimeJob(job: RuntimeJob): boolean {
-  return ["install-ollama", "install-piper", "install-default-piper-voice", "install-acejam", "install-wan2gp"].includes(job.action);
+  return ["install-ollama", "install-piper", "install-default-piper-voice", "install-acejam", "install-wan2gp", "install-hunyuan3d"].includes(job.action);
 }
 
 function runtimeJobRetryDepth(job: RuntimeJob): number {
@@ -520,7 +530,7 @@ async function ensureWorkspaceAssetsDir(workspaceId?: string): Promise<{ workspa
 
 async function saveBufferToWorkspaceAssets(input: {
   workspaceId?: string;
-  category: "images" | "videos" | "voice" | "music";
+  category: "images" | "videos" | "voice" | "music" | "models";
   baseName: string;
   extension: string;
   bytes: Buffer;
@@ -546,9 +556,10 @@ function findActiveRuntimeJobByAction(action: RuntimeJobAction): RuntimeJob | un
 
 async function ensureCoreRuntimeProvisioning(): Promise<void> {
   await loadRuntimeJobsFromDisk();
-  const [status, wan2gpStatus] = await Promise.all([
+  const [status, wan2gpStatus, hunyuan3dStatus] = await Promise.all([
     getRuntimeStatus(),
     getWan2GpStatus(),
+    getHunyuan3dStatus(),
   ]);
   if (!status.ollamaInstalled) {
     if (!findActiveRuntimeJobByAction("install-ollama")) {
@@ -589,6 +600,20 @@ async function ensureCoreRuntimeProvisioning(): Promise<void> {
       const wanStartJob = createRuntimeJob("start-wan2gp");
       appendRuntimeJobLog(wanStartJob, "Queued by NexusOS core runtime provisioning.");
       startRuntimeJob(wanStartJob);
+    }
+  }
+
+  if (!hunyuan3dStatus.installed || !hunyuan3dStatus.envReady) {
+    if (!findActiveRuntimeJobByAction("install-hunyuan3d")) {
+      const hy3dInstallJob = createRuntimeJob("install-hunyuan3d");
+      appendRuntimeJobLog(hy3dInstallJob, "Queued by NexusOS core runtime provisioning.");
+      startRuntimeJob(hy3dInstallJob);
+    }
+  } else if (!hunyuan3dStatus.apiReady) {
+    if (!findActiveRuntimeJobByAction("start-hunyuan3d")) {
+      const hy3dStartJob = createRuntimeJob("start-hunyuan3d");
+      appendRuntimeJobLog(hy3dStartJob, "Queued by NexusOS core runtime provisioning.");
+      startRuntimeJob(hy3dStartJob);
     }
   }
 
@@ -673,6 +698,22 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
     appendRuntimeJobLog(job, "Checking Wan2GP readiness...");
     await startWan2GpIfNeeded();
     appendRuntimeJobLog(job, "Wan2GP API is ready.");
+    return;
+  }
+
+  if (job.action === "install-hunyuan3d") {
+    ensureRuntimeJobNotCanceled(job);
+    appendRuntimeJobLog(job, "Installing Hunyuan3D-2GP runtime...");
+    await installHunyuan3d();
+    appendRuntimeJobLog(job, "Hunyuan3D-2GP install completed.");
+    return;
+  }
+
+  if (job.action === "start-hunyuan3d") {
+    ensureRuntimeJobNotCanceled(job);
+    appendRuntimeJobLog(job, "Checking Hunyuan3D-2GP readiness...");
+    await startHunyuan3dIfNeeded();
+    appendRuntimeJobLog(job, "Hunyuan3D-2GP runtime is ready.");
     return;
   }
 
@@ -1852,7 +1893,8 @@ app.get("/api/bootstrap", async (_req, res) => {
     : (state.selectedPane.id === "voice-studio"
       || state.selectedPane.id === "music-generator"
       || state.selectedPane.id === "image-generator"
-      || state.selectedPane.id === "video-generator")
+      || state.selectedPane.id === "video-generator"
+      || state.selectedPane.id === "models-generator")
       ? { type: "tool" as const, id: "media-center" }
       : (state.selectedPane.type === "agent" && !harnessIds.has(state.selectedPane.id))
         ? { type: "agent" as const, id: harnessStatus[0]?.id ?? "hermes" }
@@ -1968,7 +2010,7 @@ app.post("/api/tools/runtimes/jobs/:jobId/retry", async (req, res) => {
 });
 
 app.post("/api/tools/runtimes/install", async (req, res) => {
-  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" | "wan2gp" };
+  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" | "wan2gp" | "hunyuan3d" };
   try {
     if (body.runtime === "ollama") {
       await installOllama();
@@ -1981,6 +2023,8 @@ app.post("/api/tools/runtimes/install", async (req, res) => {
       await installDefaultPiperVoice();
     } else if (body.runtime === "wan2gp") {
       await installWan2Gp();
+    } else if (body.runtime === "hunyuan3d") {
+      await installHunyuan3d();
     } else {
       return res.status(400).json({ error: "Unknown runtime target" });
     }
@@ -2016,6 +2060,16 @@ app.post("/api/tools/runtimes/wan2gp/start", async (_req, res) => {
   try {
     await startWan2GpIfNeeded();
     const status = await getWan2GpStatus();
+    return res.json({ ok: true, status });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/runtimes/hunyuan3d/start", async (_req, res) => {
+  try {
+    await startHunyuan3dIfNeeded();
+    const status = await getHunyuan3dStatus();
     return res.json({ ok: true, status });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
@@ -2228,6 +2282,16 @@ app.get("/api/tools/wan2gp/status", async (_req, res) => {
   }
 });
 
+app.get("/api/tools/hunyuan3d/status", async (_req, res) => {
+  void ensureCoreRuntimeProvisioning();
+  try {
+    const status = await getHunyuan3dStatus();
+    return res.json(status);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
 app.get("/api/tools/wan2gp/file", async (req, res) => {
   const relativePath = String(req.query.relativePath ?? "").trim();
   const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
@@ -2263,6 +2327,35 @@ app.get("/api/tools/wan2gp/file", async (req, res) => {
       return res.status(400).json({ error: "Unsupported media extension." });
     }
 
+    res.setHeader("Content-Type", contentType);
+    return res.sendFile(absolutePath);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/tools/hunyuan3d/file", async (req, res) => {
+  const relativePath = String(req.query.relativePath ?? "").trim();
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+  if (!relativePath) {
+    return res.status(400).json({ error: "relativePath is required" });
+  }
+
+  try {
+    const state = await readSystemState();
+    const workspace = await resolveWorkspaceContext(state, workspaceId);
+    if (!workspace.path) {
+      return res.status(404).json({ error: "Workspace path is unavailable." });
+    }
+
+    const absolutePath = resolveWorkspaceTargetPath(workspace.path, relativePath);
+    await fs.access(absolutePath);
+    const extension = path.extname(absolutePath).toLowerCase();
+    const contentType = extension === ".glb"
+      ? "model/gltf-binary"
+      : extension === ".obj"
+        ? "text/plain"
+        : "application/octet-stream";
     res.setHeader("Content-Type", contentType);
     return res.sendFile(absolutePath);
   } catch (error) {
@@ -2561,6 +2654,100 @@ app.get("/api/tools/wan2gp/video/stream", async (req, res) => {
         frameCount: generated.frameCount,
         prompt: generated.prompt,
         negativePrompt: generated.negativePrompt,
+      },
+    });
+    return res.end();
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      send({ type: "error", message: String(error) });
+    }
+    return res.end();
+  } finally {
+    req.off("close", onClientDisconnect);
+  }
+});
+
+app.get("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
+  const imageUrl = String(req.query.imageUrl ?? "").trim();
+  const modelPath = String(req.query.modelPath ?? "tencent/Hunyuan3D-2mini").trim();
+  const subfolder = String(req.query.subfolder ?? "hunyuan3d-dit-v2-mini-turbo").trim();
+  const numInferenceSteps = Number(req.query.numInferenceSteps ?? 20);
+  const octreeResolution = Number(req.query.octreeResolution ?? 192);
+  const guidanceScale = Number(req.query.guidanceScale ?? 5.0);
+  const seed = Number(req.query.seed ?? Date.now() % 2147483647);
+  const format = String(req.query.format ?? "glb").trim().toLowerCase() === "obj" ? "obj" : "glb";
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+
+  if (!imageUrl) {
+    return res.status(400).json({ error: "imageUrl is required" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const send = (payload: unknown) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const controller = new AbortController();
+  const onClientDisconnect = () => {
+    controller.abort();
+  };
+  req.on("close", onClientDisconnect);
+
+  try {
+    send({ type: "status", message: "Downloading source image..." });
+    const sourceResponse = await fetch(imageUrl);
+    if (!sourceResponse.ok) {
+      throw new Error(`Could not fetch source image: ${sourceResponse.status} ${sourceResponse.statusText}`);
+    }
+    const imageBytes = Buffer.from(await sourceResponse.arrayBuffer());
+    const imageBase64 = imageBytes.toString("base64");
+
+    send({ type: "status", message: "Starting Hunyuan3D-2GP mesh generation..." });
+    const generated = await generateWithHunyuan3dStreaming(
+      {
+        imageBase64,
+        modelPath,
+        subfolder,
+        numInferenceSteps,
+        octreeResolution,
+        guidanceScale,
+        seed,
+        format,
+      },
+      (message) => send({ type: "status", message }),
+      controller.signal,
+    );
+
+    send({ type: "status", message: "Saving generated mesh into workspace assets..." });
+    const bytes = await readMeshBytes(generated.outputPath);
+    const extension = inferMeshExtension(generated.outputPath, format);
+    const saved = await saveBufferToWorkspaceAssets({
+      workspaceId,
+      category: "models",
+      baseName: "hunyuan3d-mesh",
+      extension,
+      bytes,
+    });
+
+    send({
+      type: "done",
+      result: {
+        modelUrl: `/api/tools/hunyuan3d/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        relativePath: saved.relativePath,
+        workspaceId: saved.workspaceId,
+        provider: generated.provider,
+        modelPath: generated.modelPath,
+        subfolder: generated.subfolder,
+        numInferenceSteps: generated.numInferenceSteps,
+        octreeResolution: generated.octreeResolution,
+        guidanceScale: generated.guidanceScale,
+        seed: generated.seed,
+        format: generated.format,
+        device: generated.device,
       },
     });
     return res.end();
