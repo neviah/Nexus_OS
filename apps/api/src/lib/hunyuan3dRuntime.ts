@@ -193,12 +193,40 @@ async function ensureHunyuanEnv(): Promise<void> {
   });
 
   const requirementsFile = await resolveRequirementsFile();
-  await execFileAsync(pythonPath, ["-m", "pip", "install", "--prefer-binary", "-r", requirementsFile], {
-    cwd: hy3dAppRoot,
-    windowsHide: true,
-    timeout: 120 * 60 * 1000,
-    maxBuffer: 1024 * 1024 * 32,
-  });
+
+  const installRequirements = async (withNoBuildIsolation: boolean): Promise<void> => {
+    const args = ["-m", "pip", "install", "--prefer-binary"];
+    if (withNoBuildIsolation) {
+      args.push("--no-build-isolation");
+    }
+    args.push("-r", requirementsFile);
+    await execFileAsync(pythonPath, args, {
+      cwd: hy3dAppRoot,
+      windowsHide: true,
+      timeout: 120 * 60 * 1000,
+      maxBuffer: 1024 * 1024 * 32,
+    });
+  };
+
+  try {
+    await installRequirements(false);
+  } catch (error) {
+    const message = String(error);
+    const looksLikeTorchBuildIsolationIssue = /No module named 'torch'|Failed to build 'diso'|Failed to build diso|getting requirements to build wheel/i.test(message);
+    if (!looksLikeTorchBuildIsolationIssue) {
+      throw error;
+    }
+
+    // diso may import torch during build-time without declaring it in build requirements.
+    // Seed torch first, then retry without build isolation.
+    await execFileAsync(pythonPath, ["-m", "pip", "install", "--upgrade", "--prefer-binary", "torch", "torchvision", "torchaudio"], {
+      cwd: hy3dAppRoot,
+      windowsHide: true,
+      timeout: 120 * 60 * 1000,
+      maxBuffer: 1024 * 1024 * 32,
+    });
+    await installRequirements(true);
+  }
 
   // Some lightweight requirements variants omit numpy; force it so shapegen imports are stable.
   await execFileAsync(pythonPath, ["-m", "pip", "install", "--upgrade", "--prefer-binary", "numpy<2"], {
