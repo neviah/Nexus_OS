@@ -199,6 +199,14 @@ async function ensureHunyuanEnv(): Promise<void> {
     timeout: 120 * 60 * 1000,
     maxBuffer: 1024 * 1024 * 32,
   });
+
+  // Some lightweight requirements variants omit numpy; force it so shapegen imports are stable.
+  await execFileAsync(pythonPath, ["-m", "pip", "install", "--upgrade", "--prefer-binary", "numpy<2"], {
+    cwd: hy3dAppRoot,
+    windowsHide: true,
+    timeout: 20 * 60 * 1000,
+    maxBuffer: 1024 * 1024 * 16,
+  });
 }
 
 async function checkHunyuanApiReady(): Promise<boolean> {
@@ -374,6 +382,8 @@ export async function startHunyuan3dIfNeeded(): Promise<void> {
   if (!status.installed || !status.envReady) {
     throw new Error("Hunyuan3D-2GP is not installed. Run install first.");
   }
+  // Try self-healing dependencies before failing readiness checks.
+  await ensureHunyuanEnv();
   const ready = await checkHunyuanApiReady();
   if (!ready) {
     throw new Error(`Hunyuan3D-2GP readiness check failed.${lastHunyuanReadinessError ? ` ${lastHunyuanReadinessError}` : ""}`);
