@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactElement } from "react";
+import type { ChangeEvent, FormEvent, ReactElement } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import dashboardLogo from "./assets/DashboardLogo_Nexus.png";
@@ -800,6 +800,8 @@ function App() {
   const videoGenerationAbortRef = useRef<AbortController | null>(null);
   const [hunyuan3dStatus, setHunyuan3dStatus] = useState<Hunyuan3dStatus | null>(null);
   const [model3dSourceImageUrl, setModel3dSourceImageUrl] = useState("");
+  const [model3dSourceImageBase64, setModel3dSourceImageBase64] = useState("");
+  const [model3dSourceImageFileName, setModel3dSourceImageFileName] = useState("");
   const [model3dModelPath, setModel3dModelPath] = useState("tencent/Hunyuan3D-2mini");
   const [model3dSubfolder, setModel3dSubfolder] = useState("hunyuan3d-dit-v2-mini-turbo");
   const [model3dNumInferenceSteps, setModel3dNumInferenceSteps] = useState(20);
@@ -1708,9 +1710,10 @@ function App() {
     setModel3dStatusTrace("Starting Hunyuan3D-2GP generation...\n");
 
     const sourceImageUrl = model3dSourceImageUrl.trim();
-    if (!sourceImageUrl) {
-      setStatusMessage("A source image URL is required for 3D generation.");
-      pushToast("Provide a source image URL first.", "warn");
+    const sourceImageBase64 = model3dSourceImageBase64.trim();
+    if (!sourceImageUrl && !sourceImageBase64) {
+      setStatusMessage("Provide a source image URL or upload an image for 3D generation.");
+      pushToast("Provide or upload a source image first.", "warn");
       setModel3dBusyAction(null);
       return;
     }
@@ -1724,20 +1727,24 @@ function App() {
     }
 
     const seedToUse = model3dSeed < 0 ? Math.floor(Math.random() * 2147483647) : model3dSeed;
-    const params = new URLSearchParams({
-      imageUrl: sourceImageUrl,
+    const requestBody = {
+      imageUrl: sourceImageUrl || undefined,
+      imageBase64: sourceImageBase64 || undefined,
       modelPath: model3dModelPath,
       subfolder: model3dSubfolder,
-      numInferenceSteps: String(model3dNumInferenceSteps),
-      octreeResolution: String(model3dOctreeResolution),
-      guidanceScale: String(model3dGuidanceScale),
-      seed: String(seedToUse),
+      numInferenceSteps: model3dNumInferenceSteps,
+      octreeResolution: model3dOctreeResolution,
+      guidanceScale: model3dGuidanceScale,
+      seed: seedToUse,
       format: model3dFormat,
       workspaceId: boot?.activeWorkspaceId ?? "default",
-    });
+    };
 
     try {
-      const response = await fetch(`/api/tools/hunyuan3d/generate/stream?${params.toString()}`, {
+      const response = await fetch("/api/tools/hunyuan3d/generate/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
       if (!response.ok || !response.body) {
@@ -1804,7 +1811,7 @@ function App() {
               seed: envelope.result.seed,
               format: envelope.result.format,
               device: envelope.result.device,
-              sourceImageUrl,
+              sourceImageUrl: sourceImageUrl || `uploaded:${model3dSourceImageFileName || "source-image"}`,
               relativePath: envelope.result.relativePath,
               createdAt: new Date().toISOString(),
             };
@@ -1845,6 +1852,37 @@ function App() {
     model3dGenerationAbortRef.current?.abort();
   }
 
+  function onModel3dSourceFileSelected(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    if (!file) {
+      setModel3dSourceImageBase64("");
+      setModel3dSourceImageFileName("");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const loaded = String(reader.result ?? "");
+      const split = loaded.indexOf(",");
+      const base64 = split >= 0 ? loaded.slice(split + 1).trim() : "";
+      if (!base64) {
+        setStatusMessage("Could not read selected image file.");
+        pushToast("Image upload read failed.", "err");
+        return;
+      }
+      setModel3dSourceImageBase64(base64);
+      setModel3dSourceImageFileName(file.name);
+      setModel3dSourceImageUrl("");
+      setStatusMessage(`Loaded uploaded image: ${file.name}`);
+      pushToast("Uploaded image ready for 3D generation.", "ok");
+    };
+    reader.onerror = () => {
+      setStatusMessage("Could not read selected image file.");
+      pushToast("Image upload read failed.", "err");
+    };
+    reader.readAsDataURL(file);
+  }
+
   function useLatestGeneratedImageFor3d() {
     const candidate = imageResult?.imageUrl ?? recentImages[0]?.imageUrl ?? "";
     if (!candidate) {
@@ -1852,11 +1890,16 @@ function App() {
       return;
     }
     setModel3dSourceImageUrl(candidate);
+    setModel3dSourceImageBase64("");
+    setModel3dSourceImageFileName("");
     setStatusMessage("Loaded latest generated image as 3D source.");
   }
 
   function openRecentModel3d(model: Model3dGeneratedResult) {
-    setModel3dSourceImageUrl(model.sourceImageUrl);
+    const sourceLooksLikeUrl = /^https?:\/\//i.test(model.sourceImageUrl) || model.sourceImageUrl.startsWith("/api/");
+    setModel3dSourceImageUrl(sourceLooksLikeUrl ? model.sourceImageUrl : "");
+    setModel3dSourceImageBase64("");
+    setModel3dSourceImageFileName("");
     setModel3dModelPath(model.modelPath);
     setModel3dSubfolder(model.subfolder);
     setModel3dNumInferenceSteps(model.numInferenceSteps);
@@ -4564,10 +4607,21 @@ function App() {
                     <input
                       type="text"
                       value={model3dSourceImageUrl}
-                      onChange={(event) => setModel3dSourceImageUrl(event.target.value)}
+                      onChange={(event) => {
+                        setModel3dSourceImageUrl(event.target.value);
+                        if (event.target.value.trim()) {
+                          setModel3dSourceImageBase64("");
+                          setModel3dSourceImageFileName("");
+                        }
+                      }}
                       placeholder="Use a generated image URL or any reachable PNG/JPG/WEBP URL"
                     />
                   </label>
+                  <label>
+                    <span>Or Upload Source Image</span>
+                    <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onModel3dSourceFileSelected} />
+                  </label>
+                  {model3dSourceImageFileName ? <small>Uploaded: {model3dSourceImageFileName}</small> : null}
                   <div className="tool-action-row">
                     <button type="button" className="ghost" onClick={useLatestGeneratedImageFor3d}>
                       Use Latest Generated Image
@@ -4609,7 +4663,7 @@ function App() {
                     <input type="number" value={model3dSeed} onChange={(event) => setModel3dSeed(Number(event.target.value || -1))} />
                   </label>
                   <div className="tool-action-row">
-                    <button type="button" onClick={() => void generateModel3d()} disabled={model3dBusyAction !== null || !model3dSourceImageUrl.trim()}>
+                    <button type="button" onClick={() => void generateModel3d()} disabled={model3dBusyAction !== null || (!model3dSourceImageUrl.trim() && !model3dSourceImageBase64.trim())}>
                       {model3dBusyAction === "generate" ? "Generating..." : "Generate 3D Mesh"}
                     </button>
                     <button type="button" className="ghost" onClick={stopModel3dGeneration} disabled={model3dBusyAction !== "generate"}>

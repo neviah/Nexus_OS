@@ -1854,7 +1854,7 @@ async function runScheduledHarnessTask(input: {
 }
 
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "25mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "nexus-os-api" });
@@ -2667,20 +2667,49 @@ app.get("/api/tools/wan2gp/video/stream", async (req, res) => {
   }
 });
 
-app.get("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
-  const imageUrl = String(req.query.imageUrl ?? "").trim();
-  const modelPath = String(req.query.modelPath ?? "tencent/Hunyuan3D-2mini").trim();
-  const subfolder = String(req.query.subfolder ?? "hunyuan3d-dit-v2-mini-turbo").trim();
-  const numInferenceSteps = Number(req.query.numInferenceSteps ?? 20);
-  const octreeResolution = Number(req.query.octreeResolution ?? 192);
-  const guidanceScale = Number(req.query.guidanceScale ?? 5.0);
-  const seed = Number(req.query.seed ?? Date.now() % 2147483647);
-  const format = String(req.query.format ?? "glb").trim().toLowerCase() === "obj" ? "obj" : "glb";
-  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
-
-  if (!imageUrl) {
-    return res.status(400).json({ error: "imageUrl is required" });
+async function resolveHunyuanSourceImageBase64(input: { imageUrl?: string; imageBase64?: string }): Promise<string> {
+  const directBase64 = String(input.imageBase64 ?? "").trim();
+  if (directBase64) {
+    return directBase64;
   }
+
+  const imageUrl = String(input.imageUrl ?? "").trim();
+  if (!imageUrl) {
+    throw new Error("imageUrl or imageBase64 is required");
+  }
+
+  const sourceResponse = await fetch(imageUrl);
+  if (!sourceResponse.ok) {
+    throw new Error(`Could not fetch source image: ${sourceResponse.status} ${sourceResponse.statusText}`);
+  }
+  const imageBytes = Buffer.from(await sourceResponse.arrayBuffer());
+  return imageBytes.toString("base64");
+}
+
+async function streamHunyuan3dGeneration(
+  req: express.Request,
+  res: express.Response,
+  input: {
+    imageUrl?: string;
+    imageBase64?: string;
+    modelPath?: string;
+    subfolder?: string;
+    numInferenceSteps?: number;
+    octreeResolution?: number;
+    guidanceScale?: number;
+    seed?: number;
+    format?: string;
+    workspaceId?: string;
+  },
+): Promise<void> {
+  const modelPath = String(input.modelPath ?? "tencent/Hunyuan3D-2mini").trim();
+  const subfolder = String(input.subfolder ?? "hunyuan3d-dit-v2-mini-turbo").trim();
+  const numInferenceSteps = Number(input.numInferenceSteps ?? 20);
+  const octreeResolution = Number(input.octreeResolution ?? 192);
+  const guidanceScale = Number(input.guidanceScale ?? 5.0);
+  const seed = Number(input.seed ?? Date.now() % 2147483647);
+  const format = String(input.format ?? "glb").trim().toLowerCase() === "obj" ? "obj" : "glb";
+  const workspaceId = String(input.workspaceId ?? "").trim() || undefined;
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -2698,13 +2727,8 @@ app.get("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
   req.on("close", onClientDisconnect);
 
   try {
-    send({ type: "status", message: "Downloading source image..." });
-    const sourceResponse = await fetch(imageUrl);
-    if (!sourceResponse.ok) {
-      throw new Error(`Could not fetch source image: ${sourceResponse.status} ${sourceResponse.statusText}`);
-    }
-    const imageBytes = Buffer.from(await sourceResponse.arrayBuffer());
-    const imageBase64 = imageBytes.toString("base64");
+    send({ type: "status", message: "Preparing source image..." });
+    const imageBase64 = await resolveHunyuanSourceImageBase64({ imageUrl: input.imageUrl, imageBase64: input.imageBase64 });
 
     send({ type: "status", message: "Starting Hunyuan3D-2GP mesh generation..." });
     const generated = await generateWithHunyuan3dStreaming(
@@ -2750,15 +2774,45 @@ app.get("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
         device: generated.device,
       },
     });
-    return res.end();
+    res.end();
   } catch (error) {
     if (!controller.signal.aborted) {
       send({ type: "error", message: String(error) });
     }
-    return res.end();
+    res.end();
   } finally {
     req.off("close", onClientDisconnect);
   }
+}
+
+app.get("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
+  await streamHunyuan3dGeneration(req, res, {
+    imageUrl: String(req.query.imageUrl ?? ""),
+    modelPath: String(req.query.modelPath ?? "tencent/Hunyuan3D-2mini"),
+    subfolder: String(req.query.subfolder ?? "hunyuan3d-dit-v2-mini-turbo"),
+    numInferenceSteps: Number(req.query.numInferenceSteps ?? 20),
+    octreeResolution: Number(req.query.octreeResolution ?? 192),
+    guidanceScale: Number(req.query.guidanceScale ?? 5.0),
+    seed: Number(req.query.seed ?? Date.now() % 2147483647),
+    format: String(req.query.format ?? "glb"),
+    workspaceId: String(req.query.workspaceId ?? ""),
+  });
+});
+
+app.post("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
+  const body = req.body as {
+    imageUrl?: string;
+    imageBase64?: string;
+    modelPath?: string;
+    subfolder?: string;
+    numInferenceSteps?: number;
+    octreeResolution?: number;
+    guidanceScale?: number;
+    seed?: number;
+    format?: string;
+    workspaceId?: string;
+  };
+  await streamHunyuan3dGeneration(req, res, body ?? {});
 });
 
 app.post("/api/tools/image/save", async (req, res) => {
