@@ -74,6 +74,7 @@ import { generateLocalImageStreaming, getLocalImageStatus } from "./lib/localIma
 import {
   generateWithWan2GpStreaming,
   getMachineProfileHint,
+  getWan2GpModelCatalog,
   getWan2GpStatus,
   inferMediaExtension,
   installWan2Gp,
@@ -2131,6 +2132,38 @@ app.get("/api/tools/image/local/status", async (_req, res) => {
   }
 });
 
+function chooseWanModelFromInstalled(
+  installedModels: string[],
+  preferredByProfile: string[][],
+): string {
+  const installedSet = new Set(installedModels);
+  for (const preferenceTier of preferredByProfile) {
+    for (const candidate of preferenceTier) {
+      if (installedSet.has(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return installedModels[0] ?? "auto";
+}
+
+function buildWanPreferenceTiers(recommendedProfile: number, mode: "image" | "video"): string[][] {
+  const lowVramImage = ["flux_schnell", "alpha_sf", "alpha2_sf", "flux", "alpha2", "alpha"];
+  const highVramImage = ["qwen_image_20B", "flux", "alpha2", "flux_schnell", "alpha_sf"];
+  const lowVramVideo = ["t2v_1.3B", "t2v_sf", "fun_inp_1.3B", "hunyuan", "animate", "alpha2"];
+  const highVramVideo = ["ltx2_22B_distilled", "hunyuan", "animate", "t2v_1.3B", "t2v_sf"];
+
+  if (mode === "image") {
+    return recommendedProfile <= 2
+      ? [highVramImage, lowVramImage]
+      : [lowVramImage, highVramImage];
+  }
+
+  return recommendedProfile <= 2
+    ? [highVramVideo, lowVramVideo]
+    : [lowVramVideo, highVramVideo];
+}
+
 app.get("/api/tools/wan2gp/status", async (_req, res) => {
   void ensureCoreRuntimeProvisioning();
   try {
@@ -2138,19 +2171,44 @@ app.get("/api/tools/wan2gp/status", async (_req, res) => {
       getWan2GpStatus(),
       getMachineProfileHint(),
     ]);
+    const catalog = status.apiReady
+      ? await getWan2GpModelCatalog().catch(() => ({ image: [], video: [], scannedAt: new Date().toISOString() }))
+      : { image: [], video: [], scannedAt: new Date().toISOString() };
+
+    const installedImageModels = catalog.image.filter((item) => item.available).map((item) => item.modelType);
+    const installedVideoModels = catalog.video.filter((item) => item.available).map((item) => item.modelType);
+    const recommendedImageModel = chooseWanModelFromInstalled(
+      installedImageModels,
+      buildWanPreferenceTiers(machine.recommendedProfile, "image"),
+    );
+    const recommendedVideoModel = chooseWanModelFromInstalled(
+      installedVideoModels,
+      buildWanPreferenceTiers(machine.recommendedProfile, "video"),
+    );
+
+    const notes = [...status.notes];
+    if (status.apiReady) {
+      notes.push(`Installed image models: ${installedImageModels.length}`);
+      notes.push(`Installed video models: ${installedVideoModels.length}`);
+      if (installedImageModels.length === 0 || installedVideoModels.length === 0) {
+        notes.push("Installed-only model routing is active. Install at least one Wan2GP model per mode to generate successfully.");
+      }
+    }
+
     return res.json({
       ...status,
+      notes,
       machine,
       recommended: {
         profile: machine.recommendedProfile,
         image: {
-          model: "flux_schnell",
+          model: recommendedImageModel,
           width: 768,
           height: 768,
           steps: 6,
         },
         video: {
-          model: "t2v_1.3B",
+          model: recommendedVideoModel,
           width: 640,
           height: 384,
           steps: 6,
@@ -2160,9 +2218,10 @@ app.get("/api/tools/wan2gp/status", async (_req, res) => {
         },
       },
       modelHints: {
-        image: ["auto", "flux_schnell", "alpha_sf", "qwen_image_20B"],
-        video: ["auto", "t2v_1.3B", "t2v_sf", "ltx2_22B_distilled"],
+        image: ["auto", ...installedImageModels],
+        video: ["auto", ...installedVideoModels],
       },
+      modelCatalog: catalog,
     });
   } catch (error) {
     return res.status(500).json({ error: String(error) });

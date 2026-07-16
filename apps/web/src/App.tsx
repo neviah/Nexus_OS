@@ -170,9 +170,9 @@ type WorkspaceFolderEntry = {
 type CookbookRecommendation = {
   id: string;
   name: string;
-  category: "coding" | "chat" | "voice";
+  category: "coding" | "chat" | "voice" | "image" | "video";
   size: "small" | "medium" | "large";
-  runtime: "ollama" | "llama.cpp" | "piper";
+  runtime: "ollama" | "llama.cpp" | "piper" | "wan2gp";
   summary: string;
   fitReason: string;
   installHint: string;
@@ -404,6 +404,11 @@ type Wan2GpStatus = {
   modelHints: {
     image: string[];
     video: string[];
+  };
+  modelCatalog?: {
+    image: Array<{ modelType: string; available: boolean; status: string }>;
+    video: Array<{ modelType: string; available: boolean; status: string }>;
+    scannedAt: string;
   };
 };
 
@@ -1886,6 +1891,8 @@ function App() {
   function recommendationSymbol(recommendation: CookbookRecommendation): string {
     if (recommendation.category === "coding") return "</>";
     if (recommendation.category === "chat") return "[]";
+    if (recommendation.category === "image") return "IMG";
+    if (recommendation.category === "video") return "VID";
     return "()";
   }
 

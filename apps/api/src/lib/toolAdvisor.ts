@@ -11,9 +11,9 @@ const execFileAsync = promisify(execFile);
 type CookbookRecommendation = {
   id: string;
   name: string;
-  category: "coding" | "chat" | "voice";
+  category: "coding" | "chat" | "voice" | "image" | "video";
   size: "small" | "medium" | "large";
-  runtime: "ollama" | "llama.cpp" | "piper";
+  runtime: "ollama" | "llama.cpp" | "piper" | "wan2gp";
   summary: string;
   fitReason: string;
   installHint: string;
@@ -164,6 +164,35 @@ function buildRecommendations(input: {
       : "Piper is the best low-cost offline voice path for NexusOS.",
     installHint: input.piperInstalled ? "Piper is already present on this machine." : "Install Piper when you want better local TTS voices and file export.",
   });
+
+  if (hasGpu) {
+    const prefersLowVram = input.totalRamGb <= 24;
+    list.push({
+      id: "image-wan2gp-auto",
+      name: prefersLowVram ? "Wan2GP FLUX Schnell" : "Wan2GP Qwen/FLUX",
+      category: "image",
+      size: prefersLowVram ? "medium" : "large",
+      runtime: "wan2gp",
+      summary: "Local image generation profile tuned by machine class.",
+      fitReason: prefersLowVram
+        ? "Machine profile is better suited for lower-VRAM first image models."
+        : "Machine profile has enough headroom for broader Wan2GP image model choices.",
+      installHint: "Use Media Center with Auto model and profile defaults; install models you use most often.",
+    });
+
+    list.push({
+      id: "video-wan2gp-auto",
+      name: prefersLowVram ? "Wan2GP T2V 1.3B" : "Wan2GP Distilled Video",
+      category: "video",
+      size: prefersLowVram ? "medium" : "large",
+      runtime: "wan2gp",
+      summary: "Local video generation profile tuned by machine class.",
+      fitReason: prefersLowVram
+        ? "Lower-memory video models reduce startup/download pressure and runtime failures."
+        : "Higher-memory profile can handle heavier distilled video pipelines.",
+      installHint: "Keep installed-only routing in mind: install at least one Wan2GP video model before generating.",
+    });
+  }
 
   return list;
 }

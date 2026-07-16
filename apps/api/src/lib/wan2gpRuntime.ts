@@ -12,6 +12,9 @@ const wanAppRoot = path.join(wanRoot, "app");
 const wanVenvRoot = path.join(wanAppRoot, "env");
 const wanRepoUrl = "https://github.com/deepbeepmeep/Wan2GP";
 let lastWanReadinessError: string | null = null;
+let wanModelCatalogCache: Wan2GpModelCatalog | null = null;
+let wanModelCatalogCacheAt = 0;
+const wanModelCatalogCacheTtlMs = 60 * 1000;
 
 type Wan2GpMode = "image" | "video";
 
@@ -28,6 +31,18 @@ export type Wan2GpStatus = {
     stt: boolean;
   };
   notes: string[];
+};
+
+export type Wan2GpModelCatalogEntry = {
+  modelType: string;
+  available: boolean;
+  status: string;
+};
+
+export type Wan2GpModelCatalog = {
+  image: Wan2GpModelCatalogEntry[];
+  video: Wan2GpModelCatalogEntry[];
+  scannedAt: string;
 };
 
 export type Wan2GpGenerateInput = {
@@ -408,6 +423,98 @@ async function checkWanApiReady(): Promise<boolean> {
   }
 }
 
+export async function getWan2GpModelCatalog(forceRefresh = false): Promise<Wan2GpModelCatalog> {
+  const now = Date.now();
+  if (!forceRefresh && wanModelCatalogCache && (now - wanModelCatalogCacheAt) < wanModelCatalogCacheTtlMs) {
+    return wanModelCatalogCache;
+  }
+
+  const status = await getWan2GpStatus();
+  if (!status.installed || !status.envReady || !status.apiReady) {
+    const empty: Wan2GpModelCatalog = { image: [], video: [], scannedAt: new Date().toISOString() };
+    wanModelCatalogCache = empty;
+    wanModelCatalogCacheAt = now;
+    return empty;
+  }
+
+  const scriptPath = path.join(wanAppRoot, ".nexus_model_catalog.py");
+  const marker = "NEXUS_MODEL_CATALOG:";
+  await fs.writeFile(scriptPath, [
+    "import json",
+    "from shared.api import init",
+    "",
+    "def rows_for(session, output_mode):",
+    "    defs = session.list_model_defs(main_output=output_mode)",
+    "    availability = session.list_model_availability(main_output=output_mode)",
+    "    availability_by_model = {}",
+    "    for entry in availability:",
+    "        model_type = str((entry or {}).get('model_type', '')).strip()",
+    "        if model_type:",
+    "            availability_by_model[model_type] = entry or {}",
+    "",
+    "    rows = []",
+    "    for entry in defs:",
+    "        model_type = str((entry or {}).get('model_type', '')).strip()",
+    "        if not model_type:",
+    "            continue",
+    "        availability_entry = availability_by_model.get(model_type, {})",
+    "        rows.append({",
+    "            'model_type': model_type,",
+    "            'available': bool(availability_entry.get('available', False)),",
+    "            'status': str(availability_entry.get('status', 'unknown')),",
+    "        })",
+    "    return rows",
+    "",
+    "session = init(root='.', cli_args=['--attention', 'sdpa', '--profile', '4'], console_output=False, console_isatty=False)",
+    "payload = {",
+    "    'image': rows_for(session, 'image'),",
+    "    'video': rows_for(session, 'video'),",
+    "}",
+    "session.close()",
+    "print('NEXUS_MODEL_CATALOG:' + json.dumps(payload), flush=True)",
+  ].join("\n"), "utf-8");
+
+  const { stdout } = await execFileAsync(getWanPythonPath(), [scriptPath], {
+    cwd: wanAppRoot,
+    windowsHide: true,
+    timeout: 180000,
+    maxBuffer: 1024 * 1024 * 8,
+  });
+
+  const line = stdout
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .find((item) => item.startsWith(marker));
+
+  if (!line) {
+    throw new Error("Wan2GP model catalog probe did not return a parseable payload.");
+  }
+
+  const parsed = JSON.parse(line.slice(marker.length)) as {
+    image?: Array<{ model_type?: unknown; available?: unknown; status?: unknown }>;
+    video?: Array<{ model_type?: unknown; available?: unknown; status?: unknown }>;
+  };
+
+  const toRows = (rows: Array<{ model_type?: unknown; available?: unknown; status?: unknown }> | undefined): Wan2GpModelCatalogEntry[] => {
+    return (rows ?? [])
+      .map((row) => ({
+        modelType: String(row.model_type ?? "").trim(),
+        available: Boolean(row.available),
+        status: String(row.status ?? "unknown"),
+      }))
+      .filter((row) => row.modelType.length > 0);
+  };
+
+  const catalog: Wan2GpModelCatalog = {
+    image: toRows(parsed.image),
+    video: toRows(parsed.video),
+    scannedAt: new Date().toISOString(),
+  };
+  wanModelCatalogCache = catalog;
+  wanModelCatalogCacheAt = now;
+  return catalog;
+}
+
 function buildWanScript(input: Wan2GpGenerateInput): string {
   const mode = input.mode;
   return [
@@ -448,28 +555,37 @@ function buildWanScript(input: Wan2GpGenerateInput): string {
     "}",
     "target_output = 'image' if mode == 'image' else 'video'",
     "available_model_types = []",
+    "installed_model_types = []",
     "try:",
     "    model_defs = session.list_model_defs(main_output=target_output)",
     "    available_model_types = [str((item or {}).get('model_type', '')).strip() for item in model_defs]",
     "    available_model_types = [item for item in available_model_types if item]",
+    "    availability = session.list_model_availability(main_output=target_output)",
+    "    installed_model_types = [str((item or {}).get('model_type', '')).strip() for item in availability if bool((item or {}).get('available', False))]",
+    "    installed_model_types = [item for item in installed_model_types if item]",
     "except Exception:",
     "    available_model_types = []",
+    "    installed_model_types = []",
     "preferred_image_models = ['flux_schnell', 'alpha_sf', 'alpha2_sf', 'flux', 'alpha2', 'alpha', 'qwen_image_20B']",
     "preferred_video_models = ['t2v_1.3B', 't2v_sf', 'fun_inp_1.3B', 'hunyuan', 'animate', 'alpha2']",
     "if model_type:",
     "    if available_model_types and model_type not in available_model_types:",
     "        preview = ', '.join(available_model_types[:24])",
     "        raise RuntimeError(f\"Requested model_type '{model_type}' is unavailable. Available: {preview}\")",
+    "    if installed_model_types and model_type not in installed_model_types:",
+    "        preview = ', '.join(installed_model_types[:24])",
+    "        raise RuntimeError(f\"Requested model_type '{model_type}' is not installed locally. Installed: {preview}\")",
     "else:",
     "    preferred_models = preferred_image_models if mode == 'image' else preferred_video_models",
     "    for candidate in preferred_models:",
-    "        if candidate in available_model_types:",
+    "        if candidate in installed_model_types:",
     "            model_type = candidate",
     "            break",
-    "    if not model_type and available_model_types:",
-    "        model_type = available_model_types[0]",
+    "    if not model_type and installed_model_types:",
+    "        model_type = installed_model_types[0]",
     "if not model_type:",
-    "    raise RuntimeError('No model_type specified and no compatible model is available.')",
+    "    raise RuntimeError('No installed model_type available for this mode. Install a Wan2GP model and retry.')",
+    "emit_status(f'Installed model count for {target_output}: {len(installed_model_types)}')",
     "emit_status(f'Using model_type: {model_type}')",
     "if negative_prompt:",
     "    settings['negative_prompt'] = negative_prompt",
@@ -506,7 +622,7 @@ function buildWanScript(input: Wan2GpGenerateInput): string {
     "if not candidates:",
     "    raise RuntimeError('Wan2GP finished but no expected output file was produced.')",
     "output_path = candidates[-1]",
-    "emit_result({'output_path': output_path})",
+    "emit_result({'output_path': output_path, 'model_type': model_type})",
   ].join("\n");
 }
 
@@ -614,6 +730,9 @@ export async function generateWithWan2GpStreaming(
   const durationSeconds = clampInt(input.durationSeconds ?? 4, 1, 12);
   const frameCount = clampInt(input.frameCount ?? (fps * durationSeconds + 1), 17, 193);
   const normalizedModel = normalizeWanModel(input.model);
+  const maxDurationMs = mode === "image" ? 12 * 60 * 1000 : 20 * 60 * 1000;
+  const inactivityTimeoutMs = 2 * 60 * 1000;
+  const heartbeatIntervalMs = 20 * 1000;
 
   await fs.mkdir(wanAppRoot, { recursive: true });
   const scriptPath = path.join(wanAppRoot, `.nexus-generate-${mode}.py`);
@@ -657,8 +776,25 @@ export async function generateWithWan2GpStreaming(
   return await new Promise<Wan2GpGenerateResult>((resolve, reject) => {
     let stdoutBuffer = "";
     let stderrBuffer = "";
-    let resultPayload: { output_path: string } | null = null;
+    let resultPayload: { output_path: string; model_type?: string } | null = null;
     let canceled = false;
+    let settled = false;
+    const startedAt = Date.now();
+    let lastActivityAt = startedAt;
+
+    const touchActivity = () => {
+      lastActivityAt = Date.now();
+    };
+
+    const failOnce = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(watchdogTimer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(error);
+    };
 
     const onAbort = () => {
       canceled = true;
@@ -668,9 +804,39 @@ export async function generateWithWan2GpStreaming(
       }
     };
 
+    const watchdogTimer = setInterval(() => {
+      if (settled || canceled || signal?.aborted) {
+        return;
+      }
+      const now = Date.now();
+      const elapsedMs = now - startedAt;
+      const idleMs = now - lastActivityAt;
+
+      if (idleMs > inactivityTimeoutMs) {
+        onStatus(`Wan2GP watchdog: no output for ${Math.round(idleMs / 1000)}s. Aborting generation.`);
+        if (child.pid) {
+          void terminateChild(child.pid);
+        }
+        failOnce(new Error("Wan2GP generation stalled without output for too long. Try a lighter model/profile or retry."));
+        return;
+      }
+
+      if (elapsedMs > maxDurationMs) {
+        onStatus(`Wan2GP watchdog: generation exceeded ${Math.round(maxDurationMs / 60000)} minute limit. Aborting.`);
+        if (child.pid) {
+          void terminateChild(child.pid);
+        }
+        failOnce(new Error("Wan2GP generation timed out before completion. Try fewer steps, lower resolution, or a lighter model."));
+        return;
+      }
+
+      onStatus(`Wan2GP still running (${Math.round(elapsedMs / 1000)}s elapsed).`);
+    }, heartbeatIntervalMs);
+
     signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout.on("data", (chunk: Buffer | string) => {
+      touchActivity();
       stdoutBuffer += chunk.toString();
       while (true) {
         const idx = stdoutBuffer.indexOf("\n");
@@ -690,7 +856,7 @@ export async function generateWithWan2GpStreaming(
 
         if (line.startsWith("NEXUS_RESULT:")) {
           try {
-            resultPayload = JSON.parse(line.slice("NEXUS_RESULT:".length).trim()) as { output_path: string };
+            resultPayload = JSON.parse(line.slice("NEXUS_RESULT:".length).trim()) as { output_path: string; model_type?: string };
           } catch {
             // Ignore malformed payload lines.
           }
@@ -702,6 +868,7 @@ export async function generateWithWan2GpStreaming(
     });
 
     child.stderr.on("data", (chunk: Buffer | string) => {
+      touchActivity();
       const text = chunk.toString();
       stderrBuffer += text;
       const trimmed = text.trim();
@@ -711,11 +878,15 @@ export async function generateWithWan2GpStreaming(
     });
 
     child.on("error", (error) => {
-      signal?.removeEventListener("abort", onAbort);
-      reject(error);
+      failOnce(error instanceof Error ? error : new Error(String(error)));
     });
 
     child.on("close", (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(watchdogTimer);
       signal?.removeEventListener("abort", onAbort);
       if (canceled || signal?.aborted) {
         reject(new Error("Wan2GP generation canceled by user."));
@@ -734,7 +905,7 @@ export async function generateWithWan2GpStreaming(
         outputPath: resultPayload.output_path,
         mode,
         provider: "wan2gp",
-        model: (normalizedModel || "auto"),
+        model: resultPayload.model_type?.trim() || normalizedModel || "auto",
         width,
         height,
         steps,
