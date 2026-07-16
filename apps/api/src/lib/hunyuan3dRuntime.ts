@@ -194,18 +194,38 @@ async function ensureHunyuanEnv(): Promise<void> {
 
   const requirementsFile = await resolveRequirementsFile();
 
-  const installRequirements = async (withNoBuildIsolation: boolean): Promise<void> => {
+  const installRequirementsFromFile = async (fileName: string, withNoBuildIsolation: boolean): Promise<void> => {
     const args = ["-m", "pip", "install", "--prefer-binary"];
     if (withNoBuildIsolation) {
       args.push("--no-build-isolation");
     }
-    args.push("-r", requirementsFile);
+    args.push("-r", fileName);
     await execFileAsync(pythonPath, args, {
       cwd: hy3dAppRoot,
       windowsHide: true,
       timeout: 120 * 60 * 1000,
       maxBuffer: 1024 * 1024 * 32,
     });
+  };
+
+  const buildDisoFreeRequirements = async (sourceFileName: string): Promise<string> => {
+    const sourcePath = path.join(hy3dAppRoot, sourceFileName);
+    const sourceText = await fs.readFile(sourcePath, "utf-8");
+    const lines = sourceText.split(/\r?\n/);
+    const filteredLines = lines.filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        return true;
+      }
+      return !/\bdiso\b/i.test(trimmed);
+    });
+    const targetFileName = `${sourceFileName.replace(/\.txt$/i, "")}.nexus-nodiso.txt`;
+    await fs.writeFile(path.join(hy3dAppRoot, targetFileName), filteredLines.join("\n"), "utf-8");
+    return targetFileName;
+  };
+
+  const installRequirements = async (withNoBuildIsolation: boolean): Promise<void> => {
+    await installRequirementsFromFile(requirementsFile, withNoBuildIsolation);
   };
 
   try {
@@ -225,7 +245,21 @@ async function ensureHunyuanEnv(): Promise<void> {
       timeout: 120 * 60 * 1000,
       maxBuffer: 1024 * 1024 * 32,
     });
-    await installRequirements(true);
+
+    try {
+      await installRequirements(true);
+    } catch (secondError) {
+      const secondMessage = String(secondError);
+      const looksLikeCudaDisoBuildFailure = /cuda_runtime\.h|Failed building wheel for diso|failed-wheel-build-for-install/i.test(secondMessage);
+      if (!looksLikeCudaDisoBuildFailure) {
+        throw secondError;
+      }
+
+      // Some Windows installs do not have CUDA toolkit headers; diso is optional for our shape path.
+      // Retry with a patched requirements file that excludes diso.
+      const disoFreeRequirementsFile = await buildDisoFreeRequirements(requirementsFile);
+      await installRequirementsFromFile(disoFreeRequirementsFile, true);
+    }
   }
 
   // Some lightweight requirements variants omit numpy; force it so shapegen imports are stable.
