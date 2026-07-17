@@ -1089,6 +1089,54 @@ button:disabled {
   background: rgba(9, 15, 20, 0.7);
 }
 
+.model3d-source-preview {
+  display: grid;
+  gap: 6px;
+}
+
+.model3d-source-preview img {
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 10px;
+  background: rgba(9, 15, 20, 0.8);
+}
+
+.model3d-viewport-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.model3d-viewport-canvas {
+  width: 100%;
+  min-height: 360px;
+  border: 1px solid rgba(47, 71, 79, 0.4);
+  border-radius: 12px;
+  overflow: hidden;
+  background: radial-gradient(circle at 10% 0%, rgba(255, 122, 24, 0.12), transparent 44%), rgba(10, 17, 22, 0.95);
+}
+
+.model3d-viewport-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.model3d-viewport-error {
+  color: var(--bad);
+}
+
+.model3d-recent-thumb {
+  width: 100%;
+  max-width: 220px;
+  max-height: 120px;
+  border-radius: 8px;
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  object-fit: contain;
+  background: rgba(9, 15, 20, 0.75);
+}
+
 .image-status-stream {
   margin: 0;
   border: 1px solid rgba(47, 71, 79, 0.35);

@@ -2667,23 +2667,87 @@ app.get("/api/tools/wan2gp/video/stream", async (req, res) => {
   }
 });
 
-async function resolveHunyuanSourceImageBase64(input: { imageUrl?: string; imageBase64?: string }): Promise<string> {
+async function resolveHunyuanSourceImage(input: {
+  imageUrl?: string;
+  imageBase64?: string;
+  textPrompt?: string;
+  textNegativePrompt?: string;
+  textImageModel?: string;
+  textImageWidth?: number;
+  textImageHeight?: number;
+  textImageSteps?: number;
+  textImageProfile?: number;
+  textImageSeed?: number;
+}, onStatus: (message: string) => void, signal?: AbortSignal): Promise<{
+  imageBase64: string;
+  sourceKind: "image" | "text";
+  sourceBytes: Buffer;
+  sourceExtension: string;
+}> {
   const directBase64 = String(input.imageBase64 ?? "").trim();
   if (directBase64) {
-    return directBase64;
+    const sourceBytes = Buffer.from(directBase64, "base64");
+    if (!sourceBytes.length) {
+      throw new Error("imageBase64 was provided but could not be decoded.");
+    }
+    return {
+      imageBase64: directBase64,
+      sourceKind: "image",
+      sourceBytes,
+      sourceExtension: "png",
+    };
   }
 
   const imageUrl = String(input.imageUrl ?? "").trim();
-  if (!imageUrl) {
-    throw new Error("imageUrl or imageBase64 is required");
+  if (imageUrl) {
+    const sourceResponse = await fetchWithTimeout(imageUrl, 30000);
+    if (!sourceResponse.ok) {
+      throw new Error(`Could not fetch source image: ${sourceResponse.status} ${sourceResponse.statusText}`);
+    }
+    const sourceBytes = Buffer.from(await sourceResponse.arrayBuffer());
+    return {
+      imageBase64: sourceBytes.toString("base64"),
+      sourceKind: "image",
+      sourceBytes,
+      sourceExtension: inferExtensionFromContentType(sourceResponse.headers.get("content-type"), "png"),
+    };
   }
 
-  const sourceResponse = await fetch(imageUrl);
-  if (!sourceResponse.ok) {
-    throw new Error(`Could not fetch source image: ${sourceResponse.status} ${sourceResponse.statusText}`);
+  const textPrompt = String(input.textPrompt ?? "").trim();
+  if (!textPrompt) {
+    throw new Error("Provide either imageUrl/imageBase64 or textPrompt.");
   }
-  const imageBytes = Buffer.from(await sourceResponse.arrayBuffer());
-  return imageBytes.toString("base64");
+
+  onStatus("No source image provided. Generating source image from text prompt via Wan2GP...");
+  await startWan2GpIfNeeded();
+
+  const textImageSeed = Number.isFinite(input.textImageSeed)
+    ? Math.round(Number(input.textImageSeed))
+    : Math.floor(Date.now() % 2147483647);
+
+  const generatedImage = await generateWithWan2GpStreaming(
+    {
+      mode: "image",
+      prompt: textPrompt,
+      negativePrompt: String(input.textNegativePrompt ?? ""),
+      model: String(input.textImageModel ?? "auto"),
+      width: Number(input.textImageWidth ?? 768),
+      height: Number(input.textImageHeight ?? 768),
+      steps: Number(input.textImageSteps ?? 6),
+      seed: textImageSeed,
+      profile: Number(input.textImageProfile ?? getMachineProfileHint()),
+    },
+    onStatus,
+    signal,
+  );
+
+  const sourceBytes = await readMediaBytes(generatedImage.outputPath);
+  return {
+    imageBase64: sourceBytes.toString("base64"),
+    sourceKind: "text",
+    sourceBytes,
+    sourceExtension: inferMediaExtension(generatedImage.outputPath, "png"),
+  };
 }
 
 async function streamHunyuan3dGeneration(
@@ -2692,6 +2756,14 @@ async function streamHunyuan3dGeneration(
   input: {
     imageUrl?: string;
     imageBase64?: string;
+    textPrompt?: string;
+    textNegativePrompt?: string;
+    textImageModel?: string;
+    textImageWidth?: number;
+    textImageHeight?: number;
+    textImageSteps?: number;
+    textImageProfile?: number;
+    textImageSeed?: number;
     modelPath?: string;
     subfolder?: string;
     numInferenceSteps?: number;
@@ -2728,12 +2800,33 @@ async function streamHunyuan3dGeneration(
 
   try {
     send({ type: "status", message: "Preparing source image..." });
-    const imageBase64 = await resolveHunyuanSourceImageBase64({ imageUrl: input.imageUrl, imageBase64: input.imageBase64 });
+    const resolvedSource = await resolveHunyuanSourceImage({
+      imageUrl: input.imageUrl,
+      imageBase64: input.imageBase64,
+      textPrompt: input.textPrompt,
+      textNegativePrompt: input.textNegativePrompt,
+      textImageModel: input.textImageModel,
+      textImageWidth: input.textImageWidth,
+      textImageHeight: input.textImageHeight,
+      textImageSteps: input.textImageSteps,
+      textImageProfile: input.textImageProfile,
+      textImageSeed: input.textImageSeed,
+    }, (message) => send({ type: "status", message }), controller.signal);
+
+    const savedSource = await saveBufferToWorkspaceAssets({
+      workspaceId,
+      category: "images",
+      baseName: resolvedSource.sourceKind === "text" ? "hunyuan3d-source-text" : "hunyuan3d-source-image",
+      extension: resolvedSource.sourceExtension,
+      bytes: resolvedSource.sourceBytes,
+    });
+    const sourceImageUrl = `/api/tools/media/file?workspaceId=${encodeURIComponent(savedSource.workspaceId)}&relativePath=${encodeURIComponent(savedSource.relativePath)}`;
+    send({ type: "status", message: `Source image ready (${resolvedSource.sourceKind}).` });
 
     send({ type: "status", message: "Starting Hunyuan3D-2GP mesh generation..." });
     const generated = await generateWithHunyuan3dStreaming(
       {
-        imageBase64,
+        imageBase64: resolvedSource.imageBase64,
         modelPath,
         subfolder,
         numInferenceSteps,
@@ -2772,6 +2865,8 @@ async function streamHunyuan3dGeneration(
         seed: generated.seed,
         format: generated.format,
         device: generated.device,
+        sourceKind: resolvedSource.sourceKind,
+        sourceImageUrl,
       },
     });
     res.end();
@@ -2788,6 +2883,14 @@ async function streamHunyuan3dGeneration(
 app.get("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
   await streamHunyuan3dGeneration(req, res, {
     imageUrl: String(req.query.imageUrl ?? ""),
+    textPrompt: String(req.query.textPrompt ?? ""),
+    textNegativePrompt: String(req.query.textNegativePrompt ?? ""),
+    textImageModel: String(req.query.textImageModel ?? ""),
+    textImageWidth: Number(req.query.textImageWidth ?? 768),
+    textImageHeight: Number(req.query.textImageHeight ?? 768),
+    textImageSteps: Number(req.query.textImageSteps ?? 6),
+    textImageProfile: Number(req.query.textImageProfile ?? getMachineProfileHint()),
+    textImageSeed: Number(req.query.textImageSeed ?? Date.now() % 2147483647),
     modelPath: String(req.query.modelPath ?? "tencent/Hunyuan3D-2mini"),
     subfolder: String(req.query.subfolder ?? "hunyuan3d-dit-v2-mini-turbo"),
     numInferenceSteps: Number(req.query.numInferenceSteps ?? 20),
@@ -2803,6 +2906,14 @@ app.post("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
   const body = req.body as {
     imageUrl?: string;
     imageBase64?: string;
+    textPrompt?: string;
+    textNegativePrompt?: string;
+    textImageModel?: string;
+    textImageWidth?: number;
+    textImageHeight?: number;
+    textImageSteps?: number;
+    textImageProfile?: number;
+    textImageSeed?: number;
     modelPath?: string;
     subfolder?: string;
     numInferenceSteps?: number;

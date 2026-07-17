@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, ReactElement } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import * as THREE from "three";
+import { MOUSE } from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import dashboardLogo from "./assets/DashboardLogo_Nexus.png";
 
 type PaneSelection = {
@@ -490,6 +495,8 @@ type Hunyuan3dStreamEnvelope =
       seed: number;
       format: "glb" | "obj";
       device: string;
+      sourceKind: "image" | "text";
+      sourceImageUrl: string;
     };
   }
   | { type: "error"; message: string };
@@ -505,6 +512,7 @@ type Model3dGeneratedResult = {
   seed: number;
   format: "glb" | "obj";
   device: string;
+  sourceKind: "image" | "text";
   sourceImageUrl: string;
   createdAt: string;
   relativePath?: string;
@@ -713,6 +721,156 @@ const IMAGE_SIZE_PRESETS: ImageSizePreset[] = [
   { id: "thumbnail", label: "Thumbnail 640x384", width: 640, height: 384 },
 ];
 
+function disposeObject3d(root: THREE.Object3D): void {
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (mesh.geometry && "dispose" in mesh.geometry) {
+      mesh.geometry.dispose();
+    }
+    const material = (mesh as { material?: THREE.Material | THREE.Material[] }).material;
+    if (Array.isArray(material)) {
+      material.forEach((entry) => entry.dispose());
+    } else {
+      material?.dispose();
+    }
+  });
+}
+
+function Model3dViewport(props: { modelUrl: string; format: "glb" | "obj" }): ReactElement {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    let disposed = false;
+    let animationFrame = 0;
+    let loadedModel: THREE.Object3D | null = null;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#0c1419");
+
+    const camera = new THREE.PerspectiveCamera(46, 1, 0.01, 2000);
+    camera.position.set(0, 1, 2.8);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    container.innerHTML = "";
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.screenSpacePanning = true;
+    controls.mouseButtons.LEFT = MOUSE.PAN;
+    controls.mouseButtons.RIGHT = MOUSE.ROTATE;
+    controls.mouseButtons.MIDDLE = MOUSE.DOLLY;
+
+    const hemi = new THREE.HemisphereLight("#ffe9cc", "#305070", 1.1);
+    const key = new THREE.DirectionalLight("#ffffff", 1.25);
+    key.position.set(4, 7, 4);
+    const fill = new THREE.DirectionalLight("#99ccff", 0.65);
+    fill.position.set(-4, 3, -3);
+    scene.add(hemi, key, fill);
+
+    const grid = new THREE.GridHelper(14, 20, "#3f6a7a", "#25414c");
+    grid.position.y = -0.001;
+    scene.add(grid);
+
+    const frameScene = (object: THREE.Object3D) => {
+      const box = new THREE.Box3().setFromObject(object);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const radius = Math.max(size.x, size.y, size.z) * 0.65;
+      const safeRadius = Number.isFinite(radius) && radius > 0 ? radius : 1;
+
+      controls.target.copy(center);
+      camera.position.set(center.x + safeRadius * 1.6, center.y + safeRadius * 0.9, center.z + safeRadius * 1.9);
+      camera.near = Math.max(0.01, safeRadius / 400);
+      camera.far = Math.max(120, safeRadius * 80);
+      camera.updateProjectionMatrix();
+      controls.update();
+    };
+
+    const applySize = () => {
+      const width = Math.max(200, Math.floor(container.clientWidth));
+      const height = Math.max(220, Math.floor(container.clientHeight));
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    };
+
+    applySize();
+    const observer = new ResizeObserver(() => applySize());
+    observer.observe(container);
+
+    const animate = () => {
+      if (disposed) {
+        return;
+      }
+      controls.update();
+      renderer.render(scene, camera);
+      animationFrame = window.requestAnimationFrame(animate);
+    };
+
+    const loadModel = async () => {
+      setLoadError(null);
+      try {
+        let rootObject: THREE.Object3D;
+        if (props.format === "glb") {
+          const loader = new GLTFLoader();
+          const gltf = await loader.loadAsync(props.modelUrl);
+          rootObject = gltf.scene;
+        } else {
+          const loader = new OBJLoader();
+          rootObject = await loader.loadAsync(props.modelUrl);
+        }
+
+        if (disposed) {
+          disposeObject3d(rootObject);
+          return;
+        }
+
+        loadedModel = rootObject;
+        scene.add(rootObject);
+        frameScene(rootObject);
+      } catch (error) {
+        if (!disposed) {
+          setLoadError(String(error));
+        }
+      }
+    };
+
+    void loadModel();
+    animate();
+
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      window.cancelAnimationFrame(animationFrame);
+      controls.dispose();
+      if (loadedModel) {
+        scene.remove(loadedModel);
+        disposeObject3d(loadedModel);
+      }
+      renderer.dispose();
+      container.innerHTML = "";
+    };
+  }, [props.format, props.modelUrl]);
+
+  return (
+    <div className="model3d-viewport-shell">
+      <div className="model3d-viewport-canvas" ref={containerRef} />
+      <small>Controls: left drag = pan camera, right drag = orbit model, wheel = zoom.</small>
+      {loadError ? <small className="model3d-viewport-error">Preview load failed: {loadError}</small> : null}
+    </div>
+  );
+}
+
 function App() {
   const [themeId, setThemeId] = useState<string>(() => {
     if (typeof window === "undefined") {
@@ -799,9 +957,19 @@ function App() {
   const [recentVideos, setRecentVideos] = useState<VideoGeneratedResult[]>([]);
   const videoGenerationAbortRef = useRef<AbortController | null>(null);
   const [hunyuan3dStatus, setHunyuan3dStatus] = useState<Hunyuan3dStatus | null>(null);
+  const [model3dInputMode, setModel3dInputMode] = useState<"image" | "text">("image");
   const [model3dSourceImageUrl, setModel3dSourceImageUrl] = useState("");
   const [model3dSourceImageBase64, setModel3dSourceImageBase64] = useState("");
   const [model3dSourceImageFileName, setModel3dSourceImageFileName] = useState("");
+  const [model3dSourceImageMime, setModel3dSourceImageMime] = useState("image/png");
+  const [model3dTextPrompt, setModel3dTextPrompt] = useState("");
+  const [model3dTextNegativePrompt, setModel3dTextNegativePrompt] = useState("blurry, noisy, low quality, text watermark");
+  const [model3dTextImageModel, setModel3dTextImageModel] = useState("auto");
+  const [model3dTextImageWidth, setModel3dTextImageWidth] = useState(768);
+  const [model3dTextImageHeight, setModel3dTextImageHeight] = useState(768);
+  const [model3dTextImageSteps, setModel3dTextImageSteps] = useState(6);
+  const [model3dTextImageProfile, setModel3dTextImageProfile] = useState(4);
+  const [model3dTextImageSeed, setModel3dTextImageSeed] = useState(-1);
   const [model3dModelPath, setModel3dModelPath] = useState("tencent/Hunyuan3D-2mini");
   const [model3dSubfolder, setModel3dSubfolder] = useState("hunyuan3d-dit-v2-mini-turbo");
   const [model3dNumInferenceSteps, setModel3dNumInferenceSteps] = useState(20);
@@ -852,6 +1020,24 @@ function App() {
   const [harnessSpeaking, setHarnessSpeaking] = useState(false);
   const harnessSpeechAudioRef = useRef<HTMLAudioElement | null>(null);
   const harnessSpeechUrlRef = useRef<string | null>(null);
+
+  const model3dSourcePreviewUrl = useMemo(() => {
+    if (model3dSourceImageBase64.trim()) {
+      const mime = model3dSourceImageMime.trim() || "image/png";
+      return `data:${mime};base64,${model3dSourceImageBase64.trim()}`;
+    }
+
+    const candidate = model3dSourceImageUrl.trim();
+    if (!candidate) {
+      return "";
+    }
+
+    if (/^https?:\/\//i.test(candidate) || candidate.startsWith("/api/") || candidate.startsWith("data:image/")) {
+      return candidate;
+    }
+
+    return "";
+  }, [model3dSourceImageBase64, model3dSourceImageMime, model3dSourceImageUrl]);
   
   async function loadCookbookSnapshot() {
     setCookbookBusy(true);
@@ -1711,9 +1897,18 @@ function App() {
 
     const sourceImageUrl = model3dSourceImageUrl.trim();
     const sourceImageBase64 = model3dSourceImageBase64.trim();
-    if (!sourceImageUrl && !sourceImageBase64) {
+    const useTextMode = model3dInputMode === "text";
+    const textPrompt = model3dTextPrompt.trim();
+    if (!useTextMode && !sourceImageUrl && !sourceImageBase64) {
       setStatusMessage("Provide a source image URL or upload an image for 3D generation.");
       pushToast("Provide or upload a source image first.", "warn");
+      setModel3dBusyAction(null);
+      return;
+    }
+
+    if (useTextMode && !textPrompt) {
+      setStatusMessage("Enter a text prompt for text-to-3D generation.");
+      pushToast("Text prompt is required for text-to-3D.", "warn");
       setModel3dBusyAction(null);
       return;
     }
@@ -1727,9 +1922,18 @@ function App() {
     }
 
     const seedToUse = model3dSeed < 0 ? Math.floor(Math.random() * 2147483647) : model3dSeed;
+    const textImageSeedToUse = model3dTextImageSeed < 0 ? Math.floor(Math.random() * 2147483647) : model3dTextImageSeed;
     const requestBody = {
-      imageUrl: sourceImageUrl || undefined,
-      imageBase64: sourceImageBase64 || undefined,
+      imageUrl: useTextMode ? undefined : (sourceImageUrl || undefined),
+      imageBase64: useTextMode ? undefined : (sourceImageBase64 || undefined),
+      textPrompt: useTextMode ? textPrompt : undefined,
+      textNegativePrompt: useTextMode ? model3dTextNegativePrompt : undefined,
+      textImageModel: useTextMode ? model3dTextImageModel : undefined,
+      textImageWidth: useTextMode ? model3dTextImageWidth : undefined,
+      textImageHeight: useTextMode ? model3dTextImageHeight : undefined,
+      textImageSteps: useTextMode ? model3dTextImageSteps : undefined,
+      textImageProfile: useTextMode ? model3dTextImageProfile : undefined,
+      textImageSeed: useTextMode ? textImageSeedToUse : undefined,
       modelPath: model3dModelPath,
       subfolder: model3dSubfolder,
       numInferenceSteps: model3dNumInferenceSteps,
@@ -1811,10 +2015,14 @@ function App() {
               seed: envelope.result.seed,
               format: envelope.result.format,
               device: envelope.result.device,
-              sourceImageUrl: sourceImageUrl || `uploaded:${model3dSourceImageFileName || "source-image"}`,
+              sourceKind: envelope.result.sourceKind,
+              sourceImageUrl: envelope.result.sourceImageUrl,
               relativePath: envelope.result.relativePath,
               createdAt: new Date().toISOString(),
             };
+            setModel3dSourceImageUrl(envelope.result.sourceImageUrl);
+            setModel3dSourceImageBase64("");
+            setModel3dSourceImageFileName("");
             setModel3dResult(generated);
             setRecentModels3d((current) => [generated, ...current].slice(0, 10));
             setStatusMessage("Hunyuan3D mesh generated and saved.");
@@ -1872,7 +2080,9 @@ function App() {
       }
       setModel3dSourceImageBase64(base64);
       setModel3dSourceImageFileName(file.name);
+      setModel3dSourceImageMime(file.type || "image/png");
       setModel3dSourceImageUrl("");
+      setModel3dInputMode("image");
       setStatusMessage(`Loaded uploaded image: ${file.name}`);
       pushToast("Uploaded image ready for 3D generation.", "ok");
     };
@@ -1892,14 +2102,18 @@ function App() {
     setModel3dSourceImageUrl(candidate);
     setModel3dSourceImageBase64("");
     setModel3dSourceImageFileName("");
+    setModel3dSourceImageMime("image/png");
+    setModel3dInputMode("image");
     setStatusMessage("Loaded latest generated image as 3D source.");
   }
 
   function openRecentModel3d(model: Model3dGeneratedResult) {
-    const sourceLooksLikeUrl = /^https?:\/\//i.test(model.sourceImageUrl) || model.sourceImageUrl.startsWith("/api/");
+    const sourceLooksLikeUrl = /^https?:\/\//i.test(model.sourceImageUrl) || model.sourceImageUrl.startsWith("/api/") || model.sourceImageUrl.startsWith("data:image/");
     setModel3dSourceImageUrl(sourceLooksLikeUrl ? model.sourceImageUrl : "");
     setModel3dSourceImageBase64("");
     setModel3dSourceImageFileName("");
+    setModel3dSourceImageMime("image/png");
+    setModel3dInputMode(model.sourceKind === "text" ? "text" : "image");
     setModel3dModelPath(model.modelPath);
     setModel3dSubfolder(model.subfolder);
     setModel3dNumInferenceSteps(model.numInferenceSteps);
@@ -4602,31 +4816,110 @@ function App() {
                   {hunyuan3dStatus?.notes?.length ? (
                     <small>{hunyuan3dStatus.notes[hunyuan3dStatus.notes.length - 1]}</small>
                   ) : null}
-                  <label>
-                    <span>Source Image URL</span>
-                    <input
-                      type="text"
-                      value={model3dSourceImageUrl}
-                      onChange={(event) => {
-                        setModel3dSourceImageUrl(event.target.value);
-                        if (event.target.value.trim()) {
-                          setModel3dSourceImageBase64("");
-                          setModel3dSourceImageFileName("");
-                        }
-                      }}
-                      placeholder="Use a generated image URL or any reachable PNG/JPG/WEBP URL"
-                    />
-                  </label>
-                  <label>
-                    <span>Or Upload Source Image</span>
-                    <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onModel3dSourceFileSelected} />
-                  </label>
-                  {model3dSourceImageFileName ? <small>Uploaded: {model3dSourceImageFileName}</small> : null}
                   <div className="tool-action-row">
-                    <button type="button" className="ghost" onClick={useLatestGeneratedImageFor3d}>
-                      Use Latest Generated Image
+                    <button
+                      type="button"
+                      className={model3dInputMode === "image" ? "" : "ghost"}
+                      onClick={() => setModel3dInputMode("image")}
+                    >
+                      Image to 3D
+                    </button>
+                    <button
+                      type="button"
+                      className={model3dInputMode === "text" ? "" : "ghost"}
+                      onClick={() => setModel3dInputMode("text")}
+                    >
+                      Text to 3D
                     </button>
                   </div>
+
+                  {model3dInputMode === "image" ? (
+                    <>
+                      <label>
+                        <span>Source Image URL</span>
+                        <input
+                          type="text"
+                          value={model3dSourceImageUrl}
+                          onChange={(event) => {
+                            setModel3dSourceImageUrl(event.target.value);
+                            if (event.target.value.trim()) {
+                              setModel3dSourceImageBase64("");
+                              setModel3dSourceImageFileName("");
+                            }
+                          }}
+                          placeholder="Use a generated image URL or any reachable PNG/JPG/WEBP URL"
+                        />
+                      </label>
+                      <label>
+                        <span>Or Upload Source Image</span>
+                        <input type="file" accept="image/png,image/jpeg,image/webp" onChange={onModel3dSourceFileSelected} />
+                      </label>
+                      {model3dSourceImageFileName ? <small>Uploaded: {model3dSourceImageFileName}</small> : null}
+                      <div className="tool-action-row">
+                        <button type="button" className="ghost" onClick={useLatestGeneratedImageFor3d}>
+                          Use Latest Generated Image
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <label>
+                        <span>Text Prompt</span>
+                        <textarea
+                          rows={3}
+                          value={model3dTextPrompt}
+                          onChange={(event) => setModel3dTextPrompt(event.target.value)}
+                          placeholder="A stylized robot fox with polished chrome armor"
+                        />
+                      </label>
+                      <label>
+                        <span>Negative Prompt</span>
+                        <textarea
+                          rows={2}
+                          value={model3dTextNegativePrompt}
+                          onChange={(event) => setModel3dTextNegativePrompt(event.target.value)}
+                          placeholder="blurry, low quality, watermark, text"
+                        />
+                      </label>
+                      <div className="image-size-grid">
+                        <label>
+                          <span>Text-to-Image Model</span>
+                          <input type="text" value={model3dTextImageModel} onChange={(event) => setModel3dTextImageModel(event.target.value)} placeholder="auto" />
+                        </label>
+                        <label>
+                          <span>Text-to-Image Steps</span>
+                          <input type="number" min={4} max={40} value={model3dTextImageSteps} onChange={(event) => setModel3dTextImageSteps(Number(event.target.value || 6))} />
+                        </label>
+                      </div>
+                      <div className="image-size-grid">
+                        <label>
+                          <span>Text-to-Image Size</span>
+                          <input type="number" min={256} max={1024} step={64} value={model3dTextImageWidth} onChange={(event) => setModel3dTextImageWidth(Number(event.target.value || 768))} />
+                        </label>
+                        <label>
+                          <span>Text-to-Image Size (H)</span>
+                          <input type="number" min={256} max={1024} step={64} value={model3dTextImageHeight} onChange={(event) => setModel3dTextImageHeight(Number(event.target.value || 768))} />
+                        </label>
+                      </div>
+                      <div className="image-size-grid">
+                        <label>
+                          <span>Text-to-Image Profile</span>
+                          <input type="number" min={1} max={6} value={model3dTextImageProfile} onChange={(event) => setModel3dTextImageProfile(Number(event.target.value || 4))} />
+                        </label>
+                        <label>
+                          <span>Text-to-Image Seed (-1 = random)</span>
+                          <input type="number" value={model3dTextImageSeed} onChange={(event) => setModel3dTextImageSeed(Number(event.target.value || -1))} />
+                        </label>
+                      </div>
+                    </>
+                  )}
+
+                  {model3dInputMode === "image" && model3dSourcePreviewUrl ? (
+                    <div className="model3d-source-preview">
+                      <small>Source Thumbnail</small>
+                      <img src={model3dSourcePreviewUrl} alt="3D source thumbnail" />
+                    </div>
+                  ) : null}
                   <label>
                     <span>Model Path</span>
                     <input type="text" value={model3dModelPath} onChange={(event) => setModel3dModelPath(event.target.value)} />
@@ -4663,7 +4956,11 @@ function App() {
                     <input type="number" value={model3dSeed} onChange={(event) => setModel3dSeed(Number(event.target.value || -1))} />
                   </label>
                   <div className="tool-action-row">
-                    <button type="button" onClick={() => void generateModel3d()} disabled={model3dBusyAction !== null || (!model3dSourceImageUrl.trim() && !model3dSourceImageBase64.trim())}>
+                    <button
+                      type="button"
+                      onClick={() => void generateModel3d()}
+                      disabled={model3dBusyAction !== null || (model3dInputMode === "image" ? (!model3dSourceImageUrl.trim() && !model3dSourceImageBase64.trim()) : !model3dTextPrompt.trim())}
+                    >
                       {model3dBusyAction === "generate" ? "Generating..." : "Generate 3D Mesh"}
                     </button>
                     <button type="button" className="ghost" onClick={stopModel3dGeneration} disabled={model3dBusyAction !== "generate"}>
@@ -4677,7 +4974,14 @@ function App() {
                 <h3>Preview</h3>
                 {model3dResult?.modelUrl ? (
                   <div className="image-preview-panel">
-                    <small>{model3dResult.provider} · {model3dResult.modelPath}/{model3dResult.subfolder} · {model3dResult.format.toUpperCase()} · device {model3dResult.device}</small>
+                    <small>{model3dResult.provider} · {model3dResult.modelPath}/{model3dResult.subfolder} · {model3dResult.format.toUpperCase()} · device {model3dResult.device} · source {model3dResult.sourceKind}</small>
+                    {model3dResult.sourceImageUrl ? (
+                      <div className="model3d-source-preview">
+                        <small>Source Thumbnail</small>
+                        <img src={model3dResult.sourceImageUrl} alt="Generated mesh source" />
+                      </div>
+                    ) : null}
+                    <Model3dViewport modelUrl={model3dResult.modelUrl} format={model3dResult.format} />
                     {model3dResult.relativePath ? <small>Saved: {model3dResult.relativePath}</small> : null}
                     <div className="tool-action-row">
                       <a href={model3dResult.modelUrl} target="_blank" rel="noreferrer">
@@ -4703,7 +5007,8 @@ function App() {
                   <ul className="tool-list">
                     {recentModels3d.map((model) => (
                       <li key={`${model.modelUrl}-${model.createdAt}`}>
-                        {model.modelPath} · {model.format.toUpperCase()} · seed {model.seed} · {new Date(model.createdAt).toLocaleTimeString()}
+                        {model.modelPath} · {model.format.toUpperCase()} · seed {model.seed} · source {model.sourceKind} · {new Date(model.createdAt).toLocaleTimeString()}
+                        {model.sourceImageUrl ? <img className="model3d-recent-thumb" src={model.sourceImageUrl} alt="Recent source thumbnail" /> : null}
                         {model.relativePath ? <small>Saved: {model.relativePath}</small> : null}
                         <div className="tool-action-row">
                           <button type="button" className="ghost" onClick={() => openRecentModel3d(model)}>
