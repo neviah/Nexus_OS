@@ -3751,10 +3751,31 @@ function App() {
     return { label: `${ageHrs}h ago`, ageClass: "age-old" };
   }
 
+  function treeNodeIcon(node: WorkspaceTreeNode): string {
+    if (node.type === "directory") {
+      return "📁";
+    }
+
+    const extension = node.path.split(".").pop()?.toLowerCase() ?? "";
+    if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"].includes(extension)) {
+      return "🖼️";
+    }
+    if (["mp3", "wav", "ogg", "flac", "m4a", "aac"].includes(extension)) {
+      return "🎵";
+    }
+    if (["mp4", "webm", "mov", "mkv", "avi"].includes(extension)) {
+      return "🎬";
+    }
+    if (["glb", "gltf", "obj", "fbx", "blend"].includes(extension)) {
+      return "🧊";
+    }
+    return "📄";
+  }
+
   function renderTree(node: WorkspaceTreeNode): ReactElement {
     return (
       <li key={node.path} className={`tree-node ${node.type}`}>
-        <span>{node.name}</span>
+        <span>{treeNodeIcon(node)} {node.name}</span>
         {node.children && node.children.length > 0 ? <ul>{node.children.map(renderTree)}</ul> : null}
       </li>
     );
