@@ -2392,6 +2392,49 @@ app.get("/api/tools/wan2gp/file", async (req, res) => {
   }
 });
 
+// Backward-compatible media endpoint used by older run payloads.
+app.get("/api/tools/media/file", async (req, res) => {
+  const relativePath = String(req.query.relativePath ?? "").trim();
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+  if (!relativePath) {
+    return res.status(400).json({ error: "relativePath is required" });
+  }
+
+  try {
+    const state = await readSystemState();
+    const workspace = await resolveWorkspaceContext(state, workspaceId);
+    if (!workspace.path) {
+      return res.status(404).json({ error: "Workspace path is unavailable." });
+    }
+
+    const absolutePath = resolveWorkspaceTargetPath(workspace.path, relativePath);
+    await fs.access(absolutePath);
+    const extension = path.extname(absolutePath).toLowerCase();
+    const imageTypes: Record<string, string> = {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+    };
+    const videoTypes: Record<string, string> = {
+      ".mp4": "video/mp4",
+      ".webm": "video/webm",
+      ".mov": "video/quicktime",
+      ".mkv": "video/x-matroska",
+      ".avi": "video/x-msvideo",
+    };
+    const contentType = imageTypes[extension] ?? videoTypes[extension];
+    if (!contentType) {
+      return res.status(400).json({ error: "Unsupported media extension." });
+    }
+
+    res.setHeader("Content-Type", contentType);
+    return res.sendFile(absolutePath);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
 app.get("/api/tools/hunyuan3d/file", async (req, res) => {
   const relativePath = String(req.query.relativePath ?? "").trim();
   const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
@@ -2916,7 +2959,7 @@ async function streamHunyuan3dGeneration(
       extension: resolvedSource.sourceExtension,
       bytes: resolvedSource.sourceBytes,
     });
-    const sourceImageUrl = `/api/tools/media/file?workspaceId=${encodeURIComponent(savedSource.workspaceId)}&relativePath=${encodeURIComponent(savedSource.relativePath)}`;
+    const sourceImageUrl = `/api/tools/image/local/file?workspaceId=${encodeURIComponent(savedSource.workspaceId)}&relativePath=${encodeURIComponent(savedSource.relativePath)}`;
     send({ type: "status", message: `Source image ready (${resolvedSource.sourceKind}).` });
 
     send({ type: "status", message: "Starting Hunyuan3D-2GP mesh generation..." });
