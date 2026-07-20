@@ -9,6 +9,7 @@ const execFileAsync = promisify(execFile);
 const hy3dRoot = path.join(getRootDir(), "vendor", "hunyuan3d-2gp");
 const hy3dAppRoot = path.join(hy3dRoot, "app");
 const hy3dVenvRoot = path.join(hy3dAppRoot, "env");
+const hy3dModelsRoot = path.join(hy3dRoot, "models-cache");
 const hy3dRepoUrl = "https://github.com/deepbeepmeep/Hunyuan3D-2GP";
 let lastHunyuanReadinessError: string | null = null;
 let lastHunyuanCudaSetupNote: string | null = null;
@@ -458,6 +459,7 @@ function buildHunyuanScript(): string {
     "",
     "from hy3dgen.rembg import BackgroundRemover",
     "from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline",
+    "from huggingface_hub import snapshot_download",
     "import importlib.util",
     "",
     "def emit_status(message: str):",
@@ -474,6 +476,17 @@ function buildHunyuanScript(): string {
     "guidance_scale = float(os.environ.get('NEXUS_HY3D_GUIDANCE', '5.0'))",
     "seed = int(os.environ.get('NEXUS_HY3D_SEED', '1234'))",
     "output_path = os.environ['NEXUS_HY3D_OUTPUT_PATH']",
+    "models_cache_root = os.environ.get('HY3DGEN_MODELS', os.path.expanduser('~/.cache/hy3dgen'))",
+    "local_subfolder_path = os.path.join(models_cache_root, model_path, subfolder)",
+    "if not os.path.exists(local_subfolder_path):",
+    "    emit_status(f'Model cache miss. Priming local cache for {model_path}/{subfolder}...')",
+    "    snapshot_download(",
+    "        repo_id=model_path,",
+    "        allow_patterns=[f'{subfolder}/*'],",
+    "        local_dir=os.path.join(models_cache_root, model_path),",
+    "        local_dir_use_symlinks=False,",
+    "    )",
+    "    emit_status('Model cache primed.')",
     "",
     "emit_status('Decoding source image...')",
     "image = Image.open(BytesIO(base64.b64decode(image_base64))).convert('RGBA')",
@@ -580,6 +593,14 @@ export async function getHunyuan3dStatus(): Promise<Hunyuan3dStatus> {
     notes.push("Image-to-3D generation is available.");
     notes.push("Default profile uses Hunyuan3D-2mini turbo for lower VRAM usage.");
   }
+  if (envReady) {
+    const torchInfo = await readTorchBuildInfo(pythonPath).catch(() => null);
+    if (torchInfo?.cuda && torchInfo.available) {
+      notes.push(`CUDA torch detected (${torchInfo.version}, cuda ${torchInfo.cuda}).`);
+    } else if (torchInfo && !torchInfo.cuda) {
+      notes.push("CUDA torch is not installed in Hunyuan environment; generation will use CPU fallback.");
+    }
+  }
   if (lastHunyuanCudaSetupNote) {
     notes.push(lastHunyuanCudaSetupNote);
   }
@@ -648,6 +669,7 @@ export async function generateWithHunyuan3dStreaming(
   const heartbeatIntervalMs = 20 * 1000;
 
   await fs.mkdir(hy3dAppRoot, { recursive: true });
+  await fs.mkdir(hy3dModelsRoot, { recursive: true });
   const scriptPath = path.join(hy3dAppRoot, ".nexus-generate-hunyuan3d.py");
   await fs.writeFile(scriptPath, buildHunyuanScript(), "utf-8");
 
@@ -667,6 +689,7 @@ export async function generateWithHunyuan3dStreaming(
       NEXUS_HY3D_GUIDANCE: String(guidanceScale),
       NEXUS_HY3D_SEED: String(seed),
       NEXUS_HY3D_OUTPUT_PATH: outputPath,
+      HY3DGEN_MODELS: hy3dModelsRoot,
     },
   });
 
