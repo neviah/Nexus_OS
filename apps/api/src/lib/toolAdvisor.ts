@@ -91,8 +91,9 @@ export async function getVoiceStatus(): Promise<VoiceStatus> {
   const notes = [
     "Browser speech works immediately for quick playback inside NexusOS.",
     runtimeStatus.piperPath
-      ? `Piper detected at ${runtimeStatus.piperPath}. Local offline voice generation is available for NexusOS voice playback.`
-      : "Piper is being provisioned as a core NexusOS runtime.",
+      ? `Piper detected at ${runtimeStatus.piperPath}.`
+      : "Piper is being provisioned as a fallback runtime.",
+    "WanGP Deepy is now the preferred speech generation path when its prompt enhancer is ready.",
   ];
 
   return {

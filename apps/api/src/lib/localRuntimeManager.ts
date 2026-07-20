@@ -4,6 +4,7 @@ import path from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { getRootDir } from "./stateStore.js";
+import { pipeline } from "@xenova/transformers";
 
 const execFileAsync = promisify(execFile);
 const runtimeRoot = path.join(getRootDir(), "data", "runtime-tools");
@@ -20,6 +21,8 @@ const bundledPiperVoices = [
   "en_US-lessac-medium",
   "en_US-lessac-high",
 ];
+const whisperModelName = process.env.NEXUS_WHISPER_MODEL?.trim() || "Xenova/whisper-tiny.en";
+let whisperPipelinePromise: Promise<any> | null = null;
 const piperReleaseZip = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip";
 
 export type RuntimeStatus = {
@@ -33,6 +36,13 @@ export type RuntimeStatus = {
   piperPath: string | null;
   piperVoices: string[];
   defaultVoiceInstalled: boolean;
+};
+
+export type WhisperTranscriptionResult = {
+  text: string;
+  language?: string;
+  provider: "whisper";
+  model: string;
 };
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
@@ -290,6 +300,33 @@ export async function synthesizeWithPiperToFile(text: string, destinationPath: s
     "--sentence_silence",
     "0.2",
   ], text);
+}
+
+async function getWhisperPipeline(): Promise<any> {
+  if (!whisperPipelinePromise) {
+    whisperPipelinePromise = pipeline("automatic-speech-recognition", whisperModelName);
+  }
+  return await whisperPipelinePromise;
+}
+
+export async function transcribeWithWhisper(inputPath: string): Promise<WhisperTranscriptionResult> {
+  const filePath = path.resolve(inputPath);
+  await fs.access(filePath);
+  const transcriber = await getWhisperPipeline();
+  const output = await transcriber(filePath, { return_timestamps: true, chunk_length_s: 30, stride_length_s: 5 });
+  const text = String(output?.text ?? output?.transcription ?? "").trim();
+  const language = typeof output?.language === "string" ? output.language : undefined;
+
+  if (!text) {
+    throw new Error("Whisper did not return any transcription text.");
+  }
+
+  return {
+    text,
+    language,
+    provider: "whisper",
+    model: whisperModelName,
+  };
 }
 
 export async function resolvePiperPath(): Promise<string | null> {

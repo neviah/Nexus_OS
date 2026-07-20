@@ -52,6 +52,7 @@ import {
   startOllamaIfNeeded,
   synthesizeWithPiper,
   synthesizeWithPiperToFile,
+  transcribeWithWhisper,
 } from "./lib/localRuntimeManager.js";
 import {
   appendHarnessRun,
@@ -88,6 +89,8 @@ import {
   installWan2Gp,
   readMediaBytes,
   startWan2GpIfNeeded,
+  synthesizeWithWanDeepy,
+  synthesizeWithWanDeepyToFile,
 } from "./lib/wan2gpRuntime.js";
 import { listProviderCatalog, listRouterFallbackTemplates } from "./lib/providerCatalog.js";
 import { getHarnessCapabilities, updateHarnessCapabilities } from "./lib/harnessCapabilities.js";
@@ -2145,10 +2148,15 @@ app.post("/api/tools/voice/speak", async (req, res) => {
   }
 
   try {
-    const audio = await synthesizeWithPiper(body.text.trim(), body.voiceId?.trim());
-    return res.json({ ok: true, ...audio });
+    const audio = await synthesizeWithWanDeepy(body.text.trim());
+    return res.json({ ok: true, ...audio, provider: "wan2gp" });
   } catch (error) {
-    return res.status(500).json({ error: String(error) });
+    try {
+      const audio = await synthesizeWithPiper(body.text.trim(), body.voiceId?.trim());
+      return res.json({ ok: true, ...audio, provider: "piper" });
+    } catch (fallbackError) {
+      return res.status(500).json({ error: String(error instanceof Error ? error.message : error) || String(fallbackError) });
+    }
   }
 });
 
@@ -2166,10 +2174,41 @@ app.post("/api/tools/voice/save", async (req, res) => {
       "voice",
       `${sanitizeFileNameSegment(body.fileName ?? `tts-${voiceId}`, "tts")}-${new Date().toISOString().replace(/[:.]/g, "-")}.wav`,
     );
-    await synthesizeWithPiperToFile(body.text.trim(), destination, body.voiceId?.trim());
+    try {
+      await synthesizeWithWanDeepyToFile(body.text.trim(), destination);
+    } catch {
+      await synthesizeWithPiperToFile(body.text.trim(), destination, body.voiceId?.trim());
+    }
     return res.json({ ok: true, workspaceId: saveTarget.workspaceId, absolutePath: destination, relativePath: path.relative(path.dirname(saveTarget.assetsPath), destination).replace(/\\/g, "/") });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/voice/transcribe", async (req, res) => {
+  const body = req.body as { audioBase64?: string; mimeType?: string };
+  if (!body.audioBase64?.trim()) {
+    return res.status(400).json({ error: "audioBase64 is required" });
+  }
+
+  const decoded = body.audioBase64.replace(/^data:[^;]+;base64,/, "");
+  const inputBytes = Buffer.from(decoded, "base64");
+  if (inputBytes.length === 0) {
+    return res.status(400).json({ error: "audioBase64 did not decode to any audio bytes" });
+  }
+
+  const extension = body.mimeType?.includes("webm") ? "webm" : body.mimeType?.includes("ogg") ? "ogg" : body.mimeType?.includes("mp4") ? "m4a" : "wav";
+  const tempPath = path.join(getRootDir(), "data", "runtime-tools", `whisper-${Date.now()}.${extension}`);
+
+  try {
+    await fs.mkdir(path.dirname(tempPath), { recursive: true });
+    await fs.writeFile(tempPath, inputBytes);
+    const transcription = await transcribeWithWhisper(tempPath);
+    return res.json({ ok: true, ...transcription });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  } finally {
+    await fs.rm(tempPath, { force: true }).catch(() => undefined);
   }
 });
 

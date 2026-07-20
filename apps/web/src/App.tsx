@@ -218,6 +218,13 @@ type VoiceStatus = {
   scannedAt: string;
 };
 
+type WhisperTranscriptionResult = {
+  text: string;
+  language?: string;
+  provider: string;
+  model: string;
+};
+
 type VoiceAssignmentsPayload = {
   voices: string[];
   harnesses: Array<{ id: string; name: string }>;
@@ -912,6 +919,8 @@ function App() {
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [voiceText, setVoiceText] = useState("Nexus OS voice check. This is your text to speech tool.");
   const [voicePlaying, setVoicePlaying] = useState(false);
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceTranscribing, setVoiceTranscribing] = useState(false);
   const [voicePreviewVoiceId, setVoicePreviewVoiceId] = useState<string>("");
   const [voiceAvailableVoices, setVoiceAvailableVoices] = useState<string[]>([]);
   const [voiceAssignments, setVoiceAssignments] = useState<Record<string, string>>({});
@@ -1020,6 +1029,9 @@ function App() {
   const [harnessSpeaking, setHarnessSpeaking] = useState(false);
   const harnessSpeechAudioRef = useRef<HTMLAudioElement | null>(null);
   const harnessSpeechUrlRef = useRef<string | null>(null);
+  const voiceRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceRecordingChunksRef = useRef<Blob[]>([]);
+  const bootGreetingPlayedRef = useRef(false);
 
   const model3dSourcePreviewUrl = useMemo(() => {
     if (model3dSourceImageBase64.trim()) {
@@ -1098,6 +1110,98 @@ function App() {
     if (!voicePreviewVoiceId && (payload.voices?.length ?? 0) > 0) {
       setVoicePreviewVoiceId(payload.voices[0]);
     }
+  }
+
+  function blobToBase64(blob: Blob): Promise<{ audioBase64: string; mimeType: string }> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Failed to read microphone recording."));
+      reader.onload = () => {
+        const result = String(reader.result ?? "");
+        const match = result.match(/^data:([^;]+);base64,(.+)$/);
+        if (!match) {
+          reject(new Error("Unexpected microphone recording format."));
+          return;
+        }
+        resolve({ audioBase64: match[2], mimeType: match[1] });
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function transcribeVoiceRecording(blob: Blob) {
+    setVoiceTranscribing(true);
+    try {
+      const payload = await blobToBase64(blob);
+      const response = await fetch("/api/tools/voice/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const errorPayload = (await response.json()) as { error?: string };
+        setStatusMessage(errorPayload.error ?? "Mic transcription failed.");
+        return;
+      }
+
+      const transcription = (await response.json()) as WhisperTranscriptionResult;
+      setVoiceText((current) => {
+        const next = current.trimEnd();
+        return next.length > 0 ? `${next} ${transcription.text}` : transcription.text;
+      });
+      setStatusMessage(`Whisper transcribed ${transcription.language ? `${transcription.language} ` : ""}audio.`);
+    } catch (error) {
+      setStatusMessage(String(error));
+    } finally {
+      setVoiceTranscribing(false);
+    }
+  }
+
+  async function startVoiceRecording() {
+    if (voiceRecording || voiceTranscribing) {
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setStatusMessage("This browser does not support microphone recording.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      voiceRecordingChunksRef.current = [];
+      voiceRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          voiceRecordingChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onstop = () => {
+        const chunks = voiceRecordingChunksRef.current;
+        voiceRecordingChunksRef.current = [];
+        voiceRecorderRef.current = null;
+        stream.getTracks().forEach((track) => track.stop());
+        if (chunks.length > 0) {
+          void transcribeVoiceRecording(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
+        }
+      };
+      recorder.start();
+      setVoiceRecording(true);
+      setStatusMessage("Recording microphone for Whisper transcription...");
+    } catch (error) {
+      setStatusMessage(String(error));
+    }
+  }
+
+  function stopVoiceRecording() {
+    const recorder = voiceRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") {
+      setVoiceRecording(false);
+      return;
+    }
+    recorder.stop();
+    setVoiceRecording(false);
   }
 
   function stopHarnessSpeech() {
@@ -1313,27 +1417,22 @@ function App() {
     }
 
     void (async () => {
-      if (runtimeStatus?.piperInstalled && runtimeStatus.defaultVoiceInstalled) {
-        setVoicePlaying(true);
-        const response = await fetch("/api/tools/voice/speak", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, voiceId: voicePreviewVoiceId || undefined }),
-        });
+      setVoicePlaying(true);
+      const response = await fetch("/api/tools/voice/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, voiceId: voicePreviewVoiceId || undefined }),
+      });
 
-        if (response.ok) {
-          const payload = (await response.json()) as { audioBase64: string; mimeType: string };
-          await playAudioPayload(payload);
-          setVoicePlaying(false);
-          return;
-        }
-
-        const payload = (await response.json()) as { error?: string };
-        setStatusMessage(payload.error ?? "Piper playback failed.");
+      if (response.ok) {
+        const payload = (await response.json()) as { audioBase64: string; mimeType: string };
+        await playAudioPayload(payload);
         setVoicePlaying(false);
         return;
       }
 
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Voice playback failed.");
       stopVoicePlayback();
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.onend = () => setVoicePlaying(false);
@@ -1342,6 +1441,32 @@ function App() {
       window.speechSynthesis.speak(utterance);
     })();
   }
+
+  useEffect(() => {
+    if (bootGreetingPlayedRef.current) {
+      return;
+    }
+    if (!boot || !voiceStatus || voiceBusy) {
+      return;
+    }
+
+    bootGreetingPlayedRef.current = true;
+    void (async () => {
+      const greeting = "Wait one second while I boot up Nexus OS.";
+      const response = await fetch("/api/tools/voice/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: greeting }),
+      });
+
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = (await response.json()) as { audioBase64: string; mimeType: string };
+      await playAudioPayload(payload);
+    })();
+  }, [boot, voiceStatus, voiceBusy]);
 
   async function saveVoiceGeneration() {
     const text = voiceText.trim();
@@ -4384,7 +4509,7 @@ function App() {
               <div className="tool-header-row">
                 <div>
                   <h2>Media Center</h2>
-                  <p className="subtitle">Immediate text-to-speech playback in NexusOS, with Piper readiness for better offline voices later.</p>
+                  <p className="subtitle">Immediate speech playback in NexusOS, with WanGP Deepy handling synthesis and Whisper handling mic transcription.</p>
                 </div>
                 <button type="button" onClick={() => void loadVoiceStatus()} disabled={voiceBusy}>
                   {voiceBusy ? "Checking..." : "Refresh Voice Status"}
@@ -4407,6 +4532,9 @@ function App() {
                   <button type="button" onClick={() => void saveVoiceGeneration()} disabled={!voiceText.trim() || voiceSaveBusy}>
                     {voiceSaveBusy ? "Saving..." : "Save To Assets"}
                   </button>
+                  <button type="button" className="ghost" onClick={voiceRecording ? stopVoiceRecording : startVoiceRecording} disabled={voiceTranscribing}>
+                    {voiceRecording ? "Stop Mic" : voiceTranscribing ? "Transcribing..." : "Record Mic"}
+                  </button>
                   <button type="button" className="ghost" onClick={stopVoicePlayback} disabled={!voicePlaying}>
                     Stop
                   </button>
@@ -4415,7 +4543,7 @@ function App() {
 
               {runtimeStatus?.piperInstalled ? (
                 <section className="tool-section">
-                  <h3>Piper Voice Preview</h3>
+                  <h3>Offline Voice Preview</h3>
                   <label>
                     Voice
                     <select
@@ -4428,7 +4556,7 @@ function App() {
                     </select>
                   </label>
                   <small>Installed Piper voices: {runtimeStatus?.piperVoices.join(", ") || "none yet"}</small>
-                  <small>Select a Piper voice, then click Play Voice to audition it.</small>
+                  <small>WanGP is the main speech engine; Piper remains available as a fallback voice path.</small>
                 </section>
               ) : null}
 

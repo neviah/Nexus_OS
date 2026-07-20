@@ -939,3 +939,164 @@ export async function getMachineProfileHint(): Promise<{ logicalCores: number; t
   const recommendedProfile = totalRamGb <= 16 ? 4 : totalRamGb <= 32 ? 3 : 2;
   return { logicalCores, totalRamGb, recommendedProfile };
 }
+
+const deepyCliReadyText = "Deepy CLI session. Use /help for commands.";
+const deepySpeechTimeoutMs = 20 * 60 * 1000;
+
+function getDeepyPythonPath(): string {
+  return getWanPythonPath();
+}
+
+async function getDeepyTemplateVariant(kind: "description" | "sample"): Promise<string> {
+  const configPath = path.join(wanAppRoot, "wgp_config.json");
+  const fallback = kind === "description" ? "Qwen3 1.7B" : "Index TTS 2";
+  try {
+    const raw = await fs.readFile(configPath, "utf-8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const value = kind === "description" ? parsed.deepy_tool_gen_speech_from_description : parsed.deepy_tool_gen_speech_from_sample;
+    return typeof value === "string" && value.trim() ? value.trim() : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function waitForCliReady(child: ReturnType<typeof spawn>): Promise<void> {
+  if (!child.stdout) {
+    throw new Error("Deepy CLI stdout stream is not available.");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error("Deepy CLI did not become ready in time."));
+      }
+    }, 5 * 60 * 1000);
+
+    const finish = (error?: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      if (String(chunk).includes(deepyCliReadyText)) {
+        finish();
+      }
+    });
+
+    child.once("error", (error) => finish(error instanceof Error ? error : new Error(String(error))));
+    child.once("exit", (code) => {
+      if (!settled) {
+        finish(new Error(`Deepy CLI exited before becoming ready (code ${code ?? "unknown"}).`));
+      }
+    });
+  });
+}
+
+async function runDeepySpeechSession(prompt: string, kind: "description" | "sample"): Promise<string> {
+  await fs.mkdir(wanAppRoot, { recursive: true });
+  const child = spawn(getDeepyPythonPath(), ["wgp.py", "--ask-deepy"], {
+    cwd: wanAppRoot,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: "1",
+      WAN_GP_DISABLE_UI: "1",
+    },
+  });
+
+  const stdoutChunks: string[] = [];
+  const stderrChunks: string[] = [];
+  child.stdout?.on("data", (chunk: Buffer | string) => stdoutChunks.push(String(chunk)));
+  child.stderr?.on("data", (chunk: Buffer | string) => stderrChunks.push(String(chunk)));
+
+  await waitForCliReady(child);
+
+  const variant = await getDeepyTemplateVariant(kind);
+  child.stdin.write(`/template gen_speech_from_${kind} "${variant}"\n`);
+  child.stdin.write(`${kind === "sample" ? "Create speech from this sample saying" : "Create speech from this description"}: ${prompt}\n`);
+  child.stdin.write(`/quit\n`);
+  child.stdin.end();
+
+  const output = await new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Deepy speech generation timed out.")), deepySpeechTimeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    });
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(stderrChunks.join("").trim() || `Deepy speech generation failed with exit code ${code ?? "unknown"}.`));
+        return;
+      }
+      resolve(stdoutChunks.join("") + stderrChunks.join(""));
+    });
+  });
+
+  return output;
+}
+
+function extractDeepyOutputPath(output: string): string {
+  const matches = output.match(/[A-Za-z]:\\[^\r\n"'<>|]+?\.(?:wav|mp3|flac|ogg|m4a|aac|webm)/gi) ?? [];
+  if (matches.length === 0) {
+    return "";
+  }
+  return path.resolve(matches[matches.length - 1]);
+}
+
+function inferAudioMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".mp3") {
+    return "audio/mpeg";
+  }
+  if (ext === ".ogg") {
+    return "audio/ogg";
+  }
+  if (ext === ".aac") {
+    return "audio/aac";
+  }
+  if (ext === ".m4a") {
+    return "audio/mp4";
+  }
+  if (ext === ".webm") {
+    return "audio/webm";
+  }
+  return "audio/wav";
+}
+
+export async function synthesizeWithWanDeepy(text: string): Promise<{ audioBase64: string; mimeType: string; outputPath: string }> {
+  const output = await runDeepySpeechSession(text, "description");
+  const outputPath = extractDeepyOutputPath(output);
+  if (!outputPath) {
+    throw new Error(`Deepy speech generation finished but did not print an output file path.\n${output}`);
+  }
+
+  const bytes = await fs.readFile(outputPath);
+  return {
+    audioBase64: bytes.toString("base64"),
+    mimeType: inferAudioMimeType(outputPath),
+    outputPath,
+  };
+}
+
+export async function synthesizeWithWanDeepyToFile(text: string, destinationPath: string): Promise<void> {
+  const output = await runDeepySpeechSession(text, "description");
+  const outputPath = extractDeepyOutputPath(output);
+  if (!outputPath) {
+    throw new Error(`Deepy speech generation finished but did not print an output file path.\n${output}`);
+  }
+
+  await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+  await fs.copyFile(outputPath, destinationPath);
+}
