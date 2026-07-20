@@ -11,6 +11,7 @@ const hy3dAppRoot = path.join(hy3dRoot, "app");
 const hy3dVenvRoot = path.join(hy3dAppRoot, "env");
 const hy3dRepoUrl = "https://github.com/deepbeepmeep/Hunyuan3D-2GP";
 let lastHunyuanReadinessError: string | null = null;
+let lastHunyuanCudaSetupNote: string | null = null;
 
 export type Hunyuan3dStatus = {
   installed: boolean;
@@ -79,6 +80,131 @@ async function commandWorks(command: string, args: string[]): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function getWindowsGpuNames(): Promise<string[]> {
+  if (process.platform !== "win32") {
+    return [];
+  }
+
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-Command",
+      "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+    ], { windowsHide: true, timeout: 15000, maxBuffer: 512 * 1024 });
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function hasNvidiaGpuByCookbookSignal(): Promise<boolean> {
+  const gpuNames = await getWindowsGpuNames();
+  if (gpuNames.some((name) => /nvidia/i.test(name))) {
+    return true;
+  }
+  return await commandWorks("nvidia-smi", ["-L"]);
+}
+
+async function readTorchBuildInfo(
+  pythonPath: string,
+): Promise<{ version: string; cuda: string; available: boolean }> {
+  const { stdout } = await execFileAsync(pythonPath, [
+    "-c",
+    [
+      "import json",
+      "import torch",
+      "print('NEXUS_TORCH:' + json.dumps({",
+      "  'version': str(getattr(torch, '__version__', '')),",
+      "  'cuda': str(getattr(getattr(torch, 'version', object()), 'cuda', '') or ''),",
+      "  'available': bool(getattr(torch.cuda, 'is_available', lambda: False)())",
+      "}))",
+    ].join("\n"),
+  ], {
+    cwd: hy3dAppRoot,
+    windowsHide: true,
+    timeout: 60 * 1000,
+    maxBuffer: 1024 * 1024,
+  });
+
+  const marker = "NEXUS_TORCH:";
+  const line = stdout
+    .split(/\r?\n/)
+    .map((raw) => raw.trim())
+    .find((raw) => raw.startsWith(marker));
+  if (!line) {
+    throw new Error("Hunyuan torch probe output was not found.");
+  }
+
+  const parsed = JSON.parse(line.slice(marker.length).trim()) as Record<string, unknown>;
+  return {
+    version: String(parsed.version ?? ""),
+    cuda: String(parsed.cuda ?? ""),
+    available: Boolean(parsed.available),
+  };
+}
+
+async function ensureCudaTorchWhenNvidiaPresent(pythonPath: string): Promise<void> {
+  if (!(await hasNvidiaGpuByCookbookSignal())) {
+    lastHunyuanCudaSetupNote = "No NVIDIA GPU detected by machine scan; Hunyuan3D will run on CPU.";
+    return;
+  }
+
+  const before = await readTorchBuildInfo(pythonPath).catch(() => ({
+    version: "",
+    cuda: "",
+    available: false,
+  }));
+  if (before.cuda && before.available) {
+    lastHunyuanCudaSetupNote = `CUDA torch detected (${before.version}, cuda ${before.cuda}).`;
+    return;
+  }
+
+  const cudaIndexes = [
+    "https://download.pytorch.org/whl/cu128",
+    "https://download.pytorch.org/whl/cu126",
+    "https://download.pytorch.org/whl/cu124",
+  ];
+
+  for (const indexUrl of cudaIndexes) {
+    try {
+      await execFileAsync(pythonPath, [
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--force-reinstall",
+        "--index-url",
+        indexUrl,
+        "torch",
+        "torchvision",
+        "torchaudio",
+      ], {
+        cwd: hy3dAppRoot,
+        windowsHide: true,
+        timeout: 90 * 60 * 1000,
+        maxBuffer: 1024 * 1024 * 32,
+      });
+    } catch {
+      continue;
+    }
+
+    const after = await readTorchBuildInfo(pythonPath).catch(() => ({
+      version: "",
+      cuda: "",
+      available: false,
+    }));
+    if (after.cuda && after.available) {
+      lastHunyuanCudaSetupNote = `Installed CUDA torch for Hunyuan3D (${after.version}, cuda ${after.cuda}) via ${indexUrl}.`;
+      return;
+    }
+  }
+
+  lastHunyuanCudaSetupNote = "NVIDIA GPU detected, but CUDA torch install did not validate; continuing with CPU fallback.";
 }
 
 async function ensurePython311OnWindows(): Promise<void> {
@@ -269,6 +395,8 @@ async function ensureHunyuanEnv(): Promise<void> {
     timeout: 20 * 60 * 1000,
     maxBuffer: 1024 * 1024 * 16,
   });
+
+  await ensureCudaTorchWhenNvidiaPresent(pythonPath);
 }
 
 async function patchHunyuanCpuFallbackBug(): Promise<void> {
@@ -451,6 +579,9 @@ export async function getHunyuan3dStatus(): Promise<Hunyuan3dStatus> {
   if (apiReady) {
     notes.push("Image-to-3D generation is available.");
     notes.push("Default profile uses Hunyuan3D-2mini turbo for lower VRAM usage.");
+  }
+  if (lastHunyuanCudaSetupNote) {
+    notes.push(lastHunyuanCudaSetupNote);
   }
 
   return {
