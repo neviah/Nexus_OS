@@ -1127,6 +1127,16 @@ button:disabled {
   color: var(--bad);
 }
 
+.runtime-ready {
+  color: #4db286;
+  font-weight: 600;
+}
+
+.runtime-warning {
+  color: #d9a15d;
+  font-weight: 600;
+}
+
 .model3d-recent-thumb {
   width: 100%;
   max-width: 220px;

@@ -3905,6 +3905,22 @@ function App() {
   const activeHarnessExtrasOpen = selectedPane.type === "agent"
     ? Boolean(harnessExtrasOpenByHarness[selectedPane.id])
     : false;
+  const hunyuanComputeSummary = useMemo(() => {
+    const notes = hunyuan3dStatus?.notes ?? [];
+    if (notes.some((note) => /CUDA torch detected|Installed CUDA torch/i.test(note))) {
+      return { tone: "ok", text: "Compute mode: GPU (CUDA torch validated)." };
+    }
+    if (notes.some((note) => /No NVIDIA GPU detected/i.test(note))) {
+      return { tone: "warn", text: "Compute mode: CPU fallback (no NVIDIA GPU detected)." };
+    }
+    if (notes.some((note) => /CUDA torch install did not validate/i.test(note))) {
+      return { tone: "warn", text: "Compute mode: CPU fallback (CUDA torch setup failed validation)." };
+    }
+    if (hunyuan3dStatus?.apiReady) {
+      return { tone: "warn", text: "Compute mode: unknown. Run Install/Start Hunyuan runtime to refresh GPU checks." };
+    }
+    return null;
+  }, [hunyuan3dStatus]);
 
   return (
     <main className="app-shell">
@@ -4934,6 +4950,9 @@ function App() {
                 <div className="stable-audio-form">
                   {!hunyuan3dStatus?.apiReady ? (
                     <small>Hunyuan3D-2GP is not ready yet. Install runtime job: install-hunyuan3d, then start-hunyuan3d.</small>
+                  ) : null}
+                  {hunyuanComputeSummary ? (
+                    <small className={hunyuanComputeSummary.tone === "ok" ? "runtime-ready" : "runtime-warning"}>{hunyuanComputeSummary.text}</small>
                   ) : null}
                   {hunyuan3dStatus?.notes?.length ? (
                     <small>{hunyuan3dStatus.notes[hunyuan3dStatus.notes.length - 1]}</small>
