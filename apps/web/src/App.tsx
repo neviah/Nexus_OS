@@ -1031,7 +1031,6 @@ function App() {
   const harnessSpeechUrlRef = useRef<string | null>(null);
   const voiceRecorderRef = useRef<MediaRecorder | null>(null);
   const voiceRecordingChunksRef = useRef<Blob[]>([]);
-  const bootGreetingPlayedRef = useRef(false);
 
   const model3dSourcePreviewUrl = useMemo(() => {
     if (model3dSourceImageBase64.trim()) {
@@ -1441,32 +1440,6 @@ function App() {
       window.speechSynthesis.speak(utterance);
     })();
   }
-
-  useEffect(() => {
-    if (bootGreetingPlayedRef.current) {
-      return;
-    }
-    if (!boot || !voiceStatus || voiceBusy) {
-      return;
-    }
-
-    bootGreetingPlayedRef.current = true;
-    void (async () => {
-      const greeting = "Wait one second while I boot up Nexus OS.";
-      const response = await fetch("/api/tools/voice/speak", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: greeting }),
-      });
-
-      if (!response.ok) {
-        return;
-      }
-
-      const payload = (await response.json()) as { audioBase64: string; mimeType: string };
-      await playAudioPayload(payload);
-    })();
-  }, [boot, voiceStatus, voiceBusy]);
 
   async function saveVoiceGeneration() {
     const text = voiceText.trim();

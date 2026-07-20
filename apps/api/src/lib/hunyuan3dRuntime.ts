@@ -271,6 +271,23 @@ async function ensureHunyuanEnv(): Promise<void> {
   });
 }
 
+async function patchHunyuanCpuFallbackBug(): Promise<void> {
+  const pipelinePath = path.join(hy3dAppRoot, "hy3dgen", "shapegen", "pipelines.py");
+  let text: string;
+  try {
+    text = await fs.readFile(pipelinePath, "utf-8");
+  } catch {
+    return;
+  }
+
+  const brokenLine = '        device =  torch.device("cuda")  #self.device';
+  if (!text.includes(brokenLine)) {
+    return;
+  }
+
+  await fs.writeFile(pipelinePath, text.replace(brokenLine, "        device = self.device"), "utf-8");
+}
+
 async function checkHunyuanApiReady(): Promise<boolean> {
   const pythonPath = getHy3dPythonPath();
   try {
@@ -452,9 +469,11 @@ export async function getHunyuan3dStatus(): Promise<Hunyuan3dStatus> {
 export async function installHunyuan3d(): Promise<void> {
   await ensureHunyuanRepo();
   await ensureHunyuanEnv();
+  await patchHunyuanCpuFallbackBug();
 }
 
 export async function startHunyuan3dIfNeeded(): Promise<void> {
+  await patchHunyuanCpuFallbackBug();
   const status = await getHunyuan3dStatus();
   if (status.apiReady) {
     return;
@@ -475,6 +494,7 @@ export async function generateWithHunyuan3dStreaming(
   onStatus: (message: string) => void,
   signal?: AbortSignal,
 ): Promise<Hunyuan3dGenerateResult> {
+  await patchHunyuanCpuFallbackBug();
   const status = await getHunyuan3dStatus();
   if (!status.apiReady) {
     throw new Error("Hunyuan3D-2GP is not ready. Install or repair runtime first.");
