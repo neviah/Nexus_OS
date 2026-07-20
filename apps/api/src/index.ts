@@ -531,6 +531,25 @@ async function ensureWorkspaceAssetsDir(workspaceId?: string): Promise<{ workspa
   return { workspaceId: workspace.id, assetsPath };
 }
 
+async function ensureWorkspaceAgentsLogsDir(workspaceId?: string): Promise<{ workspaceId: string; logsPath: string }> {
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId);
+  if (!workspace.path) {
+    throw new Error("Active workspace path is unavailable.");
+  }
+  const logsPath = path.join(workspace.path, "Agents", "Logs", "hunyuan3d");
+  await fs.mkdir(logsPath, { recursive: true });
+  return { workspaceId: workspace.id, logsPath };
+}
+
+async function appendHunyuanAgentLog(logFilePath: string, entry: Record<string, unknown>): Promise<void> {
+  await fs.appendFile(logFilePath, `${JSON.stringify(entry)}\n`, "utf-8");
+}
+
+async function ensureWorkspaceAgentsScaffold(workspacePath: string): Promise<void> {
+  await fs.mkdir(path.join(workspacePath, "Agents", "Logs"), { recursive: true });
+}
+
 async function saveBufferToWorkspaceAssets(input: {
   workspaceId?: string;
   category: "images" | "videos" | "voice" | "music" | "models";
@@ -2813,6 +2832,8 @@ async function streamHunyuan3dGeneration(
     workspaceId?: string;
   },
 ): Promise<void> {
+  const runId = crypto.randomUUID();
+  const startedAt = new Date().toISOString();
   const modelPath = String(input.modelPath ?? "tencent/Hunyuan3D-2mini").trim();
   const subfolder = String(input.subfolder ?? "hunyuan3d-dit-v2-mini-turbo").trim();
   const numInferenceSteps = Number(input.numInferenceSteps ?? 20);
@@ -2821,6 +2842,30 @@ async function streamHunyuan3dGeneration(
   const seed = Number(input.seed ?? Date.now() % 2147483647);
   const format = String(input.format ?? "glb").trim().toLowerCase() === "obj" ? "obj" : "glb";
   const workspaceId = String(input.workspaceId ?? "").trim() || undefined;
+  const resolvedWorkspaceForLogs = await ensureWorkspaceAgentsLogsDir(workspaceId).catch(() => null);
+  const logFilePath = resolvedWorkspaceForLogs
+    ? path.join(resolvedWorkspaceForLogs.logsPath, `run-${runId}.jsonl`)
+    : null;
+
+  if (logFilePath) {
+    await appendHunyuanAgentLog(logFilePath, {
+      ts: new Date().toISOString(),
+      event: "run-start",
+      runId,
+      startedAt,
+      workspaceId: resolvedWorkspaceForLogs?.workspaceId,
+      request: {
+        modelPath,
+        subfolder,
+        numInferenceSteps,
+        octreeResolution,
+        guidanceScale,
+        seed,
+        format,
+        source: String(input.textPrompt ?? "").trim() ? "text" : "image",
+      },
+    }).catch(() => undefined);
+  }
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -2829,6 +2874,18 @@ async function streamHunyuan3dGeneration(
 
   const send = (payload: unknown) => {
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
+
+    if (!logFilePath || typeof payload !== "object" || payload === null) {
+      return;
+    }
+    const envelope = payload as { type?: string; message?: string; result?: unknown };
+    void appendHunyuanAgentLog(logFilePath, {
+      ts: new Date().toISOString(),
+      event: envelope.type ?? "unknown",
+      runId,
+      message: typeof envelope.message === "string" ? envelope.message : undefined,
+      result: envelope.type === "done" ? envelope.result : undefined,
+    }).catch(() => undefined);
   };
 
   const controller = new AbortController();
@@ -2908,10 +2965,28 @@ async function streamHunyuan3dGeneration(
         sourceImageUrl,
       },
     });
+    if (logFilePath) {
+      await appendHunyuanAgentLog(logFilePath, {
+        ts: new Date().toISOString(),
+        event: "run-finished",
+        runId,
+        ok: true,
+      }).catch(() => undefined);
+    }
     res.end();
   } catch (error) {
     if (!controller.signal.aborted) {
       send({ type: "error", message: String(error) });
+    }
+    if (logFilePath) {
+      await appendHunyuanAgentLog(logFilePath, {
+        ts: new Date().toISOString(),
+        event: "run-finished",
+        runId,
+        ok: false,
+        error: String(error),
+        aborted: controller.signal.aborted,
+      }).catch(() => undefined);
     }
     res.end();
   } finally {
@@ -4158,6 +4233,7 @@ app.post("/api/workspaces", async (req, res) => {
     const created = workspacePath?.trim()
       ? await registerWorkspacePath({ name, workspacePath })
       : await createWorkspace(name);
+    await ensureWorkspaceAgentsScaffold(created.path);
     return res.json({ ok: true, workspace: created });
   } catch (error) {
     return res.status(400).json({ error: String(error) });
