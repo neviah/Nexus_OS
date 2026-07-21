@@ -508,6 +508,27 @@ type Hunyuan3dStreamEnvelope =
   }
   | { type: "error"; message: string };
 
+type Hunyuan3dFinishStreamEnvelope =
+  | { type: "status"; message: string }
+  | {
+    type: "done";
+    result: {
+      modelUrl: string;
+      relativePath: string;
+      workspaceId: string;
+      provider: string;
+      format: "glb" | "obj";
+      profile: "draft" | "game-ready-low" | "game-ready-med" | "game-ready-high";
+      blenderPath: string;
+      stats: {
+        vertices: number;
+        faces: number;
+      };
+      sourceRelativePath: string;
+    };
+  }
+  | { type: "error"; message: string };
+
 type Model3dGeneratedResult = {
   modelUrl: string;
   provider: string;
@@ -986,7 +1007,8 @@ function App() {
   const [model3dGuidanceScale, setModel3dGuidanceScale] = useState(5);
   const [model3dSeed, setModel3dSeed] = useState(-1);
   const [model3dFormat, setModel3dFormat] = useState<"glb" | "obj">("glb");
-  const [model3dBusyAction, setModel3dBusyAction] = useState<"generate" | null>(null);
+  const [model3dFinishProfile, setModel3dFinishProfile] = useState<"draft" | "game-ready-low" | "game-ready-med" | "game-ready-high">("game-ready-med");
+  const [model3dBusyAction, setModel3dBusyAction] = useState<"generate" | "finish" | null>(null);
   const [model3dStatusTrace, setModel3dStatusTrace] = useState("");
   const [model3dResult, setModel3dResult] = useState<Model3dGeneratedResult | null>(null);
   const [recentModels3d, setRecentModels3d] = useState<Model3dGeneratedResult[]>([]);
@@ -2156,6 +2178,147 @@ function App() {
 
   function stopModel3dGeneration() {
     model3dGenerationAbortRef.current?.abort();
+  }
+
+  async function finishModel3dWithBlender() {
+    if (model3dGenerationAbortRef.current) {
+      model3dGenerationAbortRef.current.abort();
+    }
+    const relativePath = model3dResult?.relativePath?.trim() ?? "";
+    if (!relativePath) {
+      setStatusMessage("Generate or open a saved mesh first before running Blender finish.");
+      pushToast("No saved mesh path available to finish.", "warn");
+      return;
+    }
+
+    const controller = new AbortController();
+    model3dGenerationAbortRef.current = controller;
+
+    setModel3dBusyAction("finish");
+    setModel3dStatusTrace((current) => `${current}Starting Blender finish pipeline...\n`.slice(-16000));
+
+    try {
+      const response = await fetch("/api/tools/hunyuan3d/finish/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          relativePath,
+          workspaceId: boot?.activeWorkspaceId ?? "default",
+          outputFormat: model3dFormat,
+          profile: model3dFinishProfile,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        const payload = (await response.json()) as { error?: string };
+        const message = payload.error ?? "Blender finish failed.";
+        setStatusMessage(message);
+        pushToast(message, "err");
+        setModel3dBusyAction(null);
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completed = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          const split = buffer.indexOf("\n\n");
+          if (split === -1) {
+            break;
+          }
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+          if (!dataLine) {
+            continue;
+          }
+          const raw = dataLine.slice(5).trim();
+          let envelope: Hunyuan3dFinishStreamEnvelope;
+          try {
+            envelope = JSON.parse(raw) as Hunyuan3dFinishStreamEnvelope;
+          } catch {
+            continue;
+          }
+
+          if (envelope.type === "status") {
+            setModel3dStatusTrace((current) => `${current}${envelope.message}\n`.slice(-16000));
+            continue;
+          }
+
+          if (envelope.type === "error") {
+            setModel3dStatusTrace((current) => `${current}[error] ${envelope.message}\n`.slice(-16000));
+            setStatusMessage(envelope.message);
+            pushToast(envelope.message, "err");
+            continue;
+          }
+
+          if (envelope.type === "done") {
+            setModel3dResult((current) => {
+              if (!current) {
+                return current;
+              }
+              return {
+                ...current,
+                modelUrl: envelope.result.modelUrl,
+                relativePath: envelope.result.relativePath,
+                provider: envelope.result.provider,
+                format: envelope.result.format,
+                createdAt: new Date().toISOString(),
+              };
+            });
+            setRecentModels3d((current) => {
+              if (!model3dResult) {
+                return current;
+              }
+              const updated: Model3dGeneratedResult = {
+                ...model3dResult,
+                modelUrl: envelope.result.modelUrl,
+                relativePath: envelope.result.relativePath,
+                provider: envelope.result.provider,
+                format: envelope.result.format,
+                createdAt: new Date().toISOString(),
+              };
+              return [updated, ...current].slice(0, 10);
+            });
+            setStatusMessage("Blender finish pipeline completed.");
+            pushToast(`Blender finish complete: ${envelope.result.stats.vertices} verts, ${envelope.result.stats.faces} faces.`, "ok");
+            setModel3dStatusTrace((current) => `${current}Finish stats: ${envelope.result.stats.vertices} verts, ${envelope.result.stats.faces} faces.\n`.slice(-16000));
+            completed = true;
+            await refreshActiveWorkspaceTree(envelope.result.workspaceId);
+          }
+        }
+      }
+
+      if (!completed && !controller.signal.aborted) {
+        setStatusMessage("Blender finish stream ended before completion.");
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        setModel3dStatusTrace((current) => `${current}Blender finish canceled by user.\n`.slice(-16000));
+        setStatusMessage("Blender finish stopped.");
+        pushToast("Blender finish canceled.", "warn");
+      } else {
+        const message = String(error);
+        setModel3dStatusTrace((current) => `${current}[error] ${message}\n`.slice(-16000));
+        setStatusMessage(message);
+        pushToast(message, "err");
+      }
+    } finally {
+      if (model3dGenerationAbortRef.current === controller) {
+        model3dGenerationAbortRef.current = null;
+      }
+      setModel3dBusyAction(null);
+    }
   }
 
   function onModel3dSourceFileSelected(event: ChangeEvent<HTMLInputElement>) {
@@ -5104,10 +5267,27 @@ function App() {
                     >
                       {model3dBusyAction === "generate" ? "Generating..." : "Generate 3D Mesh"}
                     </button>
-                    <button type="button" className="ghost" onClick={stopModel3dGeneration} disabled={model3dBusyAction !== "generate"}>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => void finishModel3dWithBlender()}
+                      disabled={model3dBusyAction !== null || !model3dResult?.relativePath}
+                    >
+                      {model3dBusyAction === "finish" ? "Finishing..." : "Finish Mesh (Cleanup + UV)"}
+                    </button>
+                    <button type="button" className="ghost" onClick={stopModel3dGeneration} disabled={model3dBusyAction === null}>
                       Stop
                     </button>
                   </div>
+                  <label>
+                    <span>Finish Profile</span>
+                    <select value={model3dFinishProfile} onChange={(event) => setModel3dFinishProfile(event.target.value as "draft" | "game-ready-low" | "game-ready-med" | "game-ready-high")}>
+                      <option value="draft">draft</option>
+                      <option value="game-ready-low">game-ready-low</option>
+                      <option value="game-ready-med">game-ready-med</option>
+                      <option value="game-ready-high">game-ready-high</option>
+                    </select>
+                  </label>
                 </div>
               </section>
 

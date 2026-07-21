@@ -81,6 +81,10 @@ import {
   startHunyuan3dIfNeeded,
 } from "./lib/hunyuan3dRuntime.js";
 import {
+  runBlenderFinishStreaming,
+  type BlenderFinishProfile,
+} from "./lib/blenderAssetPipeline.js";
+import {
   generateWithWan2GpStreaming,
   getMachineProfileHint,
   getWan2GpModelCatalog,
@@ -3037,6 +3041,104 @@ async function streamHunyuan3dGeneration(
   }
 }
 
+async function streamHunyuan3dFinish(
+  req: express.Request,
+  res: express.Response,
+  input: {
+    relativePath?: string;
+    workspaceId?: string;
+    outputFormat?: string;
+    profile?: string;
+  },
+): Promise<void> {
+  const relativePath = String(input.relativePath ?? "").trim();
+  const workspaceId = String(input.workspaceId ?? "").trim() || undefined;
+  const outputFormat = String(input.outputFormat ?? "glb").trim().toLowerCase() === "obj" ? "obj" : "glb";
+  const requestedProfile = String(input.profile ?? "game-ready-med").trim();
+  const profile: BlenderFinishProfile = requestedProfile === "draft"
+    || requestedProfile === "game-ready-low"
+    || requestedProfile === "game-ready-high"
+    ? requestedProfile
+    : "game-ready-med";
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const send = (payload: unknown) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  if (!relativePath) {
+    send({ type: "error", message: "relativePath is required" });
+    res.end();
+    return;
+  }
+
+  const controller = new AbortController();
+  const onClientDisconnect = () => {
+    controller.abort();
+  };
+  req.on("close", onClientDisconnect);
+
+  try {
+    send({ type: "status", message: "Resolving workspace mesh path..." });
+    const state = await readSystemState();
+    const workspace = await resolveWorkspaceContext(state, workspaceId);
+    if (!workspace.path) {
+      throw new Error("Workspace path is unavailable.");
+    }
+
+    const absoluteInputPath = resolveWorkspaceTargetPath(workspace.path, relativePath);
+    await fs.access(absoluteInputPath);
+    if (!/\.(glb|gltf|obj)$/i.test(absoluteInputPath)) {
+      throw new Error("Only glb/gltf/obj meshes are supported for Blender finishing.");
+    }
+
+    send({ type: "status", message: `Starting Blender finish pipeline for ${relativePath}...` });
+    const finished = await runBlenderFinishStreaming({
+      inputPath: absoluteInputPath,
+      outputFormat,
+      profile,
+    }, (message) => send({ type: "status", message }), controller.signal);
+
+    send({ type: "status", message: "Saving finished mesh into workspace assets..." });
+    const bytes = await readMeshBytes(finished.outputPath);
+    const extension = inferMeshExtension(finished.outputPath, finished.outputFormat);
+    const saved = await saveBufferToWorkspaceAssets({
+      workspaceId,
+      category: "models",
+      baseName: "hunyuan3d-finished-mesh",
+      extension,
+      bytes,
+    });
+
+    send({
+      type: "done",
+      result: {
+        modelUrl: `/api/tools/hunyuan3d/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        relativePath: saved.relativePath,
+        workspaceId: saved.workspaceId,
+        provider: "blender-headless",
+        format: finished.outputFormat,
+        profile: finished.profile,
+        blenderPath: finished.blenderPath,
+        stats: finished.stats,
+        sourceRelativePath: relativePath,
+      },
+    });
+    res.end();
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      send({ type: "error", message: String(error) });
+    }
+    res.end();
+  } finally {
+    req.off("close", onClientDisconnect);
+  }
+}
+
 app.get("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
   await streamHunyuan3dGeneration(req, res, {
     imageUrl: String(req.query.imageUrl ?? ""),
@@ -3081,6 +3183,16 @@ app.post("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
     workspaceId?: string;
   };
   await streamHunyuan3dGeneration(req, res, body ?? {});
+});
+
+app.post("/api/tools/hunyuan3d/finish/stream", async (req, res) => {
+  const body = req.body as {
+    relativePath?: string;
+    workspaceId?: string;
+    outputFormat?: string;
+    profile?: string;
+  };
+  await streamHunyuan3dFinish(req, res, body ?? {});
 });
 
 app.post("/api/tools/image/save", async (req, res) => {
