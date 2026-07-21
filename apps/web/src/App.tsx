@@ -548,6 +548,16 @@ type Model3dGeneratedResult = {
   relativePath?: string;
 };
 
+type AnimationDraft = {
+  id: string;
+  title: string;
+  prompt: string;
+  status: "queued" | "ready";
+  createdAt: string;
+  previewUrl?: string;
+  sourceModel?: string;
+};
+
 type ImageSizePreset = {
   id: string;
   label: string;
@@ -612,7 +622,7 @@ type GitHubDeviceFlow = {
 
 type SettingsTab = "connectors" | "appearance" | "automation";
 
-type MediaCenterTab = "voice" | "music" | "image" | "video" | "models";
+type MediaCenterTab = "voice" | "music" | "image" | "video" | "models" | "animation";
 
 type ConnectorCard = {
   id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox";
@@ -1015,6 +1025,10 @@ function App() {
   const [model3dResult, setModel3dResult] = useState<Model3dGeneratedResult | null>(null);
   const [recentModels3d, setRecentModels3d] = useState<Model3dGeneratedResult[]>([]);
   const model3dGenerationAbortRef = useRef<AbortController | null>(null);
+  const [animationPrompt, setAnimationPrompt] = useState("A confident walk cycle with subtle arm swing");
+  const [animationVariationCount, setAnimationVariationCount] = useState(3);
+  const [animationDrafts, setAnimationDrafts] = useState<AnimationDraft[]>([]);
+  const [animationSelectedId, setAnimationSelectedId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -2848,6 +2862,8 @@ function App() {
         setMediaCenterTab("video");
       } else if (payloadPane.id === "models-generator") {
         setMediaCenterTab("models");
+      } else if (payloadPane.id === "animation-generator") {
+        setMediaCenterTab("animation");
       }
     }
 
@@ -2856,7 +2872,8 @@ function App() {
         || payloadPane.id === "music-generator"
         || payloadPane.id === "image-generator"
         || payloadPane.id === "video-generator"
-        || payloadPane.id === "models-generator")
+        || payloadPane.id === "models-generator"
+        || payloadPane.id === "animation-generator")
       ? { type: "tool", id: "media-center" }
       : payloadPane;
 
@@ -3219,6 +3236,7 @@ function App() {
         <button type="button" className={`tool-tab ${mediaCenterTab === "image" ? "active" : ""}`} onClick={() => setMediaCenterTab("image")}>Image</button>
         <button type="button" className={`tool-tab ${mediaCenterTab === "video" ? "active" : ""}`} onClick={() => setMediaCenterTab("video")}>Video</button>
         <button type="button" className={`tool-tab ${mediaCenterTab === "models" ? "active" : ""}`} onClick={() => setMediaCenterTab("models")}>3D Models</button>
+        <button type="button" className={`tool-tab ${mediaCenterTab === "animation" ? "active" : ""}`} onClick={() => setMediaCenterTab("animation")}>Animation</button>
       </div>
     );
   }
@@ -5274,7 +5292,7 @@ function App() {
                       onClick={() => void generateModel3d()}
                       disabled={model3dBusyAction !== null || (model3dInputMode === "image" ? (!model3dSourceImageUrl.trim() && !model3dSourceImageBase64.trim()) : !model3dTextPrompt.trim())}
                     >
-                      {model3dBusyAction === "generate" ? "Generating..." : "Generate 3D Mesh"}
+                      {model3dBusyAction === "generate" ? "Generating Draft..." : "Generate 3D Draft"}
                     </button>
                     <button
                       type="button"
@@ -5282,12 +5300,13 @@ function App() {
                       onClick={() => void finishModel3dWithBlender()}
                       disabled={model3dBusyAction !== null || !model3dResult?.relativePath}
                     >
-                      {model3dBusyAction === "finish" ? "Finishing..." : "Finish Mesh (Cleanup + UV)"}
+                      {model3dBusyAction === "finish" ? "Finishing..." : "Finish Asset (All Passes)"}
                     </button>
                     <button type="button" className="ghost" onClick={stopModel3dGeneration} disabled={model3dBusyAction === null}>
                       Stop
                     </button>
                   </div>
+                  <small>Finish runs the configured mesh pipeline automatically in order (cleanup, decimate, UV, and source-texture pass when available).</small>
                   <label>
                     <span>Finish Profile</span>
                     <select value={model3dFinishProfile} onChange={(event) => setModel3dFinishProfile(event.target.value as "draft" | "game-ready-low" | "game-ready-med" | "game-ready-high")}>
@@ -5347,6 +5366,144 @@ function App() {
                           <a href={model.modelUrl} target="_blank" rel="noreferrer">
                             Download
                           </a>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </div>
+          ) : null}
+
+          {selectedPane.type === "tool" && selectedPane.id === "media-center" && mediaCenterTab === "animation" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Media Center</h2>
+                  <p className="subtitle">Animation workflow shell for text-to-motion generation, preview, keep, and delete decisions.</p>
+                </div>
+              </div>
+
+              {renderMediaCenterTabs()}
+
+              <section className="tool-section">
+                <h3>Generate Animation Drafts</h3>
+                <div className="stable-audio-form">
+                  <label>
+                    <span>Animation Prompt</span>
+                    <textarea
+                      rows={3}
+                      value={animationPrompt}
+                      onChange={(event) => setAnimationPrompt(event.target.value)}
+                      placeholder="A stealth crouch-walk with cautious turns"
+                    />
+                  </label>
+                  <label>
+                    <span>Variations</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={5}
+                      value={animationVariationCount}
+                      onChange={(event) => setAnimationVariationCount(Math.min(5, Math.max(1, Number(event.target.value || 1))))}
+                    />
+                  </label>
+                  <div className="tool-action-row">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const now = new Date();
+                        const drafts = Array.from({ length: animationVariationCount }).map((_, index) => ({
+                          id: crypto.randomUUID(),
+                          title: `Draft ${index + 1}`,
+                          prompt: animationPrompt.trim() || "Untitled animation prompt",
+                          status: "ready" as const,
+                          createdAt: new Date(now.getTime() + index * 250).toISOString(),
+                          sourceModel: model3dResult?.relativePath ?? "(none selected)",
+                        }));
+                        setAnimationDrafts((current) => [...drafts, ...current].slice(0, 25));
+                        setAnimationSelectedId(drafts[0]?.id ?? null);
+                        setStatusMessage(`Animation shell queued ${drafts.length} draft variation(s).`);
+                        pushToast("Animation draft shell created. Runtime integration comes after Blender pipeline finalization.", "ok");
+                      }}
+                    >
+                      Generate Draft Variations
+                    </button>
+                  </div>
+                  <small>Shell mode only right now: this scaffolds your review workflow before runtime integration.</small>
+                </div>
+              </section>
+
+              <section className="tool-section">
+                <h3>Preview</h3>
+                {animationDrafts.length === 0 ? (
+                  <small>No animation drafts yet. Generate 1-5 variations to start review.</small>
+                ) : (
+                  <div className="image-preview-panel">
+                    {animationSelectedId ? (
+                      <>
+                        {animationDrafts.filter((draft) => draft.id === animationSelectedId).map((draft) => (
+                          <div key={draft.id}>
+                            <small>{draft.title} · {new Date(draft.createdAt).toLocaleTimeString()} · {draft.status}</small>
+                            <small>Prompt: {draft.prompt}</small>
+                            <small>Source Model: {draft.sourceModel ?? "(none)"}</small>
+                            <div className="tool-action-row">
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => {
+                                  setStatusMessage(`Kept ${draft.title}.`);
+                                  pushToast("Marked animation draft as keep.", "ok");
+                                }}
+                              >
+                                Keep
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => {
+                                  setAnimationDrafts((current) => current.filter((entry) => entry.id !== draft.id));
+                                  setAnimationSelectedId((current) => (current === draft.id ? null : current));
+                                  setStatusMessage(`Deleted ${draft.title}.`);
+                                }}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    ) : (
+                      <small>Select a draft from the list below.</small>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              <section className="tool-section">
+                <h3>Draft Variations</h3>
+                {animationDrafts.length === 0 ? (
+                  <small>No drafts available.</small>
+                ) : (
+                  <ul className="tool-list">
+                    {animationDrafts.map((draft) => (
+                      <li key={draft.id}>
+                        {draft.title} · {new Date(draft.createdAt).toLocaleTimeString()} · {draft.status}
+                        <small>{draft.prompt}</small>
+                        <div className="tool-action-row">
+                          <button type="button" className="ghost" onClick={() => setAnimationSelectedId(draft.id)}>
+                            Open
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => {
+                              setAnimationDrafts((current) => current.filter((entry) => entry.id !== draft.id));
+                              setAnimationSelectedId((current) => (current === draft.id ? null : current));
+                            }}
+                          >
+                            Remove
+                          </button>
                         </div>
                       </li>
                     ))}
