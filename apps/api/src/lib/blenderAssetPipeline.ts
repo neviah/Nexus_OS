@@ -13,6 +13,7 @@ export type BlenderFinishInput = {
   inputPath: string;
   outputFormat: "glb" | "obj";
   profile: BlenderFinishProfile;
+  sourceImagePath?: string;
 };
 
 export type BlenderFinishResult = {
@@ -24,6 +25,7 @@ export type BlenderFinishResult = {
     vertices: number;
     faces: number;
   };
+  textureApplied: boolean;
 };
 
 async function commandWorks(command: string, args: string[]): Promise<boolean> {
@@ -159,6 +161,41 @@ function buildBlenderPipelineScript(): string {
     "    bpy.ops.uv.smart_project(angle_limit=1.15192, island_margin=0.03)",
     "    bpy.ops.object.mode_set(mode='OBJECT')",
     "",
+    "def apply_source_texture(obj, source_image_path: str):",
+    "    if not source_image_path:",
+    "        return False",
+    "    if not os.path.isfile(source_image_path):",
+    "        return False",
+    "",
+    "    image = bpy.data.images.load(source_image_path, check_existing=True)",
+    "    material = bpy.data.materials.get('NexusSourceMaterial')",
+    "    if material is None:",
+    "        material = bpy.data.materials.new(name='NexusSourceMaterial')",
+    "",
+    "    material.use_nodes = True",
+    "    nodes = material.node_tree.nodes",
+    "    links = material.node_tree.links",
+    "    nodes.clear()",
+    "",
+    "    output = nodes.new('ShaderNodeOutputMaterial')",
+    "    output.location = (400, 0)",
+    "    bsdf = nodes.new('ShaderNodeBsdfPrincipled')",
+    "    bsdf.location = (120, 0)",
+    "    tex = nodes.new('ShaderNodeTexImage')",
+    "    tex.location = (-220, 0)",
+    "    tex.image = image",
+    "    tex.interpolation = 'Smart'",
+    "",
+    "    links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])",
+    "    links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])",
+    "",
+    "    if len(obj.data.materials) == 0:",
+    "        obj.data.materials.append(material)",
+    "    else:",
+    "        obj.data.materials[0] = material",
+    "",
+    "    return True",
+    "",
     "def mesh_stats(obj):",
     "    return {",
     "        'vertices': int(len(obj.data.vertices)),",
@@ -181,6 +218,7 @@ function buildBlenderPipelineScript(): string {
     "    output_path = manifest['output_path']",
     "    output_format = manifest.get('output_format', 'glb')",
     "    profile = manifest.get('profile', 'game-ready-med')",
+    "    source_image_path = str(manifest.get('source_image_path', '') or '').strip()",
     "    ratios = {",
     "        'draft': 1.0,",
     "        'game-ready-high': 0.75,",
@@ -208,6 +246,17 @@ function buildBlenderPipelineScript(): string {
     "    emit_status('Running UV unwrap...')",
     "    auto_uv_unwrap(mesh)",
     "",
+    "    texture_applied = False",
+    "    if source_image_path:",
+    "        emit_status('Applying source image texture...')",
+    "        texture_applied = bool(apply_source_texture(mesh, source_image_path))",
+    "        if texture_applied:",
+    "            emit_status('Source texture applied.')",
+    "        else:",
+    "            emit_status('Source texture not applied (file missing or unsupported).')",
+    "    else:",
+    "        emit_status('No source image path provided; exporting mesh without texture.')",
+    "",
     "    emit_status(f'Exporting {output_format.upper()}...')",
     "    select_only(mesh)",
     "    export_mesh(output_path, output_format)",
@@ -218,6 +267,7 @@ function buildBlenderPipelineScript(): string {
     "        'output_format': output_format,",
     "        'profile': profile,",
     "        'stats': stats,",
+    "        'texture_applied': texture_applied,",
     "    })",
     "",
     "try:",
@@ -277,6 +327,7 @@ export async function runBlenderFinishStreaming(
     output_path: outputPath,
     output_format: outputFormat,
     profile,
+    source_image_path: input.sourceImagePath ?? "",
   }, null, 2), "utf-8");
 
   onStatus(`Starting Blender headless pipeline (${profile})...`);
@@ -297,6 +348,7 @@ export async function runBlenderFinishStreaming(
       output_format?: string;
       profile?: BlenderFinishProfile;
       stats?: { vertices?: number; faces?: number };
+      texture_applied?: boolean;
     } | null = null;
     let settled = false;
 
@@ -402,6 +454,7 @@ export async function runBlenderFinishStreaming(
         profile: resultPayload?.profile ?? profile,
         blenderPath,
         stats,
+        textureApplied: Boolean(resultPayload?.texture_applied),
       });
     });
   });

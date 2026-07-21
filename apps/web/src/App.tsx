@@ -525,6 +525,8 @@ type Hunyuan3dFinishStreamEnvelope =
         faces: number;
       };
       sourceRelativePath: string;
+      sourceTextureApplied: boolean;
+      sourceImageRelativePath?: string;
     };
   }
   | { type: "error"; message: string };
@@ -2206,6 +2208,7 @@ function App() {
           workspaceId: boot?.activeWorkspaceId ?? "default",
           outputFormat: model3dFormat,
           profile: model3dFinishProfile,
+          sourceImageUrl: model3dResult?.sourceImageUrl ?? "",
         }),
         signal: controller.signal,
       });
@@ -2291,8 +2294,14 @@ function App() {
               return [updated, ...current].slice(0, 10);
             });
             setStatusMessage("Blender finish pipeline completed.");
-            pushToast(`Blender finish complete: ${envelope.result.stats.vertices} verts, ${envelope.result.stats.faces} faces.`, "ok");
+            const textureLabel = envelope.result.sourceTextureApplied ? "texture applied" : "no texture";
+            pushToast(`Blender finish complete: ${envelope.result.stats.vertices} verts, ${envelope.result.stats.faces} faces (${textureLabel}).`, "ok");
             setModel3dStatusTrace((current) => `${current}Finish stats: ${envelope.result.stats.vertices} verts, ${envelope.result.stats.faces} faces.\n`.slice(-16000));
+            if (envelope.result.sourceTextureApplied) {
+              setModel3dStatusTrace((current) => `${current}Texture pass: source image material applied.\n`.slice(-16000));
+            } else {
+              setModel3dStatusTrace((current) => `${current}Texture pass: skipped or unavailable source image.\n`.slice(-16000));
+            }
             completed = true;
             await refreshActiveWorkspaceTree(envelope.result.workspaceId);
           }

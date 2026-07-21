@@ -3049,6 +3049,8 @@ async function streamHunyuan3dFinish(
     workspaceId?: string;
     outputFormat?: string;
     profile?: string;
+    sourceImageUrl?: string;
+    sourceRelativePath?: string;
   },
 ): Promise<void> {
   const relativePath = String(input.relativePath ?? "").trim();
@@ -3060,6 +3062,21 @@ async function streamHunyuan3dFinish(
     || requestedProfile === "game-ready-high"
     ? requestedProfile
     : "game-ready-med";
+  const sourceImageUrl = String(input.sourceImageUrl ?? "").trim();
+  const explicitSourceRelativePath = String(input.sourceRelativePath ?? "").trim();
+
+  const extractRelativePathFromToolUrl = (value: string): string => {
+    if (!value) {
+      return "";
+    }
+    try {
+      const parsed = new URL(value, "http://nexus.local");
+      const fromQuery = String(parsed.searchParams.get("relativePath") ?? "").trim();
+      return fromQuery;
+    } catch {
+      return "";
+    }
+  };
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -3096,11 +3113,31 @@ async function streamHunyuan3dFinish(
       throw new Error("Only glb/gltf/obj meshes are supported for Blender finishing.");
     }
 
+    const sourceRelativePath = explicitSourceRelativePath || extractRelativePathFromToolUrl(sourceImageUrl);
+    let sourceImagePath: string | undefined;
+    if (sourceRelativePath) {
+      const maybeSourcePath = resolveWorkspaceTargetPath(workspace.path, sourceRelativePath);
+      try {
+        await fs.access(maybeSourcePath);
+        if (/\.(png|jpg|jpeg|webp)$/i.test(maybeSourcePath)) {
+          sourceImagePath = maybeSourcePath;
+          send({ type: "status", message: `Using source image texture: ${sourceRelativePath}` });
+        } else {
+          send({ type: "status", message: `Skipping texture source (unsupported extension): ${sourceRelativePath}` });
+        }
+      } catch {
+        send({ type: "status", message: `Skipping texture source (missing file): ${sourceRelativePath}` });
+      }
+    } else {
+      send({ type: "status", message: "No source image provided for texturing; running geometry-only finish." });
+    }
+
     send({ type: "status", message: `Starting Blender finish pipeline for ${relativePath}...` });
     const finished = await runBlenderFinishStreaming({
       inputPath: absoluteInputPath,
       outputFormat,
       profile,
+      sourceImagePath,
     }, (message) => send({ type: "status", message }), controller.signal);
 
     send({ type: "status", message: "Saving finished mesh into workspace assets..." });
@@ -3125,7 +3162,9 @@ async function streamHunyuan3dFinish(
         profile: finished.profile,
         blenderPath: finished.blenderPath,
         stats: finished.stats,
+        sourceTextureApplied: finished.textureApplied,
         sourceRelativePath: relativePath,
+        sourceImageRelativePath: sourceRelativePath || undefined,
       },
     });
     res.end();
@@ -3191,6 +3230,8 @@ app.post("/api/tools/hunyuan3d/finish/stream", async (req, res) => {
     workspaceId?: string;
     outputFormat?: string;
     profile?: string;
+    sourceImageUrl?: string;
+    sourceRelativePath?: string;
   };
   await streamHunyuan3dFinish(req, res, body ?? {});
 });
