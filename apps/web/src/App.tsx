@@ -548,14 +548,44 @@ type Model3dGeneratedResult = {
   relativePath?: string;
 };
 
+type AnimatoStatus = {
+  installed: boolean;
+  envReady: boolean;
+  apiReady: boolean;
+  appRoot: string;
+  pythonPath: string | null;
+  baseUrl: string;
+  notes: string[];
+};
+
+type AnimatoStreamEnvelope =
+  | { type: "status"; message: string }
+  | {
+    type: "done";
+    result: {
+      workspaceId: string;
+      clips: Array<{
+        variation: number;
+        prompt: string;
+        modelUrl: string;
+        relativePath: string;
+        format: "glb" | "obj";
+      }>;
+    };
+  }
+  | { type: "error"; message: string };
+
 type AnimationDraft = {
   id: string;
   title: string;
   prompt: string;
   status: "queued" | "ready";
   createdAt: string;
-  previewUrl?: string;
+  modelUrl?: string;
+  relativePath?: string;
+  format?: "glb" | "obj";
   sourceModel?: string;
+  kept?: boolean;
 };
 
 type ImageSizePreset = {
@@ -567,7 +597,7 @@ type ImageSizePreset = {
 
 type RuntimeJob = {
   id: string;
-  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam" | "install-wan2gp" | "start-wan2gp" | "install-hunyuan3d" | "start-hunyuan3d";
+  action: "install-ollama" | "start-ollama" | "pull-ollama-model" | "install-piper" | "install-default-piper-voice" | "install-acejam" | "start-acejam" | "install-wan2gp" | "start-wan2gp" | "install-hunyuan3d" | "start-hunyuan3d" | "install-animato" | "start-animato";
   model?: string;
   status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   createdAt: string;
@@ -1025,10 +1055,15 @@ function App() {
   const [model3dResult, setModel3dResult] = useState<Model3dGeneratedResult | null>(null);
   const [recentModels3d, setRecentModels3d] = useState<Model3dGeneratedResult[]>([]);
   const model3dGenerationAbortRef = useRef<AbortController | null>(null);
+  const [animatoStatus, setAnimatoStatus] = useState<AnimatoStatus | null>(null);
   const [animationPrompt, setAnimationPrompt] = useState("A confident walk cycle with subtle arm swing");
   const [animationVariationCount, setAnimationVariationCount] = useState(3);
+  const [animationSourceModelPath, setAnimationSourceModelPath] = useState("");
+  const [animationBusyAction, setAnimationBusyAction] = useState<"generate" | null>(null);
+  const [animationStatusTrace, setAnimationStatusTrace] = useState("");
   const [animationDrafts, setAnimationDrafts] = useState<AnimationDraft[]>([]);
   const [animationSelectedId, setAnimationSelectedId] = useState<string | null>(null);
+  const animationGenerationAbortRef = useRef<AbortController | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -1087,6 +1122,14 @@ function App() {
 
     return "";
   }, [model3dSourceImageBase64, model3dSourceImageMime, model3dSourceImageUrl]);
+
+  useEffect(() => {
+    const candidate = model3dResult?.relativePath?.trim() ?? "";
+    if (!candidate) {
+      return;
+    }
+    setAnimationSourceModelPath((current) => current.trim() || candidate);
+  }, [model3dResult?.relativePath]);
   
   async function loadCookbookSnapshot() {
     setCookbookBusy(true);
@@ -1979,6 +2022,58 @@ function App() {
     setModel3dSubfolder((current) => current.trim() ? current : payload.recommended.subfolder);
   }
 
+  async function loadAnimatoStatus() {
+    const response = await fetch("/api/tools/animation/status");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as AnimatoStatus;
+    setAnimatoStatus(payload);
+  }
+
+  async function ensureAnimatoReady(): Promise<boolean> {
+    let current = animatoStatus;
+    const fresh = await fetch("/api/tools/animation/status").catch(() => null);
+    if (fresh?.ok) {
+      current = await fresh.json() as AnimatoStatus;
+      setAnimatoStatus(current);
+    }
+
+    if (current?.apiReady) {
+      return true;
+    }
+
+    setStatusMessage("Animato is not ready yet. Starting runtime provisioning...");
+    pushToast("Provisioning Animato runtime now.", "warn");
+
+    const needsInstall = !current?.installed || !current?.envReady;
+    if (needsInstall) {
+      const installResult = await runRuntimeJob("animato-install", "install-animato", "Animato installed.");
+      if (!installResult.ok) {
+        setStatusMessage(installResult.error ?? "Animato install failed.");
+        return false;
+      }
+    }
+
+    const startResult = await runRuntimeJob("animato-start", "start-animato", "Animato ready.");
+    if (!startResult.ok) {
+      setStatusMessage(startResult.error ?? "Animato readiness check failed.");
+      return false;
+    }
+
+    const refreshed = await fetch("/api/tools/animation/status");
+    if (!refreshed.ok) {
+      return false;
+    }
+    const payload = (await refreshed.json()) as AnimatoStatus;
+    setAnimatoStatus(payload);
+    if (!payload.apiReady) {
+      const detail = payload.notes?.[payload.notes.length - 1] ?? "Animato readiness check failed.";
+      setStatusMessage(detail);
+    }
+    return payload.apiReady;
+  }
+
   async function ensureHunyuan3dReadyForGeneration(): Promise<boolean> {
     let current = hunyuan3dStatus;
     const fresh = await fetch("/api/tools/hunyuan3d/status").catch(() => null);
@@ -2196,6 +2291,151 @@ function App() {
     model3dGenerationAbortRef.current?.abort();
   }
 
+  function stopAnimationGeneration() {
+    animationGenerationAbortRef.current?.abort();
+  }
+
+  async function generateAnimationDraftVariations() {
+    const prompt = animationPrompt.trim();
+    const sourceRelativePath = animationSourceModelPath.trim() || model3dResult?.relativePath?.trim() || "";
+    if (!prompt) {
+      setStatusMessage("Enter an animation prompt first.");
+      pushToast("Animation prompt is required.", "warn");
+      return;
+    }
+    if (!sourceRelativePath) {
+      setStatusMessage("Provide a source rigged model path (glb/gltf/fbx) first.");
+      pushToast("Source model path is required for Animato.", "warn");
+      return;
+    }
+
+    if (animationGenerationAbortRef.current) {
+      animationGenerationAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    animationGenerationAbortRef.current = controller;
+    setAnimationBusyAction("generate");
+    setAnimationStatusTrace("Starting Animato generation...\n");
+
+    const ready = await ensureAnimatoReady();
+    if (!ready) {
+      setAnimationStatusTrace((current) => `${current}Animato is still not ready after provisioning.\n`.slice(-20000));
+      setAnimationBusyAction(null);
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/tools/animation/generate/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          variations: animationVariationCount,
+          sourceRelativePath,
+          workspaceId: boot?.activeWorkspaceId ?? "default",
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        const payload = (await response.json()) as { error?: string };
+        const message = payload.error ?? "Animation generation failed.";
+        setStatusMessage(message);
+        pushToast(message, "err");
+        setAnimationBusyAction(null);
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completed = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          const split = buffer.indexOf("\n\n");
+          if (split === -1) {
+            break;
+          }
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+          if (!dataLine) {
+            continue;
+          }
+          const raw = dataLine.slice(5).trim();
+          let envelope: AnimatoStreamEnvelope;
+          try {
+            envelope = JSON.parse(raw) as AnimatoStreamEnvelope;
+          } catch {
+            continue;
+          }
+
+          if (envelope.type === "status") {
+            setAnimationStatusTrace((current) => `${current}${envelope.message}\n`.slice(-20000));
+            continue;
+          }
+
+          if (envelope.type === "error") {
+            setAnimationStatusTrace((current) => `${current}[error] ${envelope.message}\n`.slice(-20000));
+            setStatusMessage(envelope.message);
+            pushToast(envelope.message, "err");
+            continue;
+          }
+
+          if (envelope.type === "done") {
+            const createdAt = new Date().toISOString();
+            const drafts = envelope.result.clips.map((clip) => ({
+              id: crypto.randomUUID(),
+              title: `Variation ${clip.variation}`,
+              prompt: clip.prompt,
+              status: "ready" as const,
+              createdAt,
+              modelUrl: clip.modelUrl,
+              relativePath: clip.relativePath,
+              format: clip.format,
+              sourceModel: sourceRelativePath,
+              kept: false,
+            }));
+            setAnimationDrafts((current) => [...drafts, ...current].slice(0, 40));
+            setAnimationSelectedId(drafts[0]?.id ?? null);
+            setStatusMessage(`Animato generated ${drafts.length} animation variation(s).`);
+            pushToast(`Generated ${drafts.length} animation variation(s).`, "ok");
+            completed = true;
+            await refreshActiveWorkspaceTree(envelope.result.workspaceId);
+            void loadAnimatoStatus();
+          }
+        }
+      }
+
+      if (!completed && !controller.signal.aborted) {
+        setStatusMessage("Animation stream ended before completion.");
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        setAnimationStatusTrace((current) => `${current}Animation generation canceled by user.\n`.slice(-20000));
+        setStatusMessage("Animation generation stopped.");
+        pushToast("Animation generation canceled.", "warn");
+      } else {
+        const message = String(error);
+        setAnimationStatusTrace((current) => `${current}[error] ${message}\n`.slice(-20000));
+        setStatusMessage(message);
+        pushToast(message, "err");
+      }
+    } finally {
+      if (animationGenerationAbortRef.current === controller) {
+        animationGenerationAbortRef.current = null;
+      }
+      setAnimationBusyAction(null);
+    }
+  }
+
   async function finishModel3dWithBlender() {
     if (model3dGenerationAbortRef.current) {
       model3dGenerationAbortRef.current.abort();
@@ -2406,6 +2646,9 @@ function App() {
     setModel3dSeed(model.seed);
     setModel3dFormat(model.format);
     setModel3dResult(model);
+    if (model.relativePath?.trim()) {
+      setAnimationSourceModelPath(model.relativePath.trim());
+    }
     setStatusMessage("Loaded recent 3D generation into preview.");
   }
 
@@ -3201,6 +3444,7 @@ function App() {
       void loadStableAudioStatus();
       void loadWan2GpStatus();
       void loadHunyuan3dStatus();
+      void loadAnimatoStatus();
     }
     if (selectedPane.type === "tool" && selectedPane.id === "settings") {
       void loadGitStatus();
@@ -5380,15 +5624,47 @@ function App() {
               <div className="tool-header-row">
                 <div>
                   <h2>Media Center</h2>
-                  <p className="subtitle">Animation workflow shell for text-to-motion generation, preview, keep, and delete decisions.</p>
+                  <p className="subtitle">Animato text-to-motion generation for rigged 3D models with multi-variation review.</p>
                 </div>
               </div>
 
               {renderMediaCenterTabs()}
 
               <section className="tool-section">
-                <h3>Generate Animation Drafts</h3>
+                <h3>Generate Animations</h3>
                 <div className="stable-audio-form">
+                  {!animatoStatus?.apiReady ? (
+                    <small>Animato is not ready yet. Generation will auto-provision install/start when needed.</small>
+                  ) : null}
+                  {animatoStatus?.notes?.length ? (
+                    <small>{animatoStatus.notes[animatoStatus.notes.length - 1]}</small>
+                  ) : null}
+                  <label>
+                    <span>Source Rigged Model Path</span>
+                    <input
+                      type="text"
+                      value={animationSourceModelPath}
+                      onChange={(event) => setAnimationSourceModelPath(event.target.value)}
+                      placeholder="Assets/models/your-rigged-character.glb"
+                    />
+                  </label>
+                  <div className="tool-action-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => {
+                        const candidate = model3dResult?.relativePath?.trim() ?? "";
+                        if (!candidate) {
+                          setStatusMessage("No recent 3D model path available.");
+                          return;
+                        }
+                        setAnimationSourceModelPath(candidate);
+                        setStatusMessage("Loaded latest 3D model path as animation source.");
+                      }}
+                    >
+                      Use Current 3D Model
+                    </button>
+                  </div>
                   <label>
                     <span>Animation Prompt</span>
                     <textarea
@@ -5411,26 +5687,16 @@ function App() {
                   <div className="tool-action-row">
                     <button
                       type="button"
-                      onClick={() => {
-                        const now = new Date();
-                        const drafts = Array.from({ length: animationVariationCount }).map((_, index) => ({
-                          id: crypto.randomUUID(),
-                          title: `Draft ${index + 1}`,
-                          prompt: animationPrompt.trim() || "Untitled animation prompt",
-                          status: "ready" as const,
-                          createdAt: new Date(now.getTime() + index * 250).toISOString(),
-                          sourceModel: model3dResult?.relativePath ?? "(none selected)",
-                        }));
-                        setAnimationDrafts((current) => [...drafts, ...current].slice(0, 25));
-                        setAnimationSelectedId(drafts[0]?.id ?? null);
-                        setStatusMessage(`Animation shell queued ${drafts.length} draft variation(s).`);
-                        pushToast("Animation draft shell created. Runtime integration comes after Blender pipeline finalization.", "ok");
-                      }}
+                      onClick={() => void generateAnimationDraftVariations()}
+                      disabled={animationBusyAction !== null || !animationPrompt.trim() || !(animationSourceModelPath.trim() || model3dResult?.relativePath?.trim())}
                     >
-                      Generate Draft Variations
+                      {animationBusyAction === "generate" ? "Generating..." : "Generate Variations"}
+                    </button>
+                    <button type="button" className="ghost" onClick={stopAnimationGeneration} disabled={animationBusyAction === null}>
+                      Stop
                     </button>
                   </div>
-                  <small>Shell mode only right now: this scaffolds your review workflow before runtime integration.</small>
+                  <small>Generates 1-5 variations in sequence. Keep what you like and remove the rest.</small>
                 </div>
               </section>
 
@@ -5447,16 +5713,23 @@ function App() {
                             <small>{draft.title} · {new Date(draft.createdAt).toLocaleTimeString()} · {draft.status}</small>
                             <small>Prompt: {draft.prompt}</small>
                             <small>Source Model: {draft.sourceModel ?? "(none)"}</small>
+                            {draft.modelUrl && draft.format ? (
+                              <>
+                                <Model3dViewport modelUrl={draft.modelUrl} format={draft.format} />
+                                {draft.relativePath ? <small>Saved: {draft.relativePath}</small> : null}
+                              </>
+                            ) : null}
                             <div className="tool-action-row">
                               <button
                                 type="button"
                                 className="ghost"
                                 onClick={() => {
+                                  setAnimationDrafts((current) => current.map((entry) => entry.id === draft.id ? { ...entry, kept: true } : entry));
                                   setStatusMessage(`Kept ${draft.title}.`);
                                   pushToast("Marked animation draft as keep.", "ok");
                                 }}
                               >
-                                Keep
+                                {draft.kept ? "Kept" : "Keep"}
                               </button>
                               <button
                                 type="button"
@@ -5489,11 +5762,18 @@ function App() {
                     {animationDrafts.map((draft) => (
                       <li key={draft.id}>
                         {draft.title} · {new Date(draft.createdAt).toLocaleTimeString()} · {draft.status}
+                        {draft.kept ? <small>Kept for export</small> : null}
                         <small>{draft.prompt}</small>
+                        {draft.relativePath ? <small>Saved: {draft.relativePath}</small> : null}
                         <div className="tool-action-row">
                           <button type="button" className="ghost" onClick={() => setAnimationSelectedId(draft.id)}>
                             Open
                           </button>
+                          {draft.modelUrl ? (
+                            <a href={draft.modelUrl} target="_blank" rel="noreferrer">
+                              Download
+                            </a>
+                          ) : null}
                           <button
                             type="button"
                             className="ghost"
@@ -5509,6 +5789,11 @@ function App() {
                     ))}
                   </ul>
                 )}
+              </section>
+
+              <section className="tool-section">
+                <h3>Status Stream</h3>
+                <pre className="image-status-stream">{animationStatusTrace || "No status yet."}</pre>
               </section>
             </div>
           ) : null}

@@ -85,6 +85,12 @@ import {
   type BlenderFinishProfile,
 } from "./lib/blenderAssetPipeline.js";
 import {
+  getAnimatoBaseUrl,
+  getAnimatoStatus,
+  installAnimato,
+  startAnimatoIfNeeded,
+} from "./lib/animatoRuntime.js";
+import {
   generateWithWan2GpStreaming,
   getMachineProfileHint,
   getWan2GpModelCatalog,
@@ -116,7 +122,9 @@ type RuntimeJobAction =
   | "install-wan2gp"
   | "start-wan2gp"
   | "install-hunyuan3d"
-  | "start-hunyuan3d";
+  | "start-hunyuan3d"
+  | "install-animato"
+  | "start-animato";
 
 type RuntimeJob = {
   id: string;
@@ -288,7 +296,7 @@ function scheduleRuntimeJobPersist(): void {
 }
 
 function shouldAutoRetryRuntimeJob(job: RuntimeJob): boolean {
-  return ["install-ollama", "install-piper", "install-default-piper-voice", "install-acejam", "install-wan2gp", "install-hunyuan3d"].includes(job.action);
+  return ["install-ollama", "install-piper", "install-default-piper-voice", "install-acejam", "install-wan2gp", "install-hunyuan3d", "install-animato"].includes(job.action);
 }
 
 function runtimeJobRetryDepth(job: RuntimeJob): number {
@@ -740,6 +748,22 @@ async function executeRuntimeJob(job: RuntimeJob): Promise<void> {
     appendRuntimeJobLog(job, "Checking Hunyuan3D-2GP readiness...");
     await startHunyuan3dIfNeeded();
     appendRuntimeJobLog(job, "Hunyuan3D-2GP runtime is ready.");
+    return;
+  }
+
+  if (job.action === "install-animato") {
+    ensureRuntimeJobNotCanceled(job);
+    appendRuntimeJobLog(job, "Installing Animato runtime...");
+    await installAnimato();
+    appendRuntimeJobLog(job, "Animato install completed.");
+    return;
+  }
+
+  if (job.action === "start-animato") {
+    ensureRuntimeJobNotCanceled(job);
+    appendRuntimeJobLog(job, "Starting Animato API...");
+    await startAnimatoIfNeeded();
+    appendRuntimeJobLog(job, "Animato API is ready.");
     return;
   }
 
@@ -2036,7 +2060,7 @@ app.post("/api/tools/runtimes/jobs/:jobId/retry", async (req, res) => {
 });
 
 app.post("/api/tools/runtimes/install", async (req, res) => {
-  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" | "wan2gp" | "hunyuan3d" };
+  const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" | "wan2gp" | "hunyuan3d" | "animato" };
   try {
     if (body.runtime === "ollama") {
       await installOllama();
@@ -2051,6 +2075,8 @@ app.post("/api/tools/runtimes/install", async (req, res) => {
       await installWan2Gp();
     } else if (body.runtime === "hunyuan3d") {
       await installHunyuan3d();
+    } else if (body.runtime === "animato") {
+      await installAnimato();
     } else {
       return res.status(400).json({ error: "Unknown runtime target" });
     }
@@ -2096,6 +2122,16 @@ app.post("/api/tools/runtimes/hunyuan3d/start", async (_req, res) => {
   try {
     await startHunyuan3dIfNeeded();
     const status = await getHunyuan3dStatus();
+    return res.json({ ok: true, status });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/runtimes/animato/start", async (_req, res) => {
+  try {
+    await startAnimatoIfNeeded();
+    const status = await getAnimatoStatus();
     return res.json({ ok: true, status });
   } catch (error) {
     return res.status(500).json({ error: String(error) });
@@ -3178,6 +3214,226 @@ async function streamHunyuan3dFinish(
   }
 }
 
+type AnimatoStreamEnvelope =
+  | { type: "status"; message: string }
+  | {
+    type: "done";
+    result: {
+      workspaceId: string;
+      clips: Array<{
+        variation: number;
+        prompt: string;
+        modelUrl: string;
+        relativePath: string;
+        format: "glb" | "obj";
+      }>;
+    };
+  }
+  | { type: "error"; message: string };
+
+async function streamAnimatoGeneration(
+  req: express.Request,
+  res: express.Response,
+  input: {
+    prompt?: string;
+    variations?: number;
+    sourceRelativePath?: string;
+    workspaceId?: string;
+    harnessId?: string;
+  },
+): Promise<void> {
+  const prompt = String(input.prompt ?? "").trim();
+  const workspaceId = String(input.workspaceId ?? "").trim() || undefined;
+  const sourceRelativePath = String(input.sourceRelativePath ?? "").trim();
+  const harnessId = String(input.harnessId ?? "").trim() || undefined;
+  const variationCount = Math.min(5, Math.max(1, Number(input.variations ?? 1) || 1));
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const send = (payload: AnimatoStreamEnvelope) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  if (!prompt) {
+    send({ type: "error", message: "prompt is required" });
+    res.end();
+    return;
+  }
+
+  if (!sourceRelativePath) {
+    send({ type: "error", message: "sourceRelativePath is required" });
+    res.end();
+    return;
+  }
+
+  const controller = new AbortController();
+  const onClientDisconnect = () => {
+    controller.abort();
+  };
+  req.on("close", onClientDisconnect);
+
+  const clips: Array<{
+    variation: number;
+    prompt: string;
+    modelUrl: string;
+    relativePath: string;
+    format: "glb" | "obj";
+  }> = [];
+
+  try {
+    send({ type: "status", message: "Checking Animato runtime readiness..." });
+    await startAnimatoIfNeeded();
+    const animatoBaseUrl = getAnimatoBaseUrl();
+
+    const state = await readSystemState();
+    const workspace = await resolveWorkspaceContext(state, workspaceId);
+    if (!workspace.path) {
+      throw new Error("Workspace path is unavailable.");
+    }
+
+    const absoluteInputPath = resolveWorkspaceTargetPath(workspace.path, sourceRelativePath);
+    await fs.access(absoluteInputPath);
+    if (!/\.(glb|gltf|fbx)$/i.test(absoluteInputPath)) {
+      throw new Error("Animato requires a rigged glb/gltf/fbx source model.");
+    }
+
+    const sourceBytes = await fs.readFile(absoluteInputPath);
+    const sourceFileName = path.basename(absoluteInputPath);
+
+    for (let index = 0; index < variationCount; index += 1) {
+      if (controller.signal.aborted) {
+        throw new Error("Animation generation canceled.");
+      }
+
+      const variation = index + 1;
+      const variationPrompt = variationCount > 1
+        ? `${prompt}\n\nVariation ${variation}/${variationCount}: keep same action intent but alter timing, emphasis, and pacing.`
+        : prompt;
+
+      send({ type: "status", message: `Variation ${variation}/${variationCount}: uploading source model...` });
+      const uploadForm = new FormData();
+      uploadForm.append("file", new Blob([sourceBytes]), sourceFileName);
+      const uploadResponse = await fetch(`${animatoBaseUrl}/api/upload`, {
+        method: "POST",
+        body: uploadForm,
+        signal: controller.signal,
+      });
+      if (!uploadResponse.ok) {
+        throw new Error(`Animato upload failed: HTTP ${uploadResponse.status}`);
+      }
+      const uploadPayload = (await uploadResponse.json()) as { filename?: string };
+      const uploadedFilename = String(uploadPayload.filename ?? "").trim();
+      if (!uploadedFilename) {
+        throw new Error("Animato upload response did not include a filename.");
+      }
+
+      send({ type: "status", message: `Variation ${variation}/${variationCount}: building Animato skeleton prompt...` });
+      const promptResponse = await fetch(`${animatoBaseUrl}/api/prompt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: uploadedFilename, message: variationPrompt }),
+        signal: controller.signal,
+      });
+      if (!promptResponse.ok) {
+        throw new Error(`Animato prompt build failed: HTTP ${promptResponse.status}`);
+      }
+      const promptPayload = (await promptResponse.json()) as { prompt?: string };
+      const animatoPrompt = String(promptPayload.prompt ?? "").trim();
+      if (!animatoPrompt) {
+        throw new Error("Animato did not return a prompt payload for script generation.");
+      }
+
+      send({ type: "status", message: `Variation ${variation}/${variationCount}: generating bpy script via Nexus Router...` });
+      const routed = await routeChatWithFallback(state, {
+        harnessId,
+        messages: [
+          {
+            role: "system",
+            content: "You generate Blender Python scripts only. Return only executable Python code, no markdown, no commentary.",
+          },
+          {
+            role: "user",
+            content: animatoPrompt,
+          },
+        ],
+        temperature: 0.2,
+      });
+      const script = String(routed.content ?? "").trim();
+      if (!script) {
+        throw new Error("Nexus Router returned an empty animation script.");
+      }
+
+      send({ type: "status", message: `Variation ${variation}/${variationCount}: running Animato bake...` });
+      const runResponse = await fetch(`${animatoBaseUrl}/api/run`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: script,
+        signal: controller.signal,
+      });
+      if (!runResponse.ok) {
+        throw new Error(`Animato run failed: HTTP ${runResponse.status}`);
+      }
+      const runPayload = (await runResponse.json()) as { ok?: boolean; output_url?: string; stderr?: string; returncode?: number };
+      if (!runPayload.ok) {
+        throw new Error(`Animato run returned failure.${runPayload.stderr ? ` ${runPayload.stderr}` : ""}`);
+      }
+
+      const outputUrl = String(runPayload.output_url ?? "").trim();
+      if (!outputUrl) {
+        throw new Error("Animato run completed without output_url.");
+      }
+
+      const resolvedOutputUrl = /^https?:\/\//i.test(outputUrl)
+        ? outputUrl
+        : `${animatoBaseUrl}${outputUrl.startsWith("/") ? "" : "/"}${outputUrl}`;
+
+      const outputResponse = await fetch(resolvedOutputUrl, {
+        signal: controller.signal,
+      });
+      if (!outputResponse.ok) {
+        throw new Error(`Could not download Animato output file: HTTP ${outputResponse.status}`);
+      }
+      const outputBytes = Buffer.from(await outputResponse.arrayBuffer());
+      const extension = path.extname(uploadedFilename).toLowerCase().replace(/^\./, "") || "glb";
+      const saved = await saveBufferToWorkspaceAssets({
+        workspaceId,
+        category: "models",
+        baseName: `animato-${sanitizeFileNameSegment(prompt, "animation")}-v${variation}`,
+        extension,
+        bytes: outputBytes,
+      });
+
+      const format: "glb" | "obj" = extension === "obj" ? "obj" : "glb";
+      clips.push({
+        variation,
+        prompt: variationPrompt,
+        modelUrl: `/api/tools/hunyuan3d/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        relativePath: saved.relativePath,
+        format,
+      });
+      send({ type: "status", message: `Variation ${variation}/${variationCount}: saved ${saved.relativePath}` });
+    }
+
+    await writeSystemState(state);
+    send({
+      type: "done",
+      result: {
+        workspaceId: workspace.id,
+        clips,
+      },
+    });
+    res.end();
+  } catch (error) {
+    send({ type: "error", message: String(error) });
+    res.end();
+  } finally {
+    req.off("close", onClientDisconnect);
+  }
+}
+
 app.get("/api/tools/hunyuan3d/generate/stream", async (req, res) => {
   await streamHunyuan3dGeneration(req, res, {
     imageUrl: String(req.query.imageUrl ?? ""),
@@ -3234,6 +3490,26 @@ app.post("/api/tools/hunyuan3d/finish/stream", async (req, res) => {
     sourceRelativePath?: string;
   };
   await streamHunyuan3dFinish(req, res, body ?? {});
+});
+
+app.get("/api/tools/animation/status", async (_req, res) => {
+  try {
+    const status = await getAnimatoStatus();
+    return res.json(status);
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.post("/api/tools/animation/generate/stream", async (req, res) => {
+  const body = req.body as {
+    prompt?: string;
+    variations?: number;
+    sourceRelativePath?: string;
+    workspaceId?: string;
+    harnessId?: string;
+  };
+  await streamAnimatoGeneration(req, res, body ?? {});
 });
 
 app.post("/api/tools/image/save", async (req, res) => {
