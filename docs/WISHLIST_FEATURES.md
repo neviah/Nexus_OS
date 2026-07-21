@@ -476,3 +476,104 @@ Before adding any new external system, require:
 1. Add per-provider live health probe jobs (latency/error-rate) to power dynamic fallback ordering.
 2. Add diagnostics export/download (JSON) for startup, policy warnings, and capability run history.
 3. Add strict-mode exception policy (allow selected harnesses/tools during degraded startup) for controlled partial operation.
+
+## Appendix: 3D Game Asset Pipeline Spec (Draft)
+
+This appendix defines a practical path from current shape-only 3D generation to game-usable assets.
+
+### Current state (confirmed)
+
+- Current Hunyuan path generates mesh geometry and exports GLB/OBJ.
+- Texture/material generation is not yet a first-class stage in NexusOS.
+- Rigging and animation authoring are out of scope for the current generation route.
+
+### Target outcomes
+
+1. Keep a fast draft path for quick preview and ideation.
+2. Add optional "game-ready" processing stages after mesh creation.
+3. Keep every advanced stage optional-by-default and independently diagnosable.
+
+### Proposed staged pipeline
+
+1. Stage A: Draft Mesh
+- Input: image or text-to-image source.
+- Runtime: Hunyuan mesh generation.
+- Output: draft mesh (GLB/OBJ), source image, run diagnostics.
+
+2. Stage B: Mesh Cleanup
+- Operations: remove non-manifold geometry, decimate to target budgets, recalculate normals, scale/axis normalization.
+- Output: cleaned mesh profile variants (high, medium, low).
+
+3. Stage C: UV Unwrap
+- Operations: auto seams, island packing, texel density normalization.
+- Output: UV-mapped mesh and UV diagnostics.
+
+4. Stage D: Texture Projection + Baking
+- Operations: source-image projection, hidden-surface completion, bake maps.
+- Required maps for baseline: base color (albedo), normal, roughness, metallic, AO.
+- Output: PBR material set and packaged GLB.
+
+5. Stage E: Rigging (humanoid first)
+- Operations: auto skeleton placement, skin weight solve, joint limit defaults.
+- Output: skinned mesh plus validation report.
+
+6. Stage F: Engine Export Validation
+- Operations: naming checks, bone hierarchy checks, scale checks, texture reference checks.
+- Output: Unity/Unreal-ready export bundle and pass/fail diagnostics.
+
+### Blender integration model
+
+Decision: Use Blender in headless mode as an optional local "Asset Finishing Runtime" behind NexusOS.
+
+How it runs:
+
+1. Nexus creates a job manifest JSON in workspace assets.
+2. Nexus invokes Blender headless with a deterministic Python entry script.
+3. The script executes only requested stages (cleanup, UV, baking, rigging, validation).
+4. Script writes outputs + diagnostics JSON to workspace paths.
+5. Nexus streams status and logs to the same runtime-jobs UI used for other long tasks.
+
+Representative invocation shape:
+
+- `blender -b -P blender_pipeline.py -- --manifest <manifest.json>`
+
+### Headless feasibility
+
+Yes, this works fully headless for the core pipeline.
+
+- Mesh cleanup, UV unwrap, material assignment, texture baking, and export can run without GUI.
+- Auto-rigging can run headless if implemented via deterministic scripts/add-ons.
+- Manual artist overrides remain possible by opening the intermediate `.blend` file later.
+
+### Suggested Nexus job contract
+
+Job inputs:
+
+- workspaceId
+- source mesh path
+- optional source image path
+- target profile (`draft`, `game-ready-low`, `game-ready-med`, `game-ready-high`)
+- requested stages list
+- output format list (`glb`, `fbx`, `obj`)
+
+Job outputs:
+
+- output asset files
+- texture map files
+- diagnostics JSON
+- stage timings and error summaries
+
+### Safety and anti-bloat rules for Blender runtime
+
+1. Disabled by default; enabled per workspace/harness/tool card.
+2. Path sandboxing: operate only under active workspace assets directories.
+3. Hard execution timeouts and cancel support.
+4. Strict dependency checks and friendly fallback to draft mesh when unavailable.
+5. Version-pinned scripts for reproducibility.
+
+### Recommended rollout
+
+1. Milestone 1: Stage B + Stage C (cleanup + UV).
+2. Milestone 2: Stage D (PBR baking and packaged GLB).
+3. Milestone 3: Stage E humanoid auto-rig with validation gates.
+4. Milestone 4: Engine-target presets and one-click export packs.
