@@ -1127,6 +1127,30 @@ button:disabled {
   color: var(--bad);
 }
 
+.model3d-animation-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.model3d-animation-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model3d-animation-controls select {
+  min-width: 140px;
+}
+
+.model3d-loop-toggle {
+  border: 1px solid rgba(47, 71, 79, 0.45);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: rgba(18, 29, 35, 0.52);
+}
+
 .runtime-ready {
   color: #4db286;
   font-weight: 600;

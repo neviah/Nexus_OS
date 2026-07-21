@@ -806,9 +806,45 @@ function disposeObject3d(root: THREE.Object3D): void {
   });
 }
 
-function Model3dViewport(props: { modelUrl: string; format: "glb" | "obj" }): ReactElement {
+function Model3dViewport(props: { modelUrl: string; format: "glb" | "obj"; interactiveAnimations?: boolean }): ReactElement {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [clipNames, setClipNames] = useState<string[]>([]);
+  const [activeClipIndex, setActiveClipIndex] = useState(0);
+  const [playing, setPlaying] = useState(true);
+  const [loopEnabled, setLoopEnabled] = useState(true);
+  const mixerRef = useRef<THREE.AnimationMixer | null>(null);
+  const actionsRef = useRef<THREE.AnimationAction[]>([]);
+  const playingRef = useRef(true);
+
+  useEffect(() => {
+    playingRef.current = playing;
+  }, [playing]);
+
+  useEffect(() => {
+    const actions = actionsRef.current;
+    if (!props.interactiveAnimations || actions.length === 0) {
+      return;
+    }
+
+    actions.forEach((action, index) => {
+      const isActive = index === activeClipIndex;
+      action.enabled = isActive;
+      action.clampWhenFinished = !loopEnabled;
+      action.setLoop(loopEnabled ? THREE.LoopRepeat : THREE.LoopOnce, loopEnabled ? Infinity : 1);
+      if (!isActive) {
+        action.stop();
+      }
+    });
+
+    const current = actions[activeClipIndex];
+    if (!current) {
+      return;
+    }
+
+    current.reset().play();
+    current.paused = !playing;
+  }, [activeClipIndex, loopEnabled, playing, props.interactiveAnimations]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -819,6 +855,14 @@ function Model3dViewport(props: { modelUrl: string; format: "glb" | "obj" }): Re
     let disposed = false;
     let animationFrame = 0;
     let loadedModel: THREE.Object3D | null = null;
+    const clock = new THREE.Clock();
+
+    setClipNames([]);
+    setActiveClipIndex(0);
+    setPlaying(Boolean(props.interactiveAnimations));
+    setLoopEnabled(true);
+    actionsRef.current = [];
+    mixerRef.current = null;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#0c1419");
@@ -882,6 +926,12 @@ function Model3dViewport(props: { modelUrl: string; format: "glb" | "obj" }): Re
       if (disposed) {
         return;
       }
+      const mixer = mixerRef.current;
+      if (mixer) {
+        mixer.update(clock.getDelta() * (playingRef.current ? 1 : 0));
+      } else {
+        clock.getDelta();
+      }
       controls.update();
       renderer.render(scene, camera);
       animationFrame = window.requestAnimationFrame(animate);
@@ -895,6 +945,21 @@ function Model3dViewport(props: { modelUrl: string; format: "glb" | "obj" }): Re
           const loader = new GLTFLoader();
           const gltf = await loader.loadAsync(props.modelUrl);
           rootObject = gltf.scene;
+          if (props.interactiveAnimations && gltf.animations.length > 0) {
+            const names = gltf.animations.map((clip, index) => clip.name?.trim() || `Clip ${index + 1}`);
+            setClipNames(names);
+            setActiveClipIndex(0);
+            setPlaying(true);
+            setLoopEnabled(true);
+            const mixer = new THREE.AnimationMixer(rootObject);
+            mixerRef.current = mixer;
+            actionsRef.current = gltf.animations.map((clip) => {
+              const action = mixer.clipAction(clip);
+              action.enabled = false;
+              action.setLoop(THREE.LoopRepeat, Infinity);
+              return action;
+            });
+          }
         } else {
           const loader = new OBJLoader();
           rootObject = await loader.loadAsync(props.modelUrl);
@@ -923,6 +988,11 @@ function Model3dViewport(props: { modelUrl: string; format: "glb" | "obj" }): Re
       observer.disconnect();
       window.cancelAnimationFrame(animationFrame);
       controls.dispose();
+      if (mixerRef.current) {
+        mixerRef.current.stopAllAction();
+      }
+      mixerRef.current = null;
+      actionsRef.current = [];
       if (loadedModel) {
         scene.remove(loadedModel);
         disposeObject3d(loadedModel);
@@ -930,12 +1000,31 @@ function Model3dViewport(props: { modelUrl: string; format: "glb" | "obj" }): Re
       renderer.dispose();
       container.innerHTML = "";
     };
-  }, [props.format, props.modelUrl]);
+  }, [props.format, props.interactiveAnimations, props.modelUrl]);
 
   return (
     <div className="model3d-viewport-shell">
       <div className="model3d-viewport-canvas" ref={containerRef} />
       <small>Controls: left drag = pan camera, right drag = orbit model, wheel = zoom.</small>
+      {props.interactiveAnimations && clipNames.length > 0 ? (
+        <div className="model3d-animation-controls">
+          <button type="button" className="ghost" onClick={() => setPlaying((current) => !current)}>
+            {playing ? "Pause" : "Play"}
+          </button>
+          <label>
+            <span>Clip</span>
+            <select value={activeClipIndex} onChange={(event) => setActiveClipIndex(Number(event.target.value || 0))}>
+              {clipNames.map((name, index) => (
+                <option key={`${name}-${index}`} value={index}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="model3d-loop-toggle">
+            <input type="checkbox" checked={loopEnabled} onChange={(event) => setLoopEnabled(event.target.checked)} />
+            <span>Loop</span>
+          </label>
+        </div>
+      ) : null}
       {loadError ? <small className="model3d-viewport-error">Preview load failed: {loadError}</small> : null}
     </div>
   );
@@ -5715,7 +5804,7 @@ function App() {
                             <small>Source Model: {draft.sourceModel ?? "(none)"}</small>
                             {draft.modelUrl && draft.format ? (
                               <>
-                                <Model3dViewport modelUrl={draft.modelUrl} format={draft.format} />
+                                <Model3dViewport modelUrl={draft.modelUrl} format={draft.format} interactiveAnimations />
                                 {draft.relativePath ? <small>Saved: {draft.relativePath}</small> : null}
                               </>
                             ) : null}
