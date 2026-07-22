@@ -703,6 +703,57 @@ type GameCreatorCanonDocsGenerationResult = {
   specPackage: GameCreatorSpecPackage;
 };
 
+type GameCreatorCanonDocStatusRecord = {
+  fileName: string;
+  relativePath: string;
+  version: number;
+  locked: boolean;
+  reviewStatus: "pending" | "approved" | "rejected";
+  reviewNote?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  updatedAt: string;
+  lastGeneratedAt?: string;
+  lastGenerationStrategy?: GameCreatorDocGenerationStrategy;
+  lastHarnessIds?: string[];
+  snapshotCount?: number;
+};
+
+type GameCreatorCanonDocSnapshot = {
+  id: string;
+  fileName: string;
+  version: number;
+  relativePath: string;
+  createdAt: string;
+};
+
+type GameCreatorCanonDocStatusItem = {
+  fileName: string;
+  title: string;
+  relativePath: string;
+  exists: boolean;
+  record: GameCreatorCanonDocStatusRecord;
+  snapshots: GameCreatorCanonDocSnapshot[];
+};
+
+type GameCreatorCanonDocsStatusResponse = {
+  ok: boolean;
+  workspaceId: string;
+  workspacePath: string;
+  status: GameCreatorCanonDocStatusItem[];
+  specPackage: GameCreatorSpecPackage;
+};
+
+type GameCreatorSingleDocRegenerateResponse = {
+  ok: boolean;
+  fileName: string;
+  relativePath: string;
+  strategy: GameCreatorDocGenerationStrategy;
+  harnessesUsed: Array<{ id: string; name: string }>;
+  warnings: string[];
+  status: GameCreatorCanonDocStatusItem[];
+};
+
 type ConnectorCard = {
   id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox";
   name: string;
@@ -1230,6 +1281,8 @@ function App() {
   const [gameCreatorPrimaryHarnessId, setGameCreatorPrimaryHarnessId] = useState("");
   const [gameCreatorDocGenerationBusy, setGameCreatorDocGenerationBusy] = useState(false);
   const [gameCreatorDocGenerationResult, setGameCreatorDocGenerationResult] = useState<GameCreatorCanonDocsGenerationResult | null>(null);
+  const [gameCreatorCanonDocsStatus, setGameCreatorCanonDocsStatus] = useState<GameCreatorCanonDocStatusItem[]>([]);
+  const [gameCreatorReviewBusyKey, setGameCreatorReviewBusyKey] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -2217,6 +2270,7 @@ function App() {
       if (!gameCreatorPrimaryHarnessId.trim()) {
         setGameCreatorPrimaryHarnessId(payload.draft.preferredDocHarnesses[0] ?? "");
       }
+      await loadGameCreatorCanonDocsStatus();
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2289,6 +2343,9 @@ function App() {
       const payload = (await response.json()) as GameCreatorCanonDocsGenerationResult;
       setGameCreatorDocGenerationResult(payload);
       setGameCreatorSpecPackage(payload.specPackage);
+      if ((payload as GameCreatorCanonDocsGenerationResult & { status?: GameCreatorCanonDocStatusItem[] }).status) {
+        setGameCreatorCanonDocsStatus((payload as GameCreatorCanonDocsGenerationResult & { status?: GameCreatorCanonDocStatusItem[] }).status ?? []);
+      }
       setStatusMessage(`Generated ${payload.generatedFiles.length} canon docs.`);
       pushToast(`Generated ${payload.generatedFiles.length} canon docs.`, "ok");
       if (payload.warnings.length > 0) {
@@ -2299,6 +2356,119 @@ function App() {
       pushToast(String(error), "err");
     } finally {
       setGameCreatorDocGenerationBusy(false);
+    }
+  }
+
+  async function loadGameCreatorCanonDocsStatus() {
+    const response = await fetch(`/api/tools/game-creator/canon-docs/status?workspaceId=${encodeURIComponent(boot?.activeWorkspaceId ?? "")}`);
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as GameCreatorCanonDocsStatusResponse;
+    setGameCreatorCanonDocsStatus(payload.status ?? []);
+  }
+
+  async function updateGameCreatorCanonDocDecision(fileName: string, decision: "approved" | "rejected" | "pending") {
+    const key = `${fileName}:decision:${decision}`;
+    setGameCreatorReviewBusyKey(key);
+    try {
+      const response = await fetch(`/api/tools/game-creator/canon-docs/${encodeURIComponent(fileName)}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          decision,
+          reviewedBy: "user",
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to update doc review status.");
+      }
+      const payload = (await response.json()) as { ok: boolean; status: GameCreatorCanonDocStatusItem[] };
+      setGameCreatorCanonDocsStatus(payload.status ?? []);
+      pushToast(`${fileName} marked ${decision}.`, decision === "approved" ? "ok" : decision === "rejected" ? "warn" : "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorReviewBusyKey(null);
+    }
+  }
+
+  async function toggleGameCreatorCanonDocLock(fileName: string, locked: boolean) {
+    const key = `${fileName}:lock`;
+    setGameCreatorReviewBusyKey(key);
+    try {
+      const response = await fetch(`/api/tools/game-creator/canon-docs/${encodeURIComponent(fileName)}/lock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, locked }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to update doc lock state.");
+      }
+      const payload = (await response.json()) as { ok: boolean; status: GameCreatorCanonDocStatusItem[] };
+      setGameCreatorCanonDocsStatus(payload.status ?? []);
+      pushToast(`${fileName} ${locked ? "locked" : "unlocked"}.`, locked ? "warn" : "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorReviewBusyKey(null);
+    }
+  }
+
+  async function snapshotGameCreatorCanonDoc(fileName: string) {
+    const key = `${fileName}:snapshot`;
+    setGameCreatorReviewBusyKey(key);
+    try {
+      const response = await fetch(`/api/tools/game-creator/canon-docs/${encodeURIComponent(fileName)}/snapshot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to snapshot canon doc.");
+      }
+      const payload = (await response.json()) as { ok: boolean; status: GameCreatorCanonDocStatusItem[] };
+      setGameCreatorCanonDocsStatus(payload.status ?? []);
+      pushToast(`${fileName} snapshot created.`, "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorReviewBusyKey(null);
+    }
+  }
+
+  async function regenerateSingleGameCreatorCanonDoc(fileName: string) {
+    const key = `${fileName}:regen`;
+    setGameCreatorReviewBusyKey(key);
+    try {
+      const response = await fetch(`/api/tools/game-creator/canon-docs/${encodeURIComponent(fileName)}/regenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          strategy: gameCreatorDocGenerationStrategy,
+          primaryHarnessId: gameCreatorPrimaryHarnessId.trim() || undefined,
+        }),
+      });
+      if (!response.ok) {
+        const errorPayload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errorPayload.error ?? "Failed to regenerate doc.");
+      }
+      const payload = (await response.json()) as GameCreatorSingleDocRegenerateResponse;
+      setGameCreatorCanonDocsStatus(payload.status ?? []);
+      pushToast(`${fileName} regenerated.`, "ok");
+      if (payload.warnings.length > 0) {
+        pushToast(`${fileName} regenerated with warnings.`, "warn");
+      }
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorReviewBusyKey(null);
     }
   }
 
@@ -6273,27 +6443,31 @@ function App() {
               <section className="tool-section">
                 <h3>Step 2: Generate Canon Docs</h3>
                 <div className="stable-audio-form">
-                  <label>
-                    <span>Generation Strategy</span>
-                    <select value={gameCreatorDocGenerationStrategy} onChange={(event) => setGameCreatorDocGenerationStrategy(event.target.value as GameCreatorDocGenerationStrategy)}>
-                      <option value="template-only">Template only (fastest)</option>
-                      <option value="single-harness">Single harness</option>
-                      <option value="selected-harnesses">Selected harnesses from wizard</option>
-                      <option value="all-online-harnesses">All online harnesses</option>
-                    </select>
-                  </label>
-
-                  {gameCreatorDocGenerationStrategy === "single-harness" ? (
+                  <small>Default mode uses selected harnesses from Step 1 and keeps complexity low.</small>
+                  <details>
+                    <summary>Advanced generation strategy</summary>
                     <label>
-                      <span>Primary Harness</span>
-                      <select value={gameCreatorPrimaryHarnessId} onChange={(event) => setGameCreatorPrimaryHarnessId(event.target.value)}>
-                        <option value="">Auto (first online)</option>
-                        {(boot?.harnesses ?? []).map((harness) => (
-                          <option key={harness.id} value={harness.id}>{harness.name} ({harness.status})</option>
-                        ))}
+                      <span>Generation Strategy</span>
+                      <select value={gameCreatorDocGenerationStrategy} onChange={(event) => setGameCreatorDocGenerationStrategy(event.target.value as GameCreatorDocGenerationStrategy)}>
+                        <option value="selected-harnesses">Selected harnesses from wizard</option>
+                        <option value="template-only">Template only (fastest)</option>
+                        <option value="single-harness">Single harness</option>
+                        <option value="all-online-harnesses">All online harnesses</option>
                       </select>
                     </label>
-                  ) : null}
+
+                    {gameCreatorDocGenerationStrategy === "single-harness" ? (
+                      <label>
+                        <span>Primary Harness</span>
+                        <select value={gameCreatorPrimaryHarnessId} onChange={(event) => setGameCreatorPrimaryHarnessId(event.target.value)}>
+                          <option value="">Auto (first online)</option>
+                          {(boot?.harnesses ?? []).map((harness) => (
+                            <option key={harness.id} value={harness.id}>{harness.name} ({harness.status})</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                  </details>
 
                   <small>Output location: docs/game-creator inside the active workspace.</small>
 
@@ -6317,6 +6491,43 @@ function App() {
                     ))}
                   </div>
                 ) : null}
+              </section>
+
+              <section className="tool-section">
+                <div className="tool-header-row">
+                  <h3>Step 3: Review, Lock, and Version</h3>
+                  <button type="button" className="ghost" onClick={() => void loadGameCreatorCanonDocsStatus()} disabled={gameCreatorReviewBusyKey !== null}>
+                    Refresh Doc Status
+                  </button>
+                </div>
+                {gameCreatorCanonDocsStatus.length === 0 ? (
+                  <small>No canon docs status yet. Run Step 2 first.</small>
+                ) : (
+                  <ul className="tool-list">
+                    {gameCreatorCanonDocsStatus.map((entry) => {
+                      const statusTone = entry.record.reviewStatus === "approved" ? "runtime-ready" : entry.record.reviewStatus === "rejected" ? "runtime-warning" : "side-status";
+                      const busy = Boolean(gameCreatorReviewBusyKey && gameCreatorReviewBusyKey.startsWith(`${entry.fileName}:`));
+                      return (
+                        <li key={entry.fileName}>
+                          <strong>{entry.fileName}</strong>
+                          <small>{entry.title}</small>
+                          <small>Path: {entry.relativePath}</small>
+                          <small className={statusTone}>Review: {entry.record.reviewStatus} · Version: v{entry.record.version} · Locked: {entry.record.locked ? "yes" : "no"}</small>
+                          <small>Snapshots: {entry.snapshots.length} · Last generated: {entry.record.lastGeneratedAt ? new Date(entry.record.lastGeneratedAt).toLocaleString() : "n/a"}</small>
+                          {entry.record.reviewNote ? <small>Note: {entry.record.reviewNote}</small> : null}
+                          <div className="tool-action-row">
+                            <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "approved")} disabled={busy}>Approve</button>
+                            <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "rejected")} disabled={busy}>Reject</button>
+                            <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "pending")} disabled={busy}>Reset Review</button>
+                            <button type="button" className="ghost" onClick={() => void toggleGameCreatorCanonDocLock(entry.fileName, !entry.record.locked)} disabled={busy}>{entry.record.locked ? "Unlock" : "Lock"}</button>
+                            <button type="button" className="ghost" onClick={() => void snapshotGameCreatorCanonDoc(entry.fileName)} disabled={busy || !entry.exists}>Snapshot</button>
+                            <button type="button" className="ghost" onClick={() => void regenerateSingleGameCreatorCanonDoc(entry.fileName)} disabled={busy || entry.record.locked}>Regenerate</button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
               </section>
 
               <section className="tool-section">

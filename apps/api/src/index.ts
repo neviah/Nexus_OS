@@ -381,10 +381,37 @@ type CanonDocFile = {
   content: string;
 };
 
+type GameCreatorCanonDocRecord = {
+  fileName: string;
+  relativePath: string;
+  version: number;
+  locked: boolean;
+  reviewStatus: "pending" | "approved" | "rejected";
+  reviewNote?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  updatedAt: string;
+  lastGeneratedAt?: string;
+  lastGenerationStrategy?: GameCreatorDocGenerationStrategy;
+  lastHarnessIds?: string[];
+  snapshotCount?: number;
+};
+
+type GameCreatorCanonDocSnapshot = {
+  id: string;
+  fileName: string;
+  version: number;
+  relativePath: string;
+  createdAt: string;
+};
+
+const GAME_CREATOR_CANON_DOC_ROOT = "docs/game-creator";
+const GAME_CREATOR_CANON_DOC_VERSION_ROOT = "docs/game-creator/.versions";
+
 function buildCanonDocTemplateFiles(spec: GameCreatorSpecPackage): CanonDocFile[] {
   const d = spec.setupWizard;
   const generatedAt = spec.generatedAt;
-  const root = "docs/game-creator";
+  const root = GAME_CREATOR_CANON_DOC_ROOT;
   const make = (fileName: string, title: string, body: string): CanonDocFile => ({
     fileName,
     title,
@@ -405,6 +432,188 @@ function buildCanonDocTemplateFiles(spec: GameCreatorSpecPackage): CanonDocFile[
     make("DIFFICULTY_CURVE.md", "Difficulty Curve", `## Curve Goals\n- Target difficulty: ${d.difficultyTarget}.\n- Keep early onboarding readable; scale complexity per scope tier ${d.scopeTier}.\n\n## Encounter Density\n- Tie wave density and composition to enemy family count (${d.enemyFamilies}).\n\n## Failure/Recovery\n- Define failure costs and recovery windows by progression phase.\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
     make("CANON_DOC_INDEX.md", "Canon Doc Index", `## Canon Files\n- GAME_BIBLE.md\n- TECHNICAL_DESIGN.md\n- UI_UX_SPEC.md\n- CONTROLS_CAMERA_SPEC.md\n- ART_BIBLE.md\n- LORE_BOOK.md\n- AUDIO_BIBLE.md\n- PRODUCTION_PLAN.md\n- ENEMY_ROSTER.md\n- DIFFICULTY_CURVE.md\n\n## Source\n- Setup wizard version: ${d.version}\n- Generated: ${generatedAt}\n- Target: ${d.target}\n\n## Warnings\n${spec.scopeWarnings.length ? spec.scopeWarnings.map((w) => `- ${w}`).join("\n") : "- none"}`),
   ];
+}
+
+function getGameCreatorCanonDocsStore(state: SystemState): {
+  records: Record<string, GameCreatorCanonDocRecord>;
+  snapshots: GameCreatorCanonDocSnapshot[];
+} {
+  const records = state.gameCreator?.canonDocs?.records ?? {};
+  const snapshots = state.gameCreator?.canonDocs?.snapshots ?? [];
+  return { records, snapshots };
+}
+
+function writeGameCreatorCanonDocsStore(state: SystemState, input: {
+  records: Record<string, GameCreatorCanonDocRecord>;
+  snapshots: GameCreatorCanonDocSnapshot[];
+}): void {
+  state.gameCreator = {
+    ...(state.gameCreator ?? {}),
+    canonDocs: {
+      records: input.records,
+      snapshots: input.snapshots,
+    },
+  };
+}
+
+function createDefaultCanonDocRecord(file: CanonDocFile): GameCreatorCanonDocRecord {
+  return {
+    fileName: file.fileName,
+    relativePath: file.relativePath,
+    version: 1,
+    locked: false,
+    reviewStatus: "pending",
+    updatedAt: new Date().toISOString(),
+    snapshotCount: 0,
+  };
+}
+
+function findTemplateCanonDoc(spec: GameCreatorSpecPackage, fileName: string): CanonDocFile | null {
+  const templates = buildCanonDocTemplateFiles(spec);
+  return templates.find((entry) => entry.fileName === fileName) ?? null;
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function snapshotCanonDoc(input: {
+  state: SystemState;
+  workspacePath: string;
+  file: CanonDocFile;
+  records: Record<string, GameCreatorCanonDocRecord>;
+  snapshots: GameCreatorCanonDocSnapshot[];
+}): Promise<{ record: GameCreatorCanonDocRecord; snapshot: GameCreatorCanonDocSnapshot }> {
+  const existing = input.records[input.file.fileName] ?? createDefaultCanonDocRecord(input.file);
+  const sourcePath = safeWorkspaceJoin(input.workspacePath, input.file.relativePath);
+  if (!(await fileExists(sourcePath))) {
+    throw new Error(`Cannot snapshot missing file: ${input.file.relativePath}`);
+  }
+
+  const nextVersion = Math.max(1, Number(existing.version || 1)) + 1;
+  const snapshotFileName = input.file.fileName.replace(/\.md$/i, `.v${nextVersion}.md`);
+  const snapshotRelativePath = `${GAME_CREATOR_CANON_DOC_VERSION_ROOT}/${snapshotFileName}`;
+  const snapshotAbsolutePath = safeWorkspaceJoin(input.workspacePath, snapshotRelativePath);
+  await fs.mkdir(path.dirname(snapshotAbsolutePath), { recursive: true });
+  await fs.copyFile(sourcePath, snapshotAbsolutePath);
+
+  const now = new Date().toISOString();
+  const snapshot: GameCreatorCanonDocSnapshot = {
+    id: crypto.randomUUID(),
+    fileName: input.file.fileName,
+    version: nextVersion,
+    relativePath: snapshotRelativePath,
+    createdAt: now,
+  };
+
+  const updatedRecord: GameCreatorCanonDocRecord = {
+    ...existing,
+    version: nextVersion,
+    updatedAt: now,
+    snapshotCount: Number(existing.snapshotCount ?? 0) + 1,
+  };
+
+  input.records[input.file.fileName] = updatedRecord;
+  input.snapshots.unshift(snapshot);
+  writeGameCreatorCanonDocsStore(input.state, {
+    records: input.records,
+    snapshots: input.snapshots.slice(0, 200),
+  });
+
+  return { record: updatedRecord, snapshot };
+}
+
+async function generateCanonDocContent(input: {
+  specPackage: GameCreatorSpecPackage;
+  state: SystemState;
+  workspace: { id: string; path: string };
+  strategy: GameCreatorDocGenerationStrategy;
+  preferredHarnessIds: string[];
+  primaryHarnessId?: string;
+  file: CanonDocFile;
+}): Promise<{ content: string; harnessesUsed: Array<{ id: string; name: string }>; warnings: string[] }> {
+  const harnesses = await resolveHarnessesForDocGeneration({
+    strategy: input.strategy,
+    state: input.state,
+    primaryHarnessId: input.primaryHarnessId,
+    preferredHarnessIds: input.preferredHarnessIds,
+  });
+
+  const variants: Array<{ harnessId: string; content: string }> = [];
+  const warnings: string[] = [];
+  const templates = buildCanonDocTemplateFiles(input.specPackage);
+
+  for (const harness of harnesses) {
+    try {
+      const prompt = buildCanonDocGenerationPrompt({
+        spec: input.specPackage,
+        templates,
+        fileName: input.file.fileName,
+        title: input.file.title,
+      });
+      const harnessContent = await generateCanonDocWithHarness({
+        harness,
+        state: input.state,
+        workspace: input.workspace,
+        prompt,
+      });
+      if (harnessContent.trim()) {
+        variants.push({ harnessId: harness.id, content: harnessContent });
+      }
+    } catch (error) {
+      warnings.push(`Harness ${harness.id} failed on ${input.file.fileName}: ${String(error)}`);
+    }
+  }
+
+  return {
+    content: mergeCanonDocVariants(input.file.content, variants),
+    harnessesUsed: harnesses.map((entry) => ({ id: entry.id, name: entry.name })),
+    warnings,
+  };
+}
+
+async function readCanonDocStatus(input: {
+  workspacePath: string;
+  files: CanonDocFile[];
+  records: Record<string, GameCreatorCanonDocRecord>;
+  snapshots: GameCreatorCanonDocSnapshot[];
+}): Promise<Array<{
+  fileName: string;
+  title: string;
+  relativePath: string;
+  exists: boolean;
+  record: GameCreatorCanonDocRecord;
+  snapshots: GameCreatorCanonDocSnapshot[];
+}>> {
+  const rows: Array<{
+    fileName: string;
+    title: string;
+    relativePath: string;
+    exists: boolean;
+    record: GameCreatorCanonDocRecord;
+    snapshots: GameCreatorCanonDocSnapshot[];
+  }> = [];
+
+  for (const file of input.files) {
+    const absolutePath = safeWorkspaceJoin(input.workspacePath, file.relativePath);
+    const exists = await fileExists(absolutePath);
+    const record = input.records[file.fileName] ?? createDefaultCanonDocRecord(file);
+    const rowSnapshots = input.snapshots.filter((entry) => entry.fileName === file.fileName);
+    rows.push({
+      fileName: file.fileName,
+      title: file.title,
+      relativePath: file.relativePath,
+      exists,
+      record,
+      snapshots: rowSnapshots,
+    });
+  }
+  return rows;
 }
 
 function buildCanonDocGenerationPrompt(input: {
@@ -2312,63 +2521,280 @@ app.post("/api/tools/game-creator/canon-docs/generate", async (req, res) => {
   const draft = readGameCreatorDraft(state);
   const specPackage = buildGameCreatorSpecPackage(draft);
   const templates = buildCanonDocTemplateFiles(specPackage);
+  const canonStore = getGameCreatorCanonDocsStore(state);
+  const records = { ...canonStore.records };
+  const snapshots = [...canonStore.snapshots];
   const strategy = pickEnumValue(
     body.strategy,
     ["template-only", "single-harness", "selected-harnesses", "all-online-harnesses"] as const,
     "selected-harnesses",
   );
 
-  const harnesses = await resolveHarnessesForDocGeneration({
-    strategy,
-    state,
-    primaryHarnessId: body.primaryHarnessId,
-    preferredHarnessIds: draft.preferredDocHarnesses,
-  });
-
   const warnings: string[] = [];
   const generatedFiles: Array<{ fileName: string; relativePath: string }> = [];
+  const harnessesUsedById = new Map<string, { id: string; name: string }>();
 
   for (const file of templates) {
-    const variants: Array<{ harnessId: string; content: string }> = [];
-
-    for (const harness of harnesses) {
-      try {
-        const prompt = buildCanonDocGenerationPrompt({
-          spec: specPackage,
-          templates,
-          fileName: file.fileName,
-          title: file.title,
-        });
-        const harnessContent = await generateCanonDocWithHarness({
-          harness,
-          state,
-          workspace,
-          prompt,
-        });
-        if (harnessContent.trim()) {
-          variants.push({ harnessId: harness.id, content: harnessContent });
-        }
-      } catch (error) {
-        warnings.push(`Harness ${harness.id} failed on ${file.fileName}: ${String(error)}`);
-      }
+    const existingRecord = records[file.fileName] ?? createDefaultCanonDocRecord(file);
+    if (existingRecord.locked) {
+      warnings.push(`Skipped locked doc ${file.fileName}.`);
+      continue;
     }
 
-    const mergedContent = mergeCanonDocVariants(file.content, variants);
+    const generated = await generateCanonDocContent({
+      specPackage,
+      state,
+      workspace,
+      strategy,
+      preferredHarnessIds: draft.preferredDocHarnesses,
+      primaryHarnessId: body.primaryHarnessId,
+      file,
+    });
+
+    generated.warnings.forEach((warning) => warnings.push(warning));
+    generated.harnessesUsed.forEach((entry) => harnessesUsedById.set(entry.id, entry));
+
+    const mergedContent = generated.content;
     const targetPath = safeWorkspaceJoin(workspace.path, file.relativePath);
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
     await fs.writeFile(targetPath, mergedContent, "utf-8");
+
+    records[file.fileName] = {
+      ...existingRecord,
+      fileName: file.fileName,
+      relativePath: file.relativePath,
+      reviewStatus: "pending",
+      updatedAt: new Date().toISOString(),
+      lastGeneratedAt: new Date().toISOString(),
+      lastGenerationStrategy: strategy,
+      lastHarnessIds: generated.harnessesUsed.map((entry) => entry.id),
+    };
+
     generatedFiles.push({ fileName: file.fileName, relativePath: file.relativePath });
   }
+
+  writeGameCreatorCanonDocsStore(state, { records, snapshots });
+  await writeSystemState(state);
+
+  const status = await readCanonDocStatus({
+    workspacePath: workspace.path,
+    files: templates,
+    records,
+    snapshots,
+  });
 
   res.json({
     ok: true,
     workspaceId: workspace.id,
     workspacePath: workspace.path,
     strategy,
-    harnessesUsed: harnesses.map((entry) => ({ id: entry.id, name: entry.name })),
+    harnessesUsed: Array.from(harnessesUsedById.values()),
     generatedFiles,
     warnings,
     specPackage,
+    status,
+  });
+});
+
+app.get("/api/tools/game-creator/canon-docs/status", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim();
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const files = buildCanonDocTemplateFiles(specPackage);
+  const canonStore = getGameCreatorCanonDocsStore(state);
+  const status = await readCanonDocStatus({
+    workspacePath: workspace.path,
+    files,
+    records: canonStore.records,
+    snapshots: canonStore.snapshots,
+  });
+
+  res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    status,
+    specPackage,
+  });
+});
+
+app.post("/api/tools/game-creator/canon-docs/:fileName/decision", async (req, res) => {
+  const body = req.body as {
+    workspaceId?: string;
+    decision?: "approved" | "rejected" | "pending";
+    note?: string;
+    reviewedBy?: string;
+  };
+
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const file = findTemplateCanonDoc(specPackage, req.params.fileName);
+  if (!file) {
+    return res.status(404).json({ error: "Unknown canon doc file." });
+  }
+
+  const store = getGameCreatorCanonDocsStore(state);
+  const records = { ...store.records };
+  const record = records[file.fileName] ?? createDefaultCanonDocRecord(file);
+  const decision = pickEnumValue(body.decision, ["approved", "rejected", "pending"] as const, "pending");
+  records[file.fileName] = {
+    ...record,
+    reviewStatus: decision,
+    reviewNote: typeof body.note === "string" ? body.note.trim().slice(0, 2000) : "",
+    reviewedBy: typeof body.reviewedBy === "string" && body.reviewedBy.trim() ? body.reviewedBy.trim().slice(0, 120) : "user",
+    reviewedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeGameCreatorCanonDocsStore(state, { records, snapshots: store.snapshots });
+  await writeSystemState(state);
+
+  const status = await readCanonDocStatus({
+    workspacePath: workspace.path,
+    files: buildCanonDocTemplateFiles(specPackage),
+    records,
+    snapshots: store.snapshots,
+  });
+  return res.json({ ok: true, status });
+});
+
+app.post("/api/tools/game-creator/canon-docs/:fileName/lock", async (req, res) => {
+  const body = req.body as { workspaceId?: string; locked?: boolean };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const file = findTemplateCanonDoc(specPackage, req.params.fileName);
+  if (!file) {
+    return res.status(404).json({ error: "Unknown canon doc file." });
+  }
+
+  const store = getGameCreatorCanonDocsStore(state);
+  const records = { ...store.records };
+  const record = records[file.fileName] ?? createDefaultCanonDocRecord(file);
+  records[file.fileName] = {
+    ...record,
+    locked: Boolean(body.locked),
+    updatedAt: new Date().toISOString(),
+  };
+  writeGameCreatorCanonDocsStore(state, { records, snapshots: store.snapshots });
+  await writeSystemState(state);
+
+  const status = await readCanonDocStatus({
+    workspacePath: workspace.path,
+    files: buildCanonDocTemplateFiles(specPackage),
+    records,
+    snapshots: store.snapshots,
+  });
+  return res.json({ ok: true, status });
+});
+
+app.post("/api/tools/game-creator/canon-docs/:fileName/snapshot", async (req, res) => {
+  const body = req.body as { workspaceId?: string };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const file = findTemplateCanonDoc(specPackage, req.params.fileName);
+  if (!file) {
+    return res.status(404).json({ error: "Unknown canon doc file." });
+  }
+
+  const store = getGameCreatorCanonDocsStore(state);
+  const records = { ...store.records };
+  const snapshots = [...store.snapshots];
+  const snapshot = await snapshotCanonDoc({
+    state,
+    workspacePath: workspace.path,
+    file,
+    records,
+    snapshots,
+  });
+  await writeSystemState(state);
+
+  const status = await readCanonDocStatus({
+    workspacePath: workspace.path,
+    files: buildCanonDocTemplateFiles(specPackage),
+    records,
+    snapshots,
+  });
+  return res.json({ ok: true, snapshot: snapshot.snapshot, status });
+});
+
+app.post("/api/tools/game-creator/canon-docs/:fileName/regenerate", async (req, res) => {
+  const body = req.body as {
+    workspaceId?: string;
+    strategy?: GameCreatorDocGenerationStrategy;
+    primaryHarnessId?: string;
+  };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const file = findTemplateCanonDoc(specPackage, req.params.fileName);
+  if (!file) {
+    return res.status(404).json({ error: "Unknown canon doc file." });
+  }
+
+  const strategy = pickEnumValue(
+    body.strategy,
+    ["template-only", "single-harness", "selected-harnesses", "all-online-harnesses"] as const,
+    "selected-harnesses",
+  );
+
+  const store = getGameCreatorCanonDocsStore(state);
+  const records = { ...store.records };
+  const snapshots = [...store.snapshots];
+  const existingRecord = records[file.fileName] ?? createDefaultCanonDocRecord(file);
+  if (existingRecord.locked) {
+    return res.status(409).json({ error: `${file.fileName} is locked. Unlock before regenerating.` });
+  }
+
+  const generated = await generateCanonDocContent({
+    specPackage,
+    state,
+    workspace,
+    strategy,
+    preferredHarnessIds: draft.preferredDocHarnesses,
+    primaryHarnessId: body.primaryHarnessId,
+    file,
+  });
+
+  const targetPath = safeWorkspaceJoin(workspace.path, file.relativePath);
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.writeFile(targetPath, generated.content, "utf-8");
+
+  records[file.fileName] = {
+    ...existingRecord,
+    fileName: file.fileName,
+    relativePath: file.relativePath,
+    reviewStatus: "pending",
+    updatedAt: new Date().toISOString(),
+    lastGeneratedAt: new Date().toISOString(),
+    lastGenerationStrategy: strategy,
+    lastHarnessIds: generated.harnessesUsed.map((entry) => entry.id),
+  };
+
+  writeGameCreatorCanonDocsStore(state, { records, snapshots });
+  await writeSystemState(state);
+
+  const status = await readCanonDocStatus({
+    workspacePath: workspace.path,
+    files: buildCanonDocTemplateFiles(specPackage),
+    records,
+    snapshots,
+  });
+  return res.json({
+    ok: true,
+    fileName: file.fileName,
+    relativePath: file.relativePath,
+    strategy,
+    harnessesUsed: generated.harnessesUsed,
+    warnings: generated.warnings,
+    status,
   });
 });
 

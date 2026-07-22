@@ -47,6 +47,30 @@ export type GameCreatorSetupWizardDraft = {
 
 export type GameCreatorState = {
   setupWizardDraft?: Partial<GameCreatorSetupWizardDraft>;
+  canonDocs?: {
+    records?: Record<string, {
+      fileName: string;
+      relativePath: string;
+      version: number;
+      locked: boolean;
+      reviewStatus: "pending" | "approved" | "rejected";
+      reviewNote?: string;
+      reviewedAt?: string;
+      reviewedBy?: string;
+      updatedAt: string;
+      lastGeneratedAt?: string;
+      lastGenerationStrategy?: "template-only" | "single-harness" | "selected-harnesses" | "all-online-harnesses";
+      lastHarnessIds?: string[];
+      snapshotCount?: number;
+    }>;
+    snapshots?: Array<{
+      id: string;
+      fileName: string;
+      version: number;
+      relativePath: string;
+      createdAt: string;
+    }>;
+  };
 };
 
 export type WorkspaceRecord = {
