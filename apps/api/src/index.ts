@@ -18,7 +18,12 @@ import {
 import { readHarnessRegistry, resolveHarnessHealth } from "./lib/harnessRegistry.js";
 import { getRootDir, readSystemState, writeSystemState } from "./lib/stateStore.js";
 import { getRouterSummary } from "./lib/routerStatus.js";
-import type { ChatMessage, StartupReadiness, SystemState } from "./types.js";
+import type {
+  ChatMessage,
+  GameCreatorSetupWizardDraft,
+  StartupReadiness,
+  SystemState,
+} from "./types.js";
 import { invokeHarness, streamHarness } from "./lib/harnessAdapter.js";
 import type { AdapterResult } from "./lib/harnessAdapter.js";
 import { runHarnessConformance } from "./lib/conformance.js";
@@ -227,6 +232,145 @@ type WorkspaceWriteAction = {
   path: string;
   content: string;
 };
+
+const GAME_CREATOR_TARGETS = ["unity-3d", "unity-2d", "web-2d"] as const;
+const GAME_CREATOR_GENRES = ["action-adventure", "platformer", "shooter", "rpg", "survival", "puzzle"] as const;
+const GAME_CREATOR_PERSPECTIVES = ["first-person", "third-person", "top-down", "isometric", "side-scroller"] as const;
+const GAME_CREATOR_SCOPE_TIERS = ["mini-vertical-slice", "small-prototype", "medium-prototype"] as const;
+const GAME_CREATOR_ART_STYLES = ["stylized-low-poly", "pixel-art", "hand-painted", "realistic"] as const;
+const GAME_CREATOR_NARRATIVE_DEPTHS = ["none", "light", "moderate", "lore-heavy"] as const;
+const GAME_CREATOR_CONTROL_TYPES = ["keyboard-mouse", "controller", "both"] as const;
+const GAME_CREATOR_CORE_LOOPS = ["combat", "exploration", "crafting", "puzzle", "mixed"] as const;
+const GAME_CREATOR_DIFFICULTY = ["casual", "normal", "hard"] as const;
+
+const PERSPECTIVES_BY_TARGET: Record<(typeof GAME_CREATOR_TARGETS)[number], Array<(typeof GAME_CREATOR_PERSPECTIVES)[number]>> = {
+  "unity-3d": ["third-person", "first-person", "top-down", "isometric"],
+  "unity-2d": ["side-scroller", "top-down", "isometric"],
+  "web-2d": ["side-scroller", "top-down", "isometric"],
+};
+
+type GameCreatorSpecPackage = {
+  generatedAt: string;
+  sourceDraftVersion: number;
+  setupWizard: GameCreatorSetupWizardDraft;
+  constraints: {
+    perspectivesAllowedForTarget: string[];
+    uses3dPipeline: boolean;
+    requiresExtendedLoreSections: boolean;
+    requiresControllerChecklist: boolean;
+  };
+  scopeWarnings: string[];
+};
+
+function pickEnumValue<T extends readonly string[]>(value: unknown, allowed: T, fallback: T[number]): T[number] {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  return (allowed as readonly string[]).includes(value) ? (value as T[number]) : fallback;
+}
+
+function getDefaultGameCreatorDraft(): GameCreatorSetupWizardDraft {
+  return {
+    version: 1,
+    target: "unity-3d",
+    genre: "action-adventure",
+    perspective: "third-person",
+    scopeTier: "mini-vertical-slice",
+    artStyle: "stylized-low-poly",
+    narrativeDepth: "light",
+    controls: "keyboard-mouse",
+    coreLoopPriority: "combat",
+    difficultyTarget: "casual",
+    enemyFamilies: 2,
+    biomes: 1,
+    bosses: 0,
+    preferredDocHarnesses: [],
+    notes: "",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeGameCreatorDraft(input: unknown, existing?: Partial<GameCreatorSetupWizardDraft>): GameCreatorSetupWizardDraft {
+  const base = {
+    ...getDefaultGameCreatorDraft(),
+    ...(existing ?? {}),
+  };
+  const candidate = (typeof input === "object" && input) ? input as Partial<GameCreatorSetupWizardDraft> : {};
+
+  const target = pickEnumValue(candidate.target, GAME_CREATOR_TARGETS, pickEnumValue(base.target, GAME_CREATOR_TARGETS, "unity-3d"));
+  const allowedPerspectives = PERSPECTIVES_BY_TARGET[target];
+  const requestedPerspective = pickEnumValue(candidate.perspective, GAME_CREATOR_PERSPECTIVES, pickEnumValue(base.perspective, GAME_CREATOR_PERSPECTIVES, "third-person"));
+  const perspective = allowedPerspectives.includes(requestedPerspective) ? requestedPerspective : allowedPerspectives[0];
+
+  const normalizeCount = (value: unknown, fallback: number, min: number, max: number): number => {
+    const raw = Number(value);
+    if (!Number.isFinite(raw)) {
+      return fallback;
+    }
+    return Math.min(max, Math.max(min, Math.floor(raw)));
+  };
+
+  const preferredDocHarnesses = Array.isArray(candidate.preferredDocHarnesses)
+    ? candidate.preferredDocHarnesses.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .map((entry) => entry.trim())
+      .slice(0, 5)
+    : Array.isArray(base.preferredDocHarnesses)
+      ? base.preferredDocHarnesses
+      : [];
+
+  return {
+    version: Number.isFinite(Number(candidate.version)) ? Math.max(1, Math.floor(Number(candidate.version))) : (base.version ?? 1),
+    target,
+    genre: pickEnumValue(candidate.genre, GAME_CREATOR_GENRES, pickEnumValue(base.genre, GAME_CREATOR_GENRES, "action-adventure")),
+    perspective,
+    scopeTier: pickEnumValue(candidate.scopeTier, GAME_CREATOR_SCOPE_TIERS, pickEnumValue(base.scopeTier, GAME_CREATOR_SCOPE_TIERS, "mini-vertical-slice")),
+    artStyle: pickEnumValue(candidate.artStyle, GAME_CREATOR_ART_STYLES, pickEnumValue(base.artStyle, GAME_CREATOR_ART_STYLES, "stylized-low-poly")),
+    narrativeDepth: pickEnumValue(candidate.narrativeDepth, GAME_CREATOR_NARRATIVE_DEPTHS, pickEnumValue(base.narrativeDepth, GAME_CREATOR_NARRATIVE_DEPTHS, "light")),
+    controls: pickEnumValue(candidate.controls, GAME_CREATOR_CONTROL_TYPES, pickEnumValue(base.controls, GAME_CREATOR_CONTROL_TYPES, "keyboard-mouse")),
+    coreLoopPriority: pickEnumValue(candidate.coreLoopPriority, GAME_CREATOR_CORE_LOOPS, pickEnumValue(base.coreLoopPriority, GAME_CREATOR_CORE_LOOPS, "combat")),
+    difficultyTarget: pickEnumValue(candidate.difficultyTarget, GAME_CREATOR_DIFFICULTY, pickEnumValue(base.difficultyTarget, GAME_CREATOR_DIFFICULTY, "casual")),
+    enemyFamilies: normalizeCount(candidate.enemyFamilies, Number(base.enemyFamilies ?? 2), 0, 20),
+    biomes: normalizeCount(candidate.biomes, Number(base.biomes ?? 1), 0, 12),
+    bosses: normalizeCount(candidate.bosses, Number(base.bosses ?? 0), 0, 8),
+    preferredDocHarnesses,
+    notes: typeof candidate.notes === "string" ? candidate.notes.trim().slice(0, 2000) : (typeof base.notes === "string" ? base.notes : ""),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function buildGameCreatorSpecPackage(draft: GameCreatorSetupWizardDraft): GameCreatorSpecPackage {
+  const warnings: string[] = [];
+  if (draft.scopeTier === "mini-vertical-slice" && (draft.enemyFamilies > 3 || draft.biomes > 2 || draft.bosses > 1)) {
+    warnings.push("Scope baseline may be too large for a mini vertical slice.");
+  }
+  if (draft.scopeTier === "small-prototype" && (draft.enemyFamilies > 6 || draft.biomes > 3 || draft.bosses > 2)) {
+    warnings.push("Scope baseline may be too large for a small prototype.");
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    sourceDraftVersion: draft.version,
+    setupWizard: draft,
+    constraints: {
+      perspectivesAllowedForTarget: PERSPECTIVES_BY_TARGET[draft.target],
+      uses3dPipeline: draft.target === "unity-3d",
+      requiresExtendedLoreSections: draft.narrativeDepth === "lore-heavy",
+      requiresControllerChecklist: draft.controls === "controller" || draft.controls === "both",
+    },
+    scopeWarnings: warnings,
+  };
+}
+
+function readGameCreatorDraft(state: SystemState): GameCreatorSetupWizardDraft {
+  return normalizeGameCreatorDraft(state.gameCreator?.setupWizardDraft, state.gameCreator?.setupWizardDraft);
+}
+
+function writeGameCreatorDraft(state: SystemState, draft: GameCreatorSetupWizardDraft): void {
+  state.gameCreator = {
+    ...(state.gameCreator ?? {}),
+    setupWizardDraft: draft,
+  };
+}
 
 async function resolveWorkspacePathFromState(state: SystemState, workspaceId?: string): Promise<string> {
   const resolvedId = String(workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
@@ -1970,6 +2114,7 @@ app.get("/api/bootstrap", async (_req, res) => {
       },
       { id: "cookbook", name: "Cookbook", status: "online" },
       { id: "media-center", name: "Media Center", status: mediaCenterStatus },
+      { id: "game-creator", name: "Game Creator", status: "online" },
       { id: "settings", name: "Settings", status: "online" },
     ],
     router9: getRouterSummary(state),
@@ -1991,6 +2136,33 @@ app.get("/api/tools/cookbook/scan", async (_req, res) => {
   const state = await readSystemState();
   const snapshot = await buildCookbookSnapshot(state);
   res.json(snapshot);
+});
+
+app.get("/api/tools/game-creator/setup-wizard", async (_req, res) => {
+  const state = await readSystemState();
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  res.json({ draft, specPackage });
+});
+
+app.post("/api/tools/game-creator/setup-wizard", async (req, res) => {
+  const body = req.body as { draft?: unknown };
+  const state = await readSystemState();
+  const current = readGameCreatorDraft(state);
+  const nextDraft = normalizeGameCreatorDraft(body?.draft, current);
+  writeGameCreatorDraft(state, nextDraft);
+  await writeSystemState(state);
+  const specPackage = buildGameCreatorSpecPackage(nextDraft);
+  res.json({ ok: true, draft: nextDraft, specPackage });
+});
+
+app.post("/api/tools/game-creator/setup-wizard/reset", async (_req, res) => {
+  const state = await readSystemState();
+  const draft = getDefaultGameCreatorDraft();
+  writeGameCreatorDraft(state, draft);
+  await writeSystemState(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  res.json({ ok: true, draft, specPackage });
 });
 
 app.get("/api/tools/runtimes/status", async (_req, res) => {

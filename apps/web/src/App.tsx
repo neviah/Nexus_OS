@@ -654,6 +654,42 @@ type SettingsTab = "connectors" | "appearance" | "automation";
 
 type MediaCenterTab = "voice" | "music" | "image" | "video" | "models" | "animation";
 
+type GameCreatorSetupWizardTarget = "unity-3d" | "unity-2d" | "web-2d";
+
+type GameCreatorSetupWizardPerspective = "first-person" | "third-person" | "top-down" | "isometric" | "side-scroller";
+
+type GameCreatorSetupWizardDraft = {
+  version: number;
+  target: GameCreatorSetupWizardTarget;
+  genre: "action-adventure" | "platformer" | "shooter" | "rpg" | "survival" | "puzzle";
+  perspective: GameCreatorSetupWizardPerspective;
+  scopeTier: "mini-vertical-slice" | "small-prototype" | "medium-prototype";
+  artStyle: "stylized-low-poly" | "pixel-art" | "hand-painted" | "realistic";
+  narrativeDepth: "none" | "light" | "moderate" | "lore-heavy";
+  controls: "keyboard-mouse" | "controller" | "both";
+  coreLoopPriority: "combat" | "exploration" | "crafting" | "puzzle" | "mixed";
+  difficultyTarget: "casual" | "normal" | "hard";
+  enemyFamilies: number;
+  biomes: number;
+  bosses: number;
+  preferredDocHarnesses: string[];
+  notes: string;
+  updatedAt: string;
+};
+
+type GameCreatorSpecPackage = {
+  generatedAt: string;
+  sourceDraftVersion: number;
+  setupWizard: GameCreatorSetupWizardDraft;
+  constraints: {
+    perspectivesAllowedForTarget: string[];
+    uses3dPipeline: boolean;
+    requiresExtendedLoreSections: boolean;
+    requiresControllerChecklist: boolean;
+  };
+  scopeWarnings: string[];
+};
+
 type ConnectorCard = {
   id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox";
   name: string;
@@ -1030,6 +1066,27 @@ function Model3dViewport(props: { modelUrl: string; format: "glb" | "obj"; inter
   );
 }
 
+function getDefaultGameCreatorSetupWizardDraft(): GameCreatorSetupWizardDraft {
+  return {
+    version: 1,
+    target: "unity-3d",
+    genre: "action-adventure",
+    perspective: "third-person",
+    scopeTier: "mini-vertical-slice",
+    artStyle: "stylized-low-poly",
+    narrativeDepth: "light",
+    controls: "keyboard-mouse",
+    coreLoopPriority: "combat",
+    difficultyTarget: "casual",
+    enemyFamilies: 2,
+    biomes: 1,
+    bosses: 0,
+    preferredDocHarnesses: [],
+    notes: "",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function App() {
   const [themeId, setThemeId] = useState<string>(() => {
     if (typeof window === "undefined") {
@@ -1153,6 +1210,9 @@ function App() {
   const [animationDrafts, setAnimationDrafts] = useState<AnimationDraft[]>([]);
   const [animationSelectedId, setAnimationSelectedId] = useState<string | null>(null);
   const animationGenerationAbortRef = useRef<AbortController | null>(null);
+  const [gameCreatorWizardDraft, setGameCreatorWizardDraft] = useState<GameCreatorSetupWizardDraft>(getDefaultGameCreatorSetupWizardDraft);
+  const [gameCreatorSpecPackage, setGameCreatorSpecPackage] = useState<GameCreatorSpecPackage | null>(null);
+  const [gameCreatorBusyAction, setGameCreatorBusyAction] = useState<"load" | "save" | "reset" | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -1211,6 +1271,13 @@ function App() {
 
     return "";
   }, [model3dSourceImageBase64, model3dSourceImageMime, model3dSourceImageUrl]);
+
+  const gameCreatorAllowedPerspectives = useMemo<Array<GameCreatorSetupWizardPerspective>>(() => {
+    if (gameCreatorWizardDraft.target === "unity-3d") {
+      return ["third-person", "first-person", "top-down", "isometric"];
+    }
+    return ["side-scroller", "top-down", "isometric"];
+  }, [gameCreatorWizardDraft.target]);
 
   useEffect(() => {
     const candidate = model3dResult?.relativePath?.trim() ?? "";
@@ -2118,6 +2185,70 @@ function App() {
     }
     const payload = (await response.json()) as AnimatoStatus;
     setAnimatoStatus(payload);
+  }
+
+  async function loadGameCreatorSetupWizard() {
+    setGameCreatorBusyAction("load");
+    try {
+      const response = await fetch("/api/tools/game-creator/setup-wizard");
+      if (!response.ok) {
+        throw new Error("Failed to load Game Creator setup wizard draft.");
+      }
+      const payload = (await response.json()) as { draft: GameCreatorSetupWizardDraft; specPackage: GameCreatorSpecPackage };
+      setGameCreatorWizardDraft(payload.draft);
+      setGameCreatorSpecPackage(payload.specPackage);
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorBusyAction(null);
+    }
+  }
+
+  async function saveGameCreatorSetupWizard() {
+    setGameCreatorBusyAction("save");
+    try {
+      const response = await fetch("/api/tools/game-creator/setup-wizard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draft: gameCreatorWizardDraft }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to save Game Creator setup wizard draft.");
+      }
+      const payload = (await response.json()) as { draft: GameCreatorSetupWizardDraft; specPackage: GameCreatorSpecPackage };
+      setGameCreatorWizardDraft(payload.draft);
+      setGameCreatorSpecPackage(payload.specPackage);
+      setStatusMessage("Game Creator setup draft saved.");
+      pushToast("Game Creator setup draft saved.", "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorBusyAction(null);
+    }
+  }
+
+  async function resetGameCreatorSetupWizard() {
+    setGameCreatorBusyAction("reset");
+    try {
+      const response = await fetch("/api/tools/game-creator/setup-wizard/reset", {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error("Failed to reset Game Creator setup wizard draft.");
+      }
+      const payload = (await response.json()) as { draft: GameCreatorSetupWizardDraft; specPackage: GameCreatorSpecPackage };
+      setGameCreatorWizardDraft(payload.draft);
+      setGameCreatorSpecPackage(payload.specPackage);
+      setStatusMessage("Game Creator setup draft reset to defaults.");
+      pushToast("Game Creator setup draft reset.", "warn");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorBusyAction(null);
+    }
   }
 
   async function ensureAnimatoReady(): Promise<boolean> {
@@ -3535,6 +3666,9 @@ function App() {
       void loadHunyuan3dStatus();
       void loadAnimatoStatus();
     }
+    if (selectedPane.type === "tool" && selectedPane.id === "game-creator") {
+      void loadGameCreatorSetupWizard();
+    }
     if (selectedPane.type === "tool" && selectedPane.id === "settings") {
       void loadGitStatus();
       void loadGitHubConnectorStatus();
@@ -4553,15 +4687,6 @@ function App() {
                   <span className="health setup-required" />
                   <span className="meta-block">
                     <strong>Social Media Center</strong>
-                    <small>coming soon</small>
-                  </span>
-                </button>
-              </li>
-              <li>
-                <button type="button" className="nav-item nav-item-placeholder" disabled>
-                  <span className="health setup-required" />
-                  <span className="meta-block">
-                    <strong>Game Creator</strong>
                     <small>coming soon</small>
                   </span>
                 </button>
@@ -5883,6 +6008,227 @@ function App() {
               <section className="tool-section">
                 <h3>Status Stream</h3>
                 <pre className="image-status-stream">{animationStatusTrace || "No status yet."}</pre>
+              </section>
+            </div>
+          ) : null}
+
+          {selectedPane.type === "tool" && selectedPane.id === "game-creator" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Game Creator</h2>
+                  <p className="subtitle">Step 1: Setup Wizard contract. Capture direction once, then drive downstream docs and generation from a stable spec package.</p>
+                </div>
+                <button type="button" className="ghost" onClick={() => void loadGameCreatorSetupWizard()} disabled={gameCreatorBusyAction !== null}>
+                  {gameCreatorBusyAction === "load" ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+
+              <section className="tool-section">
+                <h3>Project Setup Wizard</h3>
+                <div className="stable-audio-form">
+                  <label>
+                    <span>Target</span>
+                    <select
+                      value={gameCreatorWizardDraft.target}
+                      onChange={(event) => {
+                        const target = event.target.value as GameCreatorSetupWizardTarget;
+                        const allowed: GameCreatorSetupWizardPerspective[] = target === "unity-3d"
+                          ? ["third-person", "first-person", "top-down", "isometric"]
+                          : ["side-scroller", "top-down", "isometric"];
+                        setGameCreatorWizardDraft((current) => ({
+                          ...current,
+                          target,
+                          perspective: allowed.includes(current.perspective) ? current.perspective : allowed[0],
+                        }));
+                      }}
+                    >
+                      <option value="unity-3d">Unity 3D</option>
+                      <option value="unity-2d">Unity 2D</option>
+                      <option value="web-2d">Web 2D</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Genre</span>
+                    <select value={gameCreatorWizardDraft.genre} onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, genre: event.target.value as GameCreatorSetupWizardDraft["genre"] }))}>
+                      <option value="action-adventure">Action-adventure</option>
+                      <option value="platformer">Platformer</option>
+                      <option value="shooter">Shooter</option>
+                      <option value="rpg">RPG</option>
+                      <option value="survival">Survival</option>
+                      <option value="puzzle">Puzzle</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Perspective</span>
+                    <select
+                      value={gameCreatorWizardDraft.perspective}
+                      onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, perspective: event.target.value as GameCreatorSetupWizardPerspective }))}
+                    >
+                      {gameCreatorAllowedPerspectives.map((entry) => (
+                        <option key={entry} value={entry}>{entry}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Scope Tier</span>
+                    <select value={gameCreatorWizardDraft.scopeTier} onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, scopeTier: event.target.value as GameCreatorSetupWizardDraft["scopeTier"] }))}>
+                      <option value="mini-vertical-slice">Mini vertical slice</option>
+                      <option value="small-prototype">Small prototype</option>
+                      <option value="medium-prototype">Medium prototype</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Art Style</span>
+                    <select value={gameCreatorWizardDraft.artStyle} onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, artStyle: event.target.value as GameCreatorSetupWizardDraft["artStyle"] }))}>
+                      <option value="stylized-low-poly">Stylized low-poly</option>
+                      <option value="pixel-art">Pixel art</option>
+                      <option value="hand-painted">Hand-painted</option>
+                      <option value="realistic">Realistic</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Narrative Depth</span>
+                    <select value={gameCreatorWizardDraft.narrativeDepth} onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, narrativeDepth: event.target.value as GameCreatorSetupWizardDraft["narrativeDepth"] }))}>
+                      <option value="none">None</option>
+                      <option value="light">Light</option>
+                      <option value="moderate">Moderate</option>
+                      <option value="lore-heavy">Lore-heavy</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Controls</span>
+                    <select value={gameCreatorWizardDraft.controls} onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, controls: event.target.value as GameCreatorSetupWizardDraft["controls"] }))}>
+                      <option value="keyboard-mouse">Keyboard + mouse</option>
+                      <option value="controller">Controller</option>
+                      <option value="both">Both</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Core Loop Priority</span>
+                    <select value={gameCreatorWizardDraft.coreLoopPriority} onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, coreLoopPriority: event.target.value as GameCreatorSetupWizardDraft["coreLoopPriority"] }))}>
+                      <option value="combat">Combat</option>
+                      <option value="exploration">Exploration</option>
+                      <option value="crafting">Crafting</option>
+                      <option value="puzzle">Puzzle</option>
+                      <option value="mixed">Mixed</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>Difficulty Target</span>
+                    <select value={gameCreatorWizardDraft.difficultyTarget} onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, difficultyTarget: event.target.value as GameCreatorSetupWizardDraft["difficultyTarget"] }))}>
+                      <option value="casual">Casual</option>
+                      <option value="normal">Normal</option>
+                      <option value="hard">Hard</option>
+                    </select>
+                  </label>
+
+                  <div className="image-size-grid">
+                    <label>
+                      <span>Enemy Families</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={20}
+                        value={gameCreatorWizardDraft.enemyFamilies}
+                        onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, enemyFamilies: Math.max(0, Math.min(20, Number(event.target.value || 0))) }))}
+                      />
+                    </label>
+                    <label>
+                      <span>Biomes</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={12}
+                        value={gameCreatorWizardDraft.biomes}
+                        onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, biomes: Math.max(0, Math.min(12, Number(event.target.value || 0))) }))}
+                      />
+                    </label>
+                  </div>
+
+                  <label>
+                    <span>Bosses</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={8}
+                      value={gameCreatorWizardDraft.bosses}
+                      onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, bosses: Math.max(0, Math.min(8, Number(event.target.value || 0))) }))}
+                    />
+                  </label>
+
+                  <div>
+                    <span>Preferred Harnesses For Step 2 (Doc Generation)</span>
+                    <div className="tool-list">
+                      {(boot?.harnesses ?? []).map((harness) => {
+                        const checked = gameCreatorWizardDraft.preferredDocHarnesses.includes(harness.id);
+                        return (
+                          <label key={harness.id}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(event) => {
+                                const enabled = event.target.checked;
+                                setGameCreatorWizardDraft((current) => {
+                                  const set = new Set(current.preferredDocHarnesses);
+                                  if (enabled) {
+                                    set.add(harness.id);
+                                  } else {
+                                    set.delete(harness.id);
+                                  }
+                                  return {
+                                    ...current,
+                                    preferredDocHarnesses: Array.from(set).slice(0, 5),
+                                  };
+                                });
+                              }}
+                            />
+                            <span>{harness.name} ({harness.status})</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <label>
+                    <span>Notes</span>
+                    <textarea
+                      rows={4}
+                      value={gameCreatorWizardDraft.notes}
+                      onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, notes: event.target.value }))}
+                      placeholder="Any custom constraints, themes, or must-have ideas..."
+                    />
+                  </label>
+
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => void saveGameCreatorSetupWizard()} disabled={gameCreatorBusyAction !== null}>
+                      {gameCreatorBusyAction === "save" ? "Saving..." : "Save Setup Wizard"}
+                    </button>
+                    <button type="button" className="ghost" onClick={() => void resetGameCreatorSetupWizard()} disabled={gameCreatorBusyAction !== null}>
+                      {gameCreatorBusyAction === "reset" ? "Resetting..." : "Reset Defaults"}
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section className="tool-section">
+                <h3>Project Spec Package (Preview)</h3>
+                {gameCreatorSpecPackage?.scopeWarnings?.length ? (
+                  <div className="tool-list">
+                    {gameCreatorSpecPackage.scopeWarnings.map((warning) => (
+                      <small key={warning} className="runtime-warning">Warning: {warning}</small>
+                    ))}
+                  </div>
+                ) : <small>No scope warnings.</small>}
+                <pre className="image-status-stream">{JSON.stringify(gameCreatorSpecPackage ?? { message: "Save or refresh to generate spec package preview." }, null, 2)}</pre>
               </section>
             </div>
           ) : null}

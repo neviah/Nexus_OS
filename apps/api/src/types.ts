@@ -22,6 +22,33 @@ export type ToolConfig = {
   status: "online" | "offline" | "setup-required";
 };
 
+export type GameCreatorSetupWizardTarget = "unity-3d" | "unity-2d" | "web-2d";
+
+export type GameCreatorSetupWizardPerspective = "first-person" | "third-person" | "top-down" | "isometric" | "side-scroller";
+
+export type GameCreatorSetupWizardDraft = {
+  version: number;
+  target: GameCreatorSetupWizardTarget;
+  genre: "action-adventure" | "platformer" | "shooter" | "rpg" | "survival" | "puzzle";
+  perspective: GameCreatorSetupWizardPerspective;
+  scopeTier: "mini-vertical-slice" | "small-prototype" | "medium-prototype";
+  artStyle: "stylized-low-poly" | "pixel-art" | "hand-painted" | "realistic";
+  narrativeDepth: "none" | "light" | "moderate" | "lore-heavy";
+  controls: "keyboard-mouse" | "controller" | "both";
+  coreLoopPriority: "combat" | "exploration" | "crafting" | "puzzle" | "mixed";
+  difficultyTarget: "casual" | "normal" | "hard";
+  enemyFamilies: number;
+  biomes: number;
+  bosses: number;
+  preferredDocHarnesses: string[];
+  notes: string;
+  updatedAt: string;
+};
+
+export type GameCreatorState = {
+  setupWizardDraft?: Partial<GameCreatorSetupWizardDraft>;
+};
+
 export type WorkspaceRecord = {
   id: string;
   name: string;
@@ -87,6 +114,7 @@ export type SystemState = {
   harnessAutomation?: HarnessAutomationStore;
   harnessChats?: HarnessChatStore;
   harnessCapabilities?: Record<string, HarnessCapabilitySettings>;
+  gameCreator?: GameCreatorState;
 };
 
 export type HarnessCapabilitySettings = {
