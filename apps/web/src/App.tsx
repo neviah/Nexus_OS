@@ -690,6 +690,19 @@ type GameCreatorSpecPackage = {
   scopeWarnings: string[];
 };
 
+type GameCreatorDocGenerationStrategy = "template-only" | "single-harness" | "selected-harnesses" | "all-online-harnesses";
+
+type GameCreatorCanonDocsGenerationResult = {
+  ok: boolean;
+  workspaceId: string;
+  workspacePath: string;
+  strategy: GameCreatorDocGenerationStrategy;
+  harnessesUsed: Array<{ id: string; name: string }>;
+  generatedFiles: Array<{ fileName: string; relativePath: string }>;
+  warnings: string[];
+  specPackage: GameCreatorSpecPackage;
+};
+
 type ConnectorCard = {
   id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox";
   name: string;
@@ -1213,6 +1226,10 @@ function App() {
   const [gameCreatorWizardDraft, setGameCreatorWizardDraft] = useState<GameCreatorSetupWizardDraft>(getDefaultGameCreatorSetupWizardDraft);
   const [gameCreatorSpecPackage, setGameCreatorSpecPackage] = useState<GameCreatorSpecPackage | null>(null);
   const [gameCreatorBusyAction, setGameCreatorBusyAction] = useState<"load" | "save" | "reset" | null>(null);
+  const [gameCreatorDocGenerationStrategy, setGameCreatorDocGenerationStrategy] = useState<GameCreatorDocGenerationStrategy>("selected-harnesses");
+  const [gameCreatorPrimaryHarnessId, setGameCreatorPrimaryHarnessId] = useState("");
+  const [gameCreatorDocGenerationBusy, setGameCreatorDocGenerationBusy] = useState(false);
+  const [gameCreatorDocGenerationResult, setGameCreatorDocGenerationResult] = useState<GameCreatorCanonDocsGenerationResult | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -2197,6 +2214,9 @@ function App() {
       const payload = (await response.json()) as { draft: GameCreatorSetupWizardDraft; specPackage: GameCreatorSpecPackage };
       setGameCreatorWizardDraft(payload.draft);
       setGameCreatorSpecPackage(payload.specPackage);
+      if (!gameCreatorPrimaryHarnessId.trim()) {
+        setGameCreatorPrimaryHarnessId(payload.draft.preferredDocHarnesses[0] ?? "");
+      }
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2248,6 +2268,37 @@ function App() {
       pushToast(String(error), "err");
     } finally {
       setGameCreatorBusyAction(null);
+    }
+  }
+
+  async function generateGameCreatorCanonDocs() {
+    setGameCreatorDocGenerationBusy(true);
+    try {
+      const response = await fetch("/api/tools/game-creator/canon-docs/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: gameCreatorDocGenerationStrategy,
+          primaryHarnessId: gameCreatorPrimaryHarnessId.trim() || undefined,
+          workspaceId: boot?.activeWorkspaceId,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to generate canon docs.");
+      }
+      const payload = (await response.json()) as GameCreatorCanonDocsGenerationResult;
+      setGameCreatorDocGenerationResult(payload);
+      setGameCreatorSpecPackage(payload.specPackage);
+      setStatusMessage(`Generated ${payload.generatedFiles.length} canon docs.`);
+      pushToast(`Generated ${payload.generatedFiles.length} canon docs.`, "ok");
+      if (payload.warnings.length > 0) {
+        pushToast("Canon docs generated with warnings. Review details.", "warn");
+      }
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorDocGenerationBusy(false);
     }
   }
 
@@ -6217,6 +6268,55 @@ function App() {
                     </button>
                   </div>
                 </div>
+              </section>
+
+              <section className="tool-section">
+                <h3>Step 2: Generate Canon Docs</h3>
+                <div className="stable-audio-form">
+                  <label>
+                    <span>Generation Strategy</span>
+                    <select value={gameCreatorDocGenerationStrategy} onChange={(event) => setGameCreatorDocGenerationStrategy(event.target.value as GameCreatorDocGenerationStrategy)}>
+                      <option value="template-only">Template only (fastest)</option>
+                      <option value="single-harness">Single harness</option>
+                      <option value="selected-harnesses">Selected harnesses from wizard</option>
+                      <option value="all-online-harnesses">All online harnesses</option>
+                    </select>
+                  </label>
+
+                  {gameCreatorDocGenerationStrategy === "single-harness" ? (
+                    <label>
+                      <span>Primary Harness</span>
+                      <select value={gameCreatorPrimaryHarnessId} onChange={(event) => setGameCreatorPrimaryHarnessId(event.target.value)}>
+                        <option value="">Auto (first online)</option>
+                        {(boot?.harnesses ?? []).map((harness) => (
+                          <option key={harness.id} value={harness.id}>{harness.name} ({harness.status})</option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+
+                  <small>Output location: docs/game-creator inside the active workspace.</small>
+
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => void generateGameCreatorCanonDocs()} disabled={gameCreatorDocGenerationBusy || gameCreatorBusyAction !== null}>
+                      {gameCreatorDocGenerationBusy ? "Generating Docs..." : "Generate Canon Docs"}
+                    </button>
+                  </div>
+                </div>
+
+                {gameCreatorDocGenerationResult ? (
+                  <div className="tool-list">
+                    <small>Strategy: {gameCreatorDocGenerationResult.strategy}</small>
+                    <small>Harnesses used: {gameCreatorDocGenerationResult.harnessesUsed.length ? gameCreatorDocGenerationResult.harnessesUsed.map((entry) => entry.name).join(", ") : "none (template-only)"}</small>
+                    <small>Generated files: {gameCreatorDocGenerationResult.generatedFiles.length}</small>
+                    {gameCreatorDocGenerationResult.generatedFiles.map((entry) => (
+                      <small key={entry.relativePath}>{entry.relativePath}</small>
+                    ))}
+                    {gameCreatorDocGenerationResult.warnings.map((warning, index) => (
+                      <small key={`warn-${index}`} className="runtime-warning">Warning: {warning}</small>
+                    ))}
+                  </div>
+                ) : null}
               </section>
 
               <section className="tool-section">

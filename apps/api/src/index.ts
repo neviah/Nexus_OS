@@ -372,6 +372,141 @@ function writeGameCreatorDraft(state: SystemState, draft: GameCreatorSetupWizard
   };
 }
 
+type GameCreatorDocGenerationStrategy = "template-only" | "single-harness" | "selected-harnesses" | "all-online-harnesses";
+
+type CanonDocFile = {
+  fileName: string;
+  title: string;
+  relativePath: string;
+  content: string;
+};
+
+function buildCanonDocTemplateFiles(spec: GameCreatorSpecPackage): CanonDocFile[] {
+  const d = spec.setupWizard;
+  const generatedAt = spec.generatedAt;
+  const root = "docs/game-creator";
+  const make = (fileName: string, title: string, body: string): CanonDocFile => ({
+    fileName,
+    title,
+    relativePath: `${root}/${fileName}`,
+    content: `# ${title}\n\n${body.trim()}\n`,
+  });
+
+  return [
+    make("GAME_BIBLE.md", "Game Bible", `## Vision Statement\nA ${d.genre} game targeting ${d.target} with a ${d.perspective} perspective.\n\n## Player Fantasy\nDeliver a ${d.coreLoopPriority}-first experience in a ${d.artStyle} world.\n\n## Core Loop\n- Primary loop: ${d.coreLoopPriority}\n- Target difficulty: ${d.difficultyTarget}\n- Scope tier: ${d.scopeTier}\n\n## Audience\n- Narrative depth: ${d.narrativeDepth}\n- Controls: ${d.controls}\n\n## Success Criteria\n- One complete playable loop in vertical slice.\n- Stable baseline with enemy families=${d.enemyFamilies}, biomes=${d.biomes}, bosses=${d.bosses}.\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("TECHNICAL_DESIGN.md", "Technical Design", `## Engine Target\n- Target: ${d.target}\n- Perspective profile: ${d.perspective}\n\n## Systems\n- Gameplay loop system for ${d.coreLoopPriority}.\n- Encounter system for ${d.enemyFamilies} enemy families.\n- Content routing for ${d.biomes} biomes and ${d.bosses} bosses.\n\n## Build/Export\n- Keep deterministic build scripts and CI-compatible CLI flow.\n- Add validation gate checks before release candidate.\n\n## Performance Targets\n- Scope: ${d.scopeTier}.\n- Keep baseline asset budgets aligned to tier constraints.\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("UI_UX_SPEC.md", "UI UX Spec", `## UX Principles\n- Fast clarity for the core ${d.coreLoopPriority} loop.\n- Readable combat/navigation feedback for ${d.perspective}.\n\n## Core Screens\n- Main menu\n- In-game HUD\n- Pause/settings\n- Failure and recovery loop\n\n## HUD Baseline\n- Input hinting for ${d.controls}.\n- Objective + status + encounter context.\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("CONTROLS_CAMERA_SPEC.md", "Controls And Camera Spec", `## Input Mapping\n- Default controls profile: ${d.controls}.\n\n## Camera Rules\n- Primary perspective: ${d.perspective}.\n- Keep camera readability and traversal clarity as first constraint.\n\n## Accessibility\n- Remapping support\n- Sensitivity controls\n- Motion/camera comfort options\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("ART_BIBLE.md", "Art Bible", `## Visual Pillars\n- Style: ${d.artStyle}.\n- Tone should reinforce ${d.genre} with ${d.narrativeDepth} narrative depth.\n\n## Character Direction\n- Enemy family count target: ${d.enemyFamilies}.\n- Distinct silhouettes per family and role.\n\n## Environment Direction\n- Biome count target: ${d.biomes}.\n- Ensure biome readability and gameplay contrast.\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("LORE_BOOK.md", "Lore Book", `## World Rules\nDefine immutable setting rules and consistency constraints.\n\n## Factions And Timeline\n- Align story weight to narrative depth=${d.narrativeDepth}.\n\n## Character Lore\n- Include player, ally, enemy, and boss hooks (boss count target: ${d.bosses}).\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("AUDIO_BIBLE.md", "Audio Bible", `## Music Direction\n- Match ${d.genre} tone with ${d.artStyle} visual language.\n\n## SFX Taxonomy\n- Prioritize player actions, enemy feedback, traversal, and UI cues.\n\n## Coverage\n- Ensure all core loop actions (${d.coreLoopPriority}) have clear sonic feedback.\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("PRODUCTION_PLAN.md", "Production Plan", `## Milestones\n1. Preproduction docs lock\n2. Vertical slice content\n3. Expansion loops\n4. Polish + RC\n\n## Scope Baseline\n- Tier: ${d.scopeTier}\n- Enemy families: ${d.enemyFamilies}\n- Biomes: ${d.biomes}\n- Bosses: ${d.bosses}\n\n## Risks\n- Scope drift\n- Asset throughput\n- Integration regressions\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("ENEMY_ROSTER.md", "Enemy Roster", `## Family Targets\nInitial target families: ${d.enemyFamilies}.\n\n## Role Matrix\nDefine at least one role per family (tank, flanker, ranged, support, etc.).\n\n## Biome Mapping\nMap enemy families to ${d.biomes} biome(s) with spawn boundaries.\n\n## Bosses\nInitial target bosses: ${d.bosses}.\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("DIFFICULTY_CURVE.md", "Difficulty Curve", `## Curve Goals\n- Target difficulty: ${d.difficultyTarget}.\n- Keep early onboarding readable; scale complexity per scope tier ${d.scopeTier}.\n\n## Encounter Density\n- Tie wave density and composition to enemy family count (${d.enemyFamilies}).\n\n## Failure/Recovery\n- Define failure costs and recovery windows by progression phase.\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
+    make("CANON_DOC_INDEX.md", "Canon Doc Index", `## Canon Files\n- GAME_BIBLE.md\n- TECHNICAL_DESIGN.md\n- UI_UX_SPEC.md\n- CONTROLS_CAMERA_SPEC.md\n- ART_BIBLE.md\n- LORE_BOOK.md\n- AUDIO_BIBLE.md\n- PRODUCTION_PLAN.md\n- ENEMY_ROSTER.md\n- DIFFICULTY_CURVE.md\n\n## Source\n- Setup wizard version: ${d.version}\n- Generated: ${generatedAt}\n- Target: ${d.target}\n\n## Warnings\n${spec.scopeWarnings.length ? spec.scopeWarnings.map((w) => `- ${w}`).join("\n") : "- none"}`),
+  ];
+}
+
+function buildCanonDocGenerationPrompt(input: {
+  spec: GameCreatorSpecPackage;
+  templates: CanonDocFile[];
+  fileName: string;
+  title: string;
+}): string {
+  const { spec, templates, fileName, title } = input;
+  const setup = JSON.stringify(spec.setupWizard, null, 2);
+  const baseline = templates.find((entry) => entry.fileName === fileName)?.content ?? "";
+  return [
+    `You are generating a canon game-design document named ${fileName} (${title}).`,
+    "Return only markdown content. Do not wrap in code fences.",
+    "Keep practical implementation detail and include concise sections and bullet points.",
+    "Project setup:",
+    setup,
+    "Baseline draft (improve and expand it while preserving constraints):",
+    baseline,
+  ].join("\n\n");
+}
+
+function normalizeHarnessDocMarkdown(raw: string): string {
+  const trimmed = raw.trim();
+  const fenced = trimmed.match(/^```(?:markdown|md)?\s*([\s\S]*?)\s*```$/i);
+  return fenced ? fenced[1].trim() : trimmed;
+}
+
+async function generateCanonDocWithHarness(input: {
+  harness: Awaited<ReturnType<typeof readHarnessRegistry>>[number];
+  state: SystemState;
+  workspace: { id: string; path: string };
+  prompt: string;
+}): Promise<string> {
+  const result = await invokeHarness({
+    harness: input.harness,
+    message: input.prompt,
+    history: [],
+    state: input.state,
+    workspace: input.workspace,
+  });
+  return normalizeHarnessDocMarkdown(result.content || "");
+}
+
+function mergeCanonDocVariants(base: string, variants: Array<{ harnessId: string; content: string }>): string {
+  const cleaned = variants
+    .map((entry) => ({ harnessId: entry.harnessId, content: entry.content.trim() }))
+    .filter((entry) => entry.content.length > 0);
+
+  if (cleaned.length === 0) {
+    return base;
+  }
+
+  const primary = cleaned[0].content;
+  if (cleaned.length === 1) {
+    return primary;
+  }
+
+  const supplement = cleaned
+    .slice(1)
+    .map((entry) => `### ${entry.harnessId}\n\n${entry.content}`)
+    .join("\n\n");
+
+  return [
+    primary,
+    "",
+    "## Alternate Harness Notes",
+    supplement,
+  ].join("\n").trim();
+}
+
+async function resolveHarnessesForDocGeneration(input: {
+  strategy: GameCreatorDocGenerationStrategy;
+  state: SystemState;
+  primaryHarnessId?: string;
+  preferredHarnessIds: string[];
+}): Promise<Array<Awaited<ReturnType<typeof readHarnessRegistry>>[number]>> {
+  const harnesses = await readHarnessRegistry();
+  if (input.strategy === "template-only") {
+    return [];
+  }
+
+  const health = await resolveHarnessHealth(harnesses);
+  const onlineIds = new Set(health.filter((entry) => entry.status === "online").map((entry) => entry.id));
+  const onlineHarnesses = harnesses.filter((entry) => onlineIds.has(entry.id));
+
+  if (input.strategy === "all-online-harnesses") {
+    return onlineHarnesses;
+  }
+
+  if (input.strategy === "selected-harnesses") {
+    const preferred = input.preferredHarnessIds
+      .map((id) => onlineHarnesses.find((entry) => entry.id === id))
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+    return preferred.length ? preferred : onlineHarnesses.slice(0, 1);
+  }
+
+  const singleId = (input.primaryHarnessId || input.preferredHarnessIds[0] || "").trim();
+  const resolved = onlineHarnesses.find((entry) => entry.id === singleId) ?? onlineHarnesses[0];
+  return resolved ? [resolved] : [];
+}
+
 async function resolveWorkspacePathFromState(state: SystemState, workspaceId?: string): Promise<string> {
   const resolvedId = String(workspaceId ?? state.activeWorkspaceId).trim() || state.activeWorkspaceId;
   const workspace = await getWorkspaceById(resolvedId);
@@ -2163,6 +2298,78 @@ app.post("/api/tools/game-creator/setup-wizard/reset", async (_req, res) => {
   await writeSystemState(state);
   const specPackage = buildGameCreatorSpecPackage(draft);
   res.json({ ok: true, draft, specPackage });
+});
+
+app.post("/api/tools/game-creator/canon-docs/generate", async (req, res) => {
+  const body = req.body as {
+    workspaceId?: string;
+    strategy?: GameCreatorDocGenerationStrategy;
+    primaryHarnessId?: string;
+  };
+
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const templates = buildCanonDocTemplateFiles(specPackage);
+  const strategy = pickEnumValue(
+    body.strategy,
+    ["template-only", "single-harness", "selected-harnesses", "all-online-harnesses"] as const,
+    "selected-harnesses",
+  );
+
+  const harnesses = await resolveHarnessesForDocGeneration({
+    strategy,
+    state,
+    primaryHarnessId: body.primaryHarnessId,
+    preferredHarnessIds: draft.preferredDocHarnesses,
+  });
+
+  const warnings: string[] = [];
+  const generatedFiles: Array<{ fileName: string; relativePath: string }> = [];
+
+  for (const file of templates) {
+    const variants: Array<{ harnessId: string; content: string }> = [];
+
+    for (const harness of harnesses) {
+      try {
+        const prompt = buildCanonDocGenerationPrompt({
+          spec: specPackage,
+          templates,
+          fileName: file.fileName,
+          title: file.title,
+        });
+        const harnessContent = await generateCanonDocWithHarness({
+          harness,
+          state,
+          workspace,
+          prompt,
+        });
+        if (harnessContent.trim()) {
+          variants.push({ harnessId: harness.id, content: harnessContent });
+        }
+      } catch (error) {
+        warnings.push(`Harness ${harness.id} failed on ${file.fileName}: ${String(error)}`);
+      }
+    }
+
+    const mergedContent = mergeCanonDocVariants(file.content, variants);
+    const targetPath = safeWorkspaceJoin(workspace.path, file.relativePath);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, mergedContent, "utf-8");
+    generatedFiles.push({ fileName: file.fileName, relativePath: file.relativePath });
+  }
+
+  res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    strategy,
+    harnessesUsed: harnesses.map((entry) => ({ id: entry.id, name: entry.name })),
+    generatedFiles,
+    warnings,
+    specPackage,
+  });
 });
 
 app.get("/api/tools/runtimes/status", async (_req, res) => {
