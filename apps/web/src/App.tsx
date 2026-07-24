@@ -754,6 +754,24 @@ type GameCreatorSingleDocRegenerateResponse = {
   status: GameCreatorCanonDocStatusItem[];
 };
 
+type GameCreatorGenerationProgressEvent = {
+  at: string;
+  level: "info" | "warn" | "error";
+  message: string;
+};
+
+type GameCreatorGenerationProgress = {
+  ok: boolean;
+  workspaceId: string;
+  running: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  totalDocs: number;
+  completedDocs: number;
+  currentFile: string | null;
+  events: GameCreatorGenerationProgressEvent[];
+};
+
 type GameCreatorGate2Status = {
   ok: boolean;
   gateId: string;
@@ -1315,10 +1333,14 @@ function App() {
   const [gameCreatorPrimaryHarnessId, setGameCreatorPrimaryHarnessId] = useState("");
   const [gameCreatorDocGenerationBusy, setGameCreatorDocGenerationBusy] = useState(false);
   const [gameCreatorDocGenerationResult, setGameCreatorDocGenerationResult] = useState<GameCreatorCanonDocsGenerationResult | null>(null);
+  const [gameCreatorGenerationProgress, setGameCreatorGenerationProgress] = useState<GameCreatorGenerationProgress | null>(null);
+  const [gameCreatorGenerationEvents, setGameCreatorGenerationEvents] = useState<GameCreatorGenerationProgressEvent[]>([]);
   const [gameCreatorCanonDocsStatus, setGameCreatorCanonDocsStatus] = useState<GameCreatorCanonDocStatusItem[]>([]);
   const [gameCreatorReviewBusyKey, setGameCreatorReviewBusyKey] = useState<string | null>(null);
   const [gameCreatorGate2Status, setGameCreatorGate2Status] = useState<GameCreatorGate2Status | null>(null);
   const [gameCreatorStartBusy, setGameCreatorStartBusy] = useState(false);
+  const [gameCreatorGate2Expanded, setGameCreatorGate2Expanded] = useState(false);
+  const [gameCreatorShowMissingDocCards, setGameCreatorShowMissingDocCards] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -1390,6 +1412,13 @@ function App() {
     }
     return ["side-scroller", "top-down", "isometric"];
   }, [gameCreatorWizardDraft.genre, gameCreatorWizardDraft.target]);
+
+  const gameCreatorVisibleDocStatus = useMemo(() => {
+    if (gameCreatorShowMissingDocCards) {
+      return gameCreatorCanonDocsStatus;
+    }
+    return gameCreatorCanonDocsStatus.filter((entry) => entry.exists);
+  }, [gameCreatorCanonDocsStatus, gameCreatorShowMissingDocCards]);
 
   useEffect(() => {
     const candidate = model3dResult?.relativePath?.trim() ?? "";
@@ -2314,6 +2343,7 @@ function App() {
       }
       await loadGameCreatorCanonDocsStatus();
       await loadGameCreatorGate2Status();
+      await loadGameCreatorGenerationProgress();
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2370,7 +2400,14 @@ function App() {
 
   async function generateGameCreatorCanonDocs() {
     setGameCreatorDocGenerationBusy(true);
+    setGameCreatorGenerationEvents([]);
+    let progressTimer: number | null = null;
     try {
+      progressTimer = window.setInterval(() => {
+        void loadGameCreatorGenerationProgress();
+      }, 700);
+      await loadGameCreatorGenerationProgress();
+
       const response = await fetch("/api/tools/game-creator/canon-docs/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2390,6 +2427,8 @@ function App() {
         setGameCreatorCanonDocsStatus((payload as GameCreatorCanonDocsGenerationResult & { status?: GameCreatorCanonDocStatusItem[] }).status ?? []);
       }
       await loadGameCreatorGate2Status();
+      await refreshActiveWorkspaceTree(payload.workspaceId);
+      await loadGameCreatorGenerationProgress();
       setStatusMessage(`Generated ${payload.generatedFiles.length} canon docs.`);
       pushToast(`Generated ${payload.generatedFiles.length} canon docs.`, "ok");
       if (payload.warnings.length > 0) {
@@ -2399,6 +2438,10 @@ function App() {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
     } finally {
+      if (progressTimer !== null) {
+        window.clearInterval(progressTimer);
+      }
+      await loadGameCreatorGenerationProgress();
       setGameCreatorDocGenerationBusy(false);
     }
   }
@@ -2419,6 +2462,16 @@ function App() {
     }
     const payload = (await response.json()) as GameCreatorGate2Status;
     setGameCreatorGate2Status(payload);
+  }
+
+  async function loadGameCreatorGenerationProgress() {
+    const response = await fetch(`/api/tools/game-creator/canon-docs/progress?workspaceId=${encodeURIComponent(boot?.activeWorkspaceId ?? "")}`);
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as GameCreatorGenerationProgress;
+    setGameCreatorGenerationProgress(payload);
+    setGameCreatorGenerationEvents(payload.events ?? []);
   }
 
   async function startGameCreatorProcess() {
@@ -4964,7 +5017,7 @@ function App() {
 
             {toolsOpen ? (
               <ul className="nav-list">
-                {boot?.tools.filter((tool) => tool.id !== "9router" && tool.id !== "settings").map((tool) => {
+                {boot?.tools.filter((tool) => tool.id !== "9router" && tool.id !== "settings" && tool.id !== "game-creator").map((tool) => {
                   const isActive = selectedPane.type === "tool" && selectedPane.id === tool.id;
                   return (
                     <li key={tool.id}>
@@ -4989,9 +5042,21 @@ function App() {
           <section className="side-nav-group">
             <div className="pane-title-row split">
               <h2>Orchestration</h2>
-              <small className="side-group-note">coming soon</small>
             </div>
             <ul className="nav-list">
+              <li>
+                <button
+                  type="button"
+                  className={`nav-item ${selectedPane.type === "tool" && selectedPane.id === "game-creator" ? "active" : ""}`}
+                  onClick={() => setSelectedPane({ type: "tool", id: "game-creator" })}
+                >
+                  <span className="health healthy" />
+                  <span className="meta-block">
+                    <strong>Game Creator</strong>
+                    <small>planning + docs + gates</small>
+                  </span>
+                </button>
+              </li>
               <li>
                 <button type="button" className="nav-item nav-item-placeholder" disabled>
                   <span className="health setup-required" />
@@ -6372,7 +6437,12 @@ function App() {
               </div>
 
               <section className="tool-section">
-                <h3>Gate 2 Blocker Status</h3>
+                <div className="tool-header-row">
+                  <h3>Gate 2 Status</h3>
+                  <button type="button" className="ghost" onClick={() => setGameCreatorGate2Expanded((current) => !current)}>
+                    {gameCreatorGate2Expanded ? "Hide Details" : "Show Details"}
+                  </button>
+                </div>
                 {gameCreatorGate2Status ? (
                   <>
                     <small className={gameCreatorGate2Status.ready ? "runtime-ready" : "runtime-warning"}>
@@ -6383,7 +6453,7 @@ function App() {
                     <small>
                       Required {gameCreatorGate2Status.summary.requiredDocs} · Existing {gameCreatorGate2Status.summary.existingDocs} · Approved {gameCreatorGate2Status.summary.approvedDocs} · Locked {gameCreatorGate2Status.summary.lockedDocs}
                     </small>
-                    {gameCreatorGate2Status.blockers.length > 0 ? (
+                    {gameCreatorGate2Expanded && gameCreatorGate2Status.blockers.length > 0 ? (
                       <ul className="tool-list">
                         {gameCreatorGate2Status.blockers.map((blocker) => (
                           <li key={blocker}><small className="runtime-warning">{blocker}</small></li>
@@ -6646,35 +6716,58 @@ function App() {
                       {gameCreatorDocGenerationBusy ? "Generating Docs..." : "Generate Canon Docs"}
                     </button>
                   </div>
+
+                  {(gameCreatorDocGenerationBusy || gameCreatorGenerationEvents.length > 0) ? (
+                    <details className="tool-details" open={gameCreatorDocGenerationBusy}>
+                      <summary>Generation stream</summary>
+                      <small>
+                        Progress: {gameCreatorGenerationProgress?.completedDocs ?? 0}/{gameCreatorGenerationProgress?.totalDocs ?? 0}
+                        {gameCreatorGenerationProgress?.currentFile ? ` · current: ${gameCreatorGenerationProgress.currentFile}` : ""}
+                      </small>
+                      <pre className="image-status-stream">
+                        {gameCreatorGenerationEvents.length
+                          ? gameCreatorGenerationEvents.map((event) => `[${new Date(event.at).toLocaleTimeString()}] ${event.level.toUpperCase()}: ${event.message}`).join("\n")
+                          : "Waiting for generation events..."}
+                      </pre>
+                    </details>
+                  ) : null}
                 </div>
 
                 {gameCreatorDocGenerationResult ? (
-                  <div className="tool-list">
-                    <small>Strategy: {gameCreatorDocGenerationResult.strategy}</small>
-                    <small>Harnesses used: {gameCreatorDocGenerationResult.harnessesUsed.length ? gameCreatorDocGenerationResult.harnessesUsed.map((entry) => entry.name).join(", ") : "none (template-only)"}</small>
-                    <small>Generated files: {gameCreatorDocGenerationResult.generatedFiles.length}</small>
-                    {gameCreatorDocGenerationResult.generatedFiles.map((entry) => (
-                      <small key={entry.relativePath}>{entry.relativePath}</small>
-                    ))}
-                    {gameCreatorDocGenerationResult.warnings.map((warning, index) => (
-                      <small key={`warn-${index}`} className="runtime-warning">Warning: {warning}</small>
-                    ))}
-                  </div>
+                  <details className="tool-details">
+                    <summary>Last generation summary</summary>
+                    <div className="tool-list">
+                      <small>Strategy: {gameCreatorDocGenerationResult.strategy}</small>
+                      <small>Harnesses used: {gameCreatorDocGenerationResult.harnessesUsed.length ? gameCreatorDocGenerationResult.harnessesUsed.map((entry) => entry.name).join(", ") : "none (template-only)"}</small>
+                      <small>Generated files: {gameCreatorDocGenerationResult.generatedFiles.length}</small>
+                      {gameCreatorDocGenerationResult.generatedFiles.map((entry) => (
+                        <small key={entry.relativePath}>{entry.relativePath}</small>
+                      ))}
+                      {gameCreatorDocGenerationResult.warnings.map((warning, index) => (
+                        <small key={`warn-${index}`} className="runtime-warning">Warning: {warning}</small>
+                      ))}
+                    </div>
+                  </details>
                 ) : null}
               </section>
 
               <section className="tool-section">
                 <div className="tool-header-row">
                   <h3>Step 3: Review, Lock, and Version</h3>
-                  <button type="button" className="ghost" onClick={() => void loadGameCreatorCanonDocsStatus()} disabled={gameCreatorReviewBusyKey !== null}>
-                    Refresh Doc Status
-                  </button>
+                  <div className="tool-action-row">
+                    <button type="button" className="ghost" onClick={() => setGameCreatorShowMissingDocCards((current) => !current)}>
+                      {gameCreatorShowMissingDocCards ? "Hide Missing Templates" : "Show Missing Templates"}
+                    </button>
+                    <button type="button" className="ghost" onClick={() => void loadGameCreatorCanonDocsStatus()} disabled={gameCreatorReviewBusyKey !== null}>
+                      Refresh Doc Status
+                    </button>
+                  </div>
                 </div>
-                {gameCreatorCanonDocsStatus.length === 0 ? (
-                  <small>No canon docs status yet. Run Step 2 first.</small>
+                {gameCreatorVisibleDocStatus.length === 0 ? (
+                  <small>No generated canon docs yet. Run Step 2 first.</small>
                 ) : (
                   <ul className="tool-list">
-                    {gameCreatorCanonDocsStatus.map((entry) => {
+                    {gameCreatorVisibleDocStatus.map((entry) => {
                       const statusTone = entry.record.reviewStatus === "approved" ? "runtime-ready" : entry.record.reviewStatus === "rejected" ? "runtime-warning" : "side-status";
                       const busy = Boolean(gameCreatorReviewBusyKey && gameCreatorReviewBusyKey.startsWith(`${entry.fileName}:`));
                       return (

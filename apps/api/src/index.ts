@@ -405,8 +405,37 @@ type GameCreatorCanonDocSnapshot = {
   createdAt: string;
 };
 
+type GameCreatorGenerationProgressEvent = {
+  at: string;
+  level: "info" | "warn" | "error";
+  message: string;
+};
+
+type GameCreatorGenerationProgress = {
+  workspaceId: string;
+  running: boolean;
+  startedAt: string;
+  finishedAt?: string;
+  totalDocs: number;
+  completedDocs: number;
+  currentFile?: string;
+  events: GameCreatorGenerationProgressEvent[];
+};
+
 const GAME_CREATOR_CANON_DOC_ROOT = "docs/game-creator";
 const GAME_CREATOR_CANON_DOC_VERSION_ROOT = "docs/game-creator/.versions";
+const gameCreatorGenerationProgressByWorkspace = new Map<string, GameCreatorGenerationProgress>();
+
+function pushGameCreatorGenerationEvent(progress: GameCreatorGenerationProgress, level: "info" | "warn" | "error", message: string): void {
+  progress.events.push({
+    at: new Date().toISOString(),
+    level,
+    message,
+  });
+  if (progress.events.length > 200) {
+    progress.events.splice(0, progress.events.length - 200);
+  }
+}
 
 function buildCanonDocTemplateFiles(spec: GameCreatorSpecPackage): CanonDocFile[] {
   const d = spec.setupWizard;
@@ -2596,44 +2625,78 @@ app.post("/api/tools/game-creator/canon-docs/generate", async (req, res) => {
   const generatedFiles: Array<{ fileName: string; relativePath: string }> = [];
   const harnessesUsedById = new Map<string, { id: string; name: string }>();
 
-  for (const file of templates) {
-    const existingRecord = records[file.fileName] ?? createDefaultCanonDocRecord(file);
-    if (existingRecord.locked) {
-      warnings.push(`Skipped locked doc ${file.fileName}.`);
-      continue;
+  const progress: GameCreatorGenerationProgress = {
+    workspaceId: workspace.id,
+    running: true,
+    startedAt: new Date().toISOString(),
+    totalDocs: templates.length,
+    completedDocs: 0,
+    events: [],
+  };
+  gameCreatorGenerationProgressByWorkspace.set(workspace.id, progress);
+  pushGameCreatorGenerationEvent(progress, "info", `Starting canon doc generation (${templates.length} files).`);
+
+  try {
+    for (const file of templates) {
+      progress.currentFile = file.fileName;
+      pushGameCreatorGenerationEvent(progress, "info", `Generating ${file.fileName}...`);
+      const existingRecord = records[file.fileName] ?? createDefaultCanonDocRecord(file);
+      if (existingRecord.locked) {
+        const skip = `Skipped locked doc ${file.fileName}.`;
+        warnings.push(skip);
+        pushGameCreatorGenerationEvent(progress, "warn", skip);
+        progress.completedDocs += 1;
+        continue;
+      }
+
+      const generated = await generateCanonDocContent({
+        specPackage,
+        state,
+        workspace,
+        strategy,
+        preferredHarnessIds: draft.preferredDocHarnesses,
+        primaryHarnessId: body.primaryHarnessId,
+        file,
+      });
+
+      generated.warnings.forEach((warning) => {
+        warnings.push(warning);
+        pushGameCreatorGenerationEvent(progress, "warn", `${file.fileName}: ${warning}`);
+      });
+      generated.harnessesUsed.forEach((entry) => harnessesUsedById.set(entry.id, entry));
+
+      const mergedContent = generated.content;
+      const targetPath = safeWorkspaceJoin(workspace.path, file.relativePath);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, mergedContent, "utf-8");
+
+      records[file.fileName] = {
+        ...existingRecord,
+        fileName: file.fileName,
+        relativePath: file.relativePath,
+        reviewStatus: "pending",
+        updatedAt: new Date().toISOString(),
+        lastGeneratedAt: new Date().toISOString(),
+        lastGenerationStrategy: strategy,
+        lastHarnessIds: generated.harnessesUsed.map((entry) => entry.id),
+      };
+
+      generatedFiles.push({ fileName: file.fileName, relativePath: file.relativePath });
+      progress.completedDocs += 1;
+      pushGameCreatorGenerationEvent(progress, "info", `Finished ${file.fileName}.`);
     }
-
-    const generated = await generateCanonDocContent({
-      specPackage,
-      state,
-      workspace,
-      strategy,
-      preferredHarnessIds: draft.preferredDocHarnesses,
-      primaryHarnessId: body.primaryHarnessId,
-      file,
-    });
-
-    generated.warnings.forEach((warning) => warnings.push(warning));
-    generated.harnessesUsed.forEach((entry) => harnessesUsedById.set(entry.id, entry));
-
-    const mergedContent = generated.content;
-    const targetPath = safeWorkspaceJoin(workspace.path, file.relativePath);
-    await fs.mkdir(path.dirname(targetPath), { recursive: true });
-    await fs.writeFile(targetPath, mergedContent, "utf-8");
-
-    records[file.fileName] = {
-      ...existingRecord,
-      fileName: file.fileName,
-      relativePath: file.relativePath,
-      reviewStatus: "pending",
-      updatedAt: new Date().toISOString(),
-      lastGeneratedAt: new Date().toISOString(),
-      lastGenerationStrategy: strategy,
-      lastHarnessIds: generated.harnessesUsed.map((entry) => entry.id),
-    };
-
-    generatedFiles.push({ fileName: file.fileName, relativePath: file.relativePath });
+    pushGameCreatorGenerationEvent(progress, "info", `Generation complete: ${generatedFiles.length} file(s) written.`);
+  } catch (error) {
+    pushGameCreatorGenerationEvent(progress, "error", `Generation failed: ${error instanceof Error ? error.message : String(error)}`);
+    progress.running = false;
+    progress.finishedAt = new Date().toISOString();
+    progress.currentFile = undefined;
+    throw error;
   }
+
+  progress.running = false;
+  progress.finishedAt = new Date().toISOString();
+  progress.currentFile = undefined;
 
   writeGameCreatorCanonDocsStore(state, { records, snapshots });
   await writeSystemState(state);
@@ -2679,6 +2742,38 @@ app.get("/api/tools/game-creator/canon-docs/status", async (req, res) => {
     workspacePath: workspace.path,
     status,
     specPackage,
+  });
+});
+
+app.get("/api/tools/game-creator/canon-docs/progress", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim();
+  const state = await readSystemState();
+  const resolvedWorkspaceId = workspaceId || state.activeWorkspaceId;
+  const progress = gameCreatorGenerationProgressByWorkspace.get(resolvedWorkspaceId);
+  if (!progress) {
+    return res.json({
+      ok: true,
+      workspaceId: resolvedWorkspaceId,
+      running: false,
+      startedAt: null,
+      finishedAt: null,
+      totalDocs: 0,
+      completedDocs: 0,
+      currentFile: null,
+      events: [],
+    });
+  }
+
+  return res.json({
+    ok: true,
+    workspaceId: resolvedWorkspaceId,
+    running: progress.running,
+    startedAt: progress.startedAt,
+    finishedAt: progress.finishedAt ?? null,
+    totalDocs: progress.totalDocs,
+    completedDocs: progress.completedDocs,
+    currentFile: progress.currentFile ?? null,
+    events: progress.events,
   });
 });
 
