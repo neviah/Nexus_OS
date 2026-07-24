@@ -754,6 +754,30 @@ type GameCreatorSingleDocRegenerateResponse = {
   status: GameCreatorCanonDocStatusItem[];
 };
 
+type GameCreatorGate2Status = {
+  ok: boolean;
+  gateId: string;
+  requireLocked: boolean;
+  workspaceId: string;
+  workspacePath: string;
+  ready: boolean;
+  blockers: string[];
+  summary: {
+    requiredDocs: number;
+    existingDocs: number;
+    approvedDocs: number;
+    lockedDocs: number;
+  };
+};
+
+type GameCreatorStartProcessResponse = GameCreatorGate2Status & {
+  started?: boolean;
+  message?: string;
+  error?: string;
+};
+
+type BackgroundVisualId = "none" | "matrix-rain" | "prism-gradient" | "liquid-chrome" | "animated-gradient" | "closing-plasma";
+
 type ConnectorCard = {
   id: "github" | "gmail" | "slack" | "discord" | "notion" | "dropbox";
   name: string;
@@ -1158,6 +1182,16 @@ function App() {
     }
     return window.localStorage.getItem("nexus-theme") || "ember";
   });
+  const [backgroundVisualId, setBackgroundVisualId] = useState<BackgroundVisualId>(() => {
+    if (typeof window === "undefined") {
+      return "none";
+    }
+    const stored = window.localStorage.getItem("nexus-background-visual") as BackgroundVisualId | null;
+    if (stored === "matrix-rain" || stored === "prism-gradient" || stored === "liquid-chrome" || stored === "animated-gradient" || stored === "closing-plasma") {
+      return stored;
+    }
+    return "none";
+  });
   const [boot, setBoot] = useState<BootstrapPayload | null>(null);
   const [selectedPane, setSelectedPane] = useState<PaneSelection>({ type: "tool", id: "nexus-router" });
   const [composer, setComposer] = useState("");
@@ -1283,6 +1317,8 @@ function App() {
   const [gameCreatorDocGenerationResult, setGameCreatorDocGenerationResult] = useState<GameCreatorCanonDocsGenerationResult | null>(null);
   const [gameCreatorCanonDocsStatus, setGameCreatorCanonDocsStatus] = useState<GameCreatorCanonDocStatusItem[]>([]);
   const [gameCreatorReviewBusyKey, setGameCreatorReviewBusyKey] = useState<string | null>(null);
+  const [gameCreatorGate2Status, setGameCreatorGate2Status] = useState<GameCreatorGate2Status | null>(null);
+  const [gameCreatorStartBusy, setGameCreatorStartBusy] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -1343,11 +1379,17 @@ function App() {
   }, [model3dSourceImageBase64, model3dSourceImageMime, model3dSourceImageUrl]);
 
   const gameCreatorAllowedPerspectives = useMemo<Array<GameCreatorSetupWizardPerspective>>(() => {
+    if (gameCreatorWizardDraft.genre === "platformer") {
+      if (gameCreatorWizardDraft.target === "unity-3d") {
+        return ["side-scroller", "third-person", "top-down", "isometric", "first-person"];
+      }
+      return ["side-scroller", "top-down", "isometric"];
+    }
     if (gameCreatorWizardDraft.target === "unity-3d") {
       return ["third-person", "first-person", "top-down", "isometric"];
     }
     return ["side-scroller", "top-down", "isometric"];
-  }, [gameCreatorWizardDraft.target]);
+  }, [gameCreatorWizardDraft.genre, gameCreatorWizardDraft.target]);
 
   useEffect(() => {
     const candidate = model3dResult?.relativePath?.trim() ?? "";
@@ -2271,6 +2313,7 @@ function App() {
         setGameCreatorPrimaryHarnessId(payload.draft.preferredDocHarnesses[0] ?? "");
       }
       await loadGameCreatorCanonDocsStatus();
+      await loadGameCreatorGate2Status();
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2346,6 +2389,7 @@ function App() {
       if ((payload as GameCreatorCanonDocsGenerationResult & { status?: GameCreatorCanonDocStatusItem[] }).status) {
         setGameCreatorCanonDocsStatus((payload as GameCreatorCanonDocsGenerationResult & { status?: GameCreatorCanonDocStatusItem[] }).status ?? []);
       }
+      await loadGameCreatorGate2Status();
       setStatusMessage(`Generated ${payload.generatedFiles.length} canon docs.`);
       pushToast(`Generated ${payload.generatedFiles.length} canon docs.`, "ok");
       if (payload.warnings.length > 0) {
@@ -2368,6 +2412,42 @@ function App() {
     setGameCreatorCanonDocsStatus(payload.status ?? []);
   }
 
+  async function loadGameCreatorGate2Status() {
+    const response = await fetch(`/api/tools/game-creator/gates/gate2?workspaceId=${encodeURIComponent(boot?.activeWorkspaceId ?? "")}`);
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as GameCreatorGate2Status;
+    setGameCreatorGate2Status(payload);
+  }
+
+  async function startGameCreatorProcess() {
+    setGameCreatorStartBusy(true);
+    try {
+      const response = await fetch("/api/tools/game-creator/process/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, requireLocked: true }),
+      });
+
+      const payload = (await response.json()) as GameCreatorStartProcessResponse;
+      setGameCreatorGate2Status(payload);
+      if (!response.ok) {
+        setStatusMessage(payload.error ?? "Gate 2 blocked.");
+        pushToast(payload.error ?? "Gate 2 is blocked.", "warn");
+        return;
+      }
+
+      setStatusMessage(payload.message ?? "Game Creator process start approved.");
+      pushToast("Gate 2 passed. Process approved.", "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorStartBusy(false);
+    }
+  }
+
   async function updateGameCreatorCanonDocDecision(fileName: string, decision: "approved" | "rejected" | "pending") {
     const key = `${fileName}:decision:${decision}`;
     setGameCreatorReviewBusyKey(key);
@@ -2386,6 +2466,7 @@ function App() {
       }
       const payload = (await response.json()) as { ok: boolean; status: GameCreatorCanonDocStatusItem[] };
       setGameCreatorCanonDocsStatus(payload.status ?? []);
+      await loadGameCreatorGate2Status();
       pushToast(`${fileName} marked ${decision}.`, decision === "approved" ? "ok" : decision === "rejected" ? "warn" : "ok");
     } catch (error) {
       setStatusMessage(String(error));
@@ -2409,6 +2490,7 @@ function App() {
       }
       const payload = (await response.json()) as { ok: boolean; status: GameCreatorCanonDocStatusItem[] };
       setGameCreatorCanonDocsStatus(payload.status ?? []);
+      await loadGameCreatorGate2Status();
       pushToast(`${fileName} ${locked ? "locked" : "unlocked"}.`, locked ? "warn" : "ok");
     } catch (error) {
       setStatusMessage(String(error));
@@ -2432,6 +2514,7 @@ function App() {
       }
       const payload = (await response.json()) as { ok: boolean; status: GameCreatorCanonDocStatusItem[] };
       setGameCreatorCanonDocsStatus(payload.status ?? []);
+      await loadGameCreatorGate2Status();
       pushToast(`${fileName} snapshot created.`, "ok");
     } catch (error) {
       setStatusMessage(String(error));
@@ -2460,6 +2543,7 @@ function App() {
       }
       const payload = (await response.json()) as GameCreatorSingleDocRegenerateResponse;
       setGameCreatorCanonDocsStatus(payload.status ?? []);
+      await loadGameCreatorGate2Status();
       pushToast(`${fileName} regenerated.`, "ok");
       if (payload.warnings.length > 0) {
         pushToast(`${fileName} regenerated with warnings.`, "warn");
@@ -3848,6 +3932,11 @@ function App() {
     window.localStorage.setItem("nexus-theme", themeId);
   }, [themeId]);
 
+  useEffect(() => {
+    document.documentElement.setAttribute("data-background-visual", backgroundVisualId);
+    window.localStorage.setItem("nexus-background-visual", backgroundVisualId);
+  }, [backgroundVisualId]);
+
   function pushToast(message: string, tone: "ok" | "warn" | "err" = "ok") {
     const id = crypto.randomUUID();
     setToasts((current) => [...current, { id, message, tone }]);
@@ -5035,75 +5124,103 @@ function App() {
                   <button type="button" className="ghost" onClick={() => setNxFallbackRows((rows) => [...rows, createFallbackRow()])}>Add Row</button>
                 </div>
                 <p className="nxr-hint">Pick provider + model per row. Model dropdown uses synced active models.</p>
-                <div className="nxr-fallback-rows">
-                  {nxFallbackRows.map((row, rowIndex) => {
-                    const modelOptions = row.providerId === "cookbook"
-                      ? cookbookModelOptions
-                      : (nxModelOptionsByProvider[row.providerId] ?? nxProviderViews.find((provider) => provider.id === row.providerId)?.models ?? []);
-                    const health = getFallbackRowHealth(row);
-                    return (
-                      <div key={row.id} className="nxr-fallback-row">
-                        <select
-                          value={row.providerId}
-                          onChange={(event) => {
-                            const providerId = event.target.value;
-                            setNxFallbackRows((rows) => rows.map((entry) => entry.id === row.id ? { ...entry, providerId, model: "" } : entry));
-                            if (providerId && providerId !== "cookbook" && (nxModelOptionsByProvider[providerId]?.length ?? 0) === 0) {
-                              void nxSyncModels(providerId);
-                            }
-                          }}
-                        >
-                          <option value="">Select provider</option>
-                          {nxProviderViews.filter((provider) => provider.enabled).map((provider) => (
-                            <option key={provider.id} value={provider.id}>{provider.name}</option>
-                          ))}
-                        </select>
-                        <select
-                          value={row.model}
-                          disabled={!row.providerId}
-                          onChange={(event) => setNxFallbackRows((rows) => rows.map((entry) => entry.id === row.id ? { ...entry, model: event.target.value } : entry))}
-                        >
-                          <option value="">{row.providerId ? "Select model" : "Select provider first"}</option>
-                          {modelOptions.map((model) => (
-                            <option key={model} value={model}>{model}</option>
-                          ))}
-                        </select>
-                        <button
-                          type="button"
-                          className="ghost"
-                          onClick={() => row.providerId ? void nxSyncModels(row.providerId) : undefined}
-                          disabled={!row.providerId || nxSyncingId === row.providerId}
-                        >
-                          {nxSyncingId === row.providerId ? "Syncing..." : "Refresh"}
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost"
-                          onClick={() => moveFallbackRow(row.id, -1)}
-                          disabled={rowIndex === 0}
-                        >
-                          Up
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost"
-                          onClick={() => moveFallbackRow(row.id, 1)}
-                          disabled={rowIndex === nxFallbackRows.length - 1}
-                        >
-                          Down
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost"
-                          onClick={() => setNxFallbackRows((rows) => rows.filter((entry) => entry.id !== row.id))}
-                          disabled={nxFallbackRows.length <= 1}
-                        >
-                          Remove
-                        </button>
-                        <span className={`nxr-row-status ${health.tone}`}>{health.label}</span>
-                      </div>
-                    );
-                  })}
+                <div className="nxr-fallback-table-wrap">
+                  <table className="nxr-fallback-table" aria-label="Fallback chain">
+                    <thead>
+                      <tr>
+                        <th>Provider</th>
+                        <th>Model</th>
+                        <th>Sync</th>
+                        <th>Order</th>
+                        <th>Remove</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {nxFallbackRows.map((row, rowIndex) => {
+                        const modelOptions = row.providerId === "cookbook"
+                          ? cookbookModelOptions
+                          : (nxModelOptionsByProvider[row.providerId] ?? nxProviderViews.find((provider) => provider.id === row.providerId)?.models ?? []);
+                        const health = getFallbackRowHealth(row);
+                        return (
+                          <tr key={row.id}>
+                            <td>
+                              <select
+                                value={row.providerId}
+                                onChange={(event) => {
+                                  const providerId = event.target.value;
+                                  setNxFallbackRows((rows) => rows.map((entry) => entry.id === row.id ? { ...entry, providerId, model: "" } : entry));
+                                  if (providerId && providerId !== "cookbook" && (nxModelOptionsByProvider[providerId]?.length ?? 0) === 0) {
+                                    void nxSyncModels(providerId);
+                                  }
+                                }}
+                              >
+                                <option value="">Select provider</option>
+                                {nxProviderViews.filter((provider) => provider.enabled).map((provider) => (
+                                  <option key={provider.id} value={provider.id}>{provider.name}</option>
+                                ))}
+                              </select>
+                            </td>
+                            <td>
+                              <select
+                                value={row.model}
+                                disabled={!row.providerId}
+                                onChange={(event) => setNxFallbackRows((rows) => rows.map((entry) => entry.id === row.id ? { ...entry, model: event.target.value } : entry))}
+                              >
+                                <option value="">{row.providerId ? "Select model" : "Select provider first"}</option>
+                                {modelOptions.map((model) => (
+                                  <option key={model} value={model}>{model}</option>
+                                ))}
+                              </select>
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => row.providerId ? void nxSyncModels(row.providerId) : undefined}
+                                disabled={!row.providerId || nxSyncingId === row.providerId}
+                              >
+                                {nxSyncingId === row.providerId ? "Syncing..." : "Refresh"}
+                              </button>
+                            </td>
+                            <td>
+                              <div className="nxr-order-controls">
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={() => moveFallbackRow(row.id, -1)}
+                                  disabled={rowIndex === 0}
+                                >
+                                  Up
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={() => moveFallbackRow(row.id, 1)}
+                                  disabled={rowIndex === nxFallbackRows.length - 1}
+                                >
+                                  Down
+                                </button>
+                              </div>
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={() => setNxFallbackRows((rows) => rows.filter((entry) => entry.id !== row.id))}
+                                disabled={nxFallbackRows.length <= 1}
+                              >
+                                Remove
+                              </button>
+                            </td>
+                            <td>
+                              <span className={`nxr-row-status ${health.tone}`}>{health.label}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
 
                 <h3 className="nxr-subheading">Harness Model Assignment</h3>
@@ -6240,10 +6357,44 @@ function App() {
                   <h2>Game Creator</h2>
                   <p className="subtitle">Step 1: Setup Wizard contract. Capture direction once, then drive downstream docs and generation from a stable spec package.</p>
                 </div>
-                <button type="button" className="ghost" onClick={() => void loadGameCreatorSetupWizard()} disabled={gameCreatorBusyAction !== null}>
-                  {gameCreatorBusyAction === "load" ? "Refreshing..." : "Refresh"}
-                </button>
+                <div className="tool-action-row">
+                  <button
+                    type="button"
+                    onClick={() => void startGameCreatorProcess()}
+                    disabled={gameCreatorStartBusy}
+                  >
+                    {gameCreatorStartBusy ? "Checking Gate 2..." : "Start Game Creator Process"}
+                  </button>
+                  <button type="button" className="ghost" onClick={() => void loadGameCreatorSetupWizard()} disabled={gameCreatorBusyAction !== null}>
+                    {gameCreatorBusyAction === "load" ? "Refreshing..." : "Refresh"}
+                  </button>
+                </div>
               </div>
+
+              <section className="tool-section">
+                <h3>Gate 2 Blocker Status</h3>
+                {gameCreatorGate2Status ? (
+                  <>
+                    <small className={gameCreatorGate2Status.ready ? "runtime-ready" : "runtime-warning"}>
+                      {gameCreatorGate2Status.ready
+                        ? "Gate 2 passed: required docs are approved and locked."
+                        : "Gate 2 blocked: approve and lock required canon docs first."}
+                    </small>
+                    <small>
+                      Required {gameCreatorGate2Status.summary.requiredDocs} · Existing {gameCreatorGate2Status.summary.existingDocs} · Approved {gameCreatorGate2Status.summary.approvedDocs} · Locked {gameCreatorGate2Status.summary.lockedDocs}
+                    </small>
+                    {gameCreatorGate2Status.blockers.length > 0 ? (
+                      <ul className="tool-list">
+                        {gameCreatorGate2Status.blockers.map((blocker) => (
+                          <li key={blocker}><small className="runtime-warning">{blocker}</small></li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </>
+                ) : (
+                  <small>No gate status yet. Click Start Game Creator Process to validate Gate 2.</small>
+                )}
+              </section>
 
               <section className="tool-section">
                 <h3>Project Setup Wizard</h3>
@@ -6272,7 +6423,26 @@ function App() {
 
                   <label>
                     <span>Genre</span>
-                    <select value={gameCreatorWizardDraft.genre} onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, genre: event.target.value as GameCreatorSetupWizardDraft["genre"] }))}>
+                    <select
+                      value={gameCreatorWizardDraft.genre}
+                      onChange={(event) => {
+                        const genre = event.target.value as GameCreatorSetupWizardDraft["genre"];
+                        setGameCreatorWizardDraft((current) => {
+                          const allowed: GameCreatorSetupWizardPerspective[] = genre === "platformer"
+                            ? (current.target === "unity-3d"
+                              ? ["side-scroller", "third-person", "top-down", "isometric", "first-person"]
+                              : ["side-scroller", "top-down", "isometric"])
+                            : (current.target === "unity-3d"
+                              ? ["third-person", "first-person", "top-down", "isometric"]
+                              : ["side-scroller", "top-down", "isometric"]);
+                          return {
+                            ...current,
+                            genre,
+                            perspective: allowed.includes(current.perspective) ? current.perspective : allowed[0],
+                          };
+                        });
+                      }}
+                    >
                       <option value="action-adventure">Action-adventure</option>
                       <option value="platformer">Platformer</option>
                       <option value="shooter">Shooter</option>
@@ -6691,6 +6861,37 @@ function App() {
                       </button>
                     ))}
                   </div>
+
+                  <div className="background-visuals-section">
+                    <h3>Background Visuals</h3>
+                    <p className="subtitle">Applies to left, middle, and right panes.</p>
+                    <div className="theme-grid" role="radiogroup" aria-label="Background visuals">
+                      <button type="button" className={`theme-card ${backgroundVisualId === "none" ? "active" : ""}`} onClick={() => setBackgroundVisualId("none")}>
+                        <strong>None</strong>
+                        <small>Clean pane surfaces</small>
+                      </button>
+                      <button type="button" className={`theme-card ${backgroundVisualId === "matrix-rain" ? "active" : ""}`} onClick={() => setBackgroundVisualId("matrix-rain")}>
+                        <strong>Matrix Rain</strong>
+                        <small>Subtle vertical scan pattern</small>
+                      </button>
+                      <button type="button" className={`theme-card ${backgroundVisualId === "prism-gradient" ? "active" : ""}`} onClick={() => setBackgroundVisualId("prism-gradient")}>
+                        <strong>Prism Gradient</strong>
+                        <small>Angular spectrum glow</small>
+                      </button>
+                      <button type="button" className={`theme-card ${backgroundVisualId === "liquid-chrome" ? "active" : ""}`} onClick={() => setBackgroundVisualId("liquid-chrome")}>
+                        <strong>Liquid Chrome</strong>
+                        <small>Reflective brushed-metal flow</small>
+                      </button>
+                      <button type="button" className={`theme-card ${backgroundVisualId === "animated-gradient" ? "active" : ""}`} onClick={() => setBackgroundVisualId("animated-gradient")}>
+                        <strong>Animated Gradient</strong>
+                        <small>Slow drifting color field</small>
+                      </button>
+                      <button type="button" className={`theme-card ${backgroundVisualId === "closing-plasma" ? "active" : ""}`} onClick={() => setBackgroundVisualId("closing-plasma")}>
+                        <strong>Closing Plasma</strong>
+                        <small>Pulsing plasma horizon</small>
+                      </button>
+                    </div>
+                  </div>
                 </section>
               ) : null}
 
@@ -6753,7 +6954,7 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator", "image-generator", "media-center", "settings"].includes(selectedPane.id) ? (
+          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator", "image-generator", "media-center", "settings", "game-creator"].includes(selectedPane.id) ? (
             <div className="placeholder-view">
               <h2>{boot?.tools.find((tool) => tool.id === selectedPane.id)?.name ?? "Tool"}</h2>
               <p>Tool plugin slot ready. Hook this panel to a future backend module.</p>

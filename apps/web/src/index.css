@@ -242,6 +242,65 @@ h3 {
   background: rgba(13, 23, 29, 0.36);
   min-height: 0;
   overflow: hidden;
+  position: relative;
+  isolation: isolate;
+}
+
+.pane > * {
+  position: relative;
+  z-index: 1;
+}
+
+.pane::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+}
+
+:root[data-background-visual="matrix-rain"] .pane::before {
+  opacity: 0.26;
+  background-image:
+    linear-gradient(180deg, rgba(46, 204, 113, 0.2), rgba(46, 204, 113, 0.02)),
+    repeating-linear-gradient(90deg, rgba(44, 255, 151, 0.16) 0, rgba(44, 255, 151, 0.16) 1px, transparent 1px, transparent 13px),
+    repeating-linear-gradient(180deg, rgba(44, 255, 151, 0.18) 0, rgba(44, 255, 151, 0.18) 3px, transparent 3px, transparent 30px);
+  background-size: 100% 180%, auto, auto;
+  animation: nexusMatrixDrift 9s linear infinite;
+}
+
+:root[data-background-visual="prism-gradient"] .pane::before {
+  opacity: 0.3;
+  background: conic-gradient(from 130deg at 18% 12%, rgba(255, 194, 102, 0.34), rgba(108, 227, 255, 0.24), rgba(255, 145, 120, 0.28), rgba(255, 194, 102, 0.34));
+  filter: saturate(118%);
+  animation: nexusPrismSpin 18s linear infinite;
+}
+
+:root[data-background-visual="liquid-chrome"] .pane::before {
+  opacity: 0.34;
+  background:
+    radial-gradient(120% 90% at 20% 20%, rgba(255, 255, 255, 0.23), transparent 52%),
+    radial-gradient(120% 90% at 70% 80%, rgba(98, 178, 224, 0.27), transparent 54%),
+    linear-gradient(115deg, rgba(255, 255, 255, 0.12), rgba(180, 203, 220, 0.06) 40%, rgba(22, 35, 44, 0.1));
+  mix-blend-mode: screen;
+  animation: nexusLiquidPulse 7.5s ease-in-out infinite;
+}
+
+:root[data-background-visual="animated-gradient"] .pane::before {
+  opacity: 0.24;
+  background: linear-gradient(122deg, rgba(255, 122, 24, 0.36), rgba(95, 217, 255, 0.28), rgba(120, 225, 145, 0.28), rgba(255, 122, 24, 0.36));
+  background-size: 240% 240%;
+  animation: nexusGradientFlow 11s ease infinite;
+}
+
+:root[data-background-visual="closing-plasma"] .pane::before {
+  opacity: 0.34;
+  background:
+    radial-gradient(120% 86% at 50% 115%, rgba(255, 120, 90, 0.34), rgba(255, 120, 90, 0.04) 60%),
+    radial-gradient(95% 72% at 50% -15%, rgba(122, 246, 215, 0.26), rgba(122, 246, 215, 0.03) 58%);
+  animation: nexusPlasmaBreathe 6.8s ease-in-out infinite;
 }
 
 .pane-left,
@@ -493,22 +552,35 @@ button:disabled {
 }
 
 .harness-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0;
+  padding: 4px;
+  border: 1px solid rgba(47, 71, 79, 0.5);
+  border-radius: 12px;
+  background: rgba(11, 19, 25, 0.58);
+  width: 100%;
 }
 
 .harness-tab {
-  background: rgba(18, 29, 35, 0.52);
-  border: 1px solid rgba(47, 71, 79, 0.35);
+  flex: 1;
+  background: transparent;
+  border: 1px solid transparent;
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  border-radius: 10px;
+  padding: 7px 12px;
+  color: var(--ink-3);
+  transition: all 160ms ease;
 }
 
 .harness-tab.active {
-  border-color: rgba(255, 122, 24, 0.55);
-  background: rgba(255, 122, 24, 0.12);
+  border-color: rgba(93, 169, 199, 0.56);
+  background: linear-gradient(180deg, rgba(93, 169, 199, 0.2), rgba(93, 169, 199, 0.09));
+  color: var(--ink-1);
+  box-shadow: inset 0 0 0 1px rgba(110, 196, 226, 0.14);
 }
 
 .thread-create {
@@ -733,6 +805,9 @@ button:disabled {
 
 :root[data-theme="daybreak"] .tool-tab,
 :root[data-theme="daybreak"] .harness-tab,
+:root[data-theme="daybreak"] .settings-tabs,
+:root[data-theme="daybreak"] .tool-tabs,
+:root[data-theme="daybreak"] .harness-tabs,
 :root[data-theme="daybreak"] .theme-card,
 :root[data-theme="daybreak"] .ghost,
 :root[data-theme="daybreak"] .tab-btn {
@@ -943,29 +1018,45 @@ button:disabled {
 }
 
 .settings-tabs {
-  display: flex;
-  gap: 8px;
-  margin: 4px 0 8px;
+  display: inline-flex;
+  gap: 4px;
+  margin: 4px 0 10px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid rgba(47, 71, 79, 0.5);
+  background: rgba(12, 21, 27, 0.58);
 }
 
 .tool-tabs {
-  display: flex;
-  gap: 8px;
-  margin: 8px 0 4px;
+  display: inline-flex;
+  gap: 4px;
+  margin: 8px 0 8px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid rgba(47, 71, 79, 0.5);
+  background: rgba(12, 21, 27, 0.58);
+  flex-wrap: wrap;
 }
 
 .tool-tab {
-  border: 1px solid rgba(47, 71, 79, 0.45);
-  background: rgba(18, 29, 35, 0.52);
-  color: var(--ink-2);
-  padding: 6px 12px;
-  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-3);
+  padding: 7px 12px;
+  border-radius: 10px;
+  transition: all 160ms ease;
+  min-width: 84px;
 }
 
 .tool-tab.active {
-  border-color: rgba(93, 169, 199, 0.8);
+  border-color: rgba(93, 169, 199, 0.56);
   color: var(--ink-1);
-  background: rgba(54, 103, 117, 0.4);
+  background: linear-gradient(180deg, rgba(93, 169, 199, 0.2), rgba(93, 169, 199, 0.09));
+  box-shadow: inset 0 0 0 1px rgba(110, 196, 226, 0.14);
+}
+
+.background-visuals-section {
+  margin-top: 12px;
 }
 
 .connector-placeholder-grid {
@@ -2201,31 +2292,49 @@ textarea {
   gap: 10px;
 }
 
-.nxr-fallback-rows {
-  display: grid;
-  gap: 8px;
+.nxr-fallback-table-wrap {
+  overflow-x: auto;
   margin-bottom: 10px;
 }
 
-.nxr-fallback-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: nowrap;
+.nxr-fallback-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 760px;
+  border: 1px solid rgba(47, 71, 79, 0.5);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(10, 19, 24, 0.58);
 }
 
-.nxr-fallback-row select:first-child {
-  min-width: 150px;
-  flex: 1.1;
+.nxr-fallback-table th,
+.nxr-fallback-table td {
+  padding: 8px;
+  text-align: left;
+  border-bottom: 1px solid rgba(47, 71, 79, 0.35);
+  vertical-align: middle;
 }
 
-.nxr-fallback-row select:nth-child(2) {
-  min-width: 240px;
-  flex: 1.8;
+.nxr-fallback-table th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  background: rgba(16, 28, 35, 0.92);
 }
 
-.nxr-fallback-row .ghost {
-  flex-shrink: 0;
+.nxr-fallback-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.nxr-fallback-table td select {
+  width: 100%;
+}
+
+.nxr-order-controls {
+  display: inline-flex;
+  gap: 6px;
 }
 
 .nxr-row-status {
@@ -2250,6 +2359,15 @@ textarea {
 
 .nxr-row-status.idle {
   color: var(--ink-3);
+}
+
+:root[data-theme="daybreak"] .nxr-fallback-table {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(191, 208, 221, 0.9);
+}
+
+:root[data-theme="daybreak"] .nxr-fallback-table th {
+  background: rgba(236, 244, 251, 0.98);
 }
 
 .nxr-subheading {
@@ -2416,8 +2534,10 @@ textarea {
     grid-template-columns: 1fr 1fr;
   }
 
-  .nxr-fallback-row {
-    flex-wrap: wrap;
+  .tool-tabs,
+  .settings-tabs,
+  .harness-tabs {
+    width: 100%;
   }
 
   .router-browser-controls {
@@ -2445,6 +2565,58 @@ textarea {
     min-height: auto;
   }
 
+
+@keyframes nexusMatrixDrift {
+  0% {
+    background-position: 0 0, 0 0, 0 0;
+  }
+  100% {
+    background-position: 0 180%, 0 0, 0 220%;
+  }
+}
+
+@keyframes nexusPrismSpin {
+  0% {
+    transform: rotate(0deg) scale(1.03);
+  }
+  100% {
+    transform: rotate(360deg) scale(1.03);
+  }
+}
+
+@keyframes nexusLiquidPulse {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(0, -2%, 0) scale(1.04);
+  }
+}
+
+@keyframes nexusGradientFlow {
+  0% {
+    background-position: 0% 45%;
+  }
+  50% {
+    background-position: 100% 55%;
+  }
+  100% {
+    background-position: 0% 45%;
+  }
+}
+
+@keyframes nexusPlasmaBreathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.31;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.42;
+  }
+}
   .router-form,
   .router-panels {
     grid-template-columns: 1fr;

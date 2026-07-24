@@ -616,6 +616,68 @@ async function readCanonDocStatus(input: {
   return rows;
 }
 
+async function evaluateGate2Readiness(input: {
+  state: SystemState;
+  workspacePath: string;
+  requireLocked: boolean;
+}): Promise<{
+  ready: boolean;
+  blockers: string[];
+  summary: {
+    requiredDocs: number;
+    existingDocs: number;
+    approvedDocs: number;
+    lockedDocs: number;
+  };
+}> {
+  const draft = readGameCreatorDraft(input.state);
+  const spec = buildGameCreatorSpecPackage(draft);
+  const files = buildCanonDocTemplateFiles(spec).filter((entry) => entry.fileName !== "CANON_DOC_INDEX.md");
+  const store = getGameCreatorCanonDocsStore(input.state);
+  const status = await readCanonDocStatus({
+    workspacePath: input.workspacePath,
+    files,
+    records: store.records,
+    snapshots: store.snapshots,
+  });
+
+  const blockers: string[] = [];
+  let existingDocs = 0;
+  let approvedDocs = 0;
+  let lockedDocs = 0;
+
+  for (const entry of status) {
+    if (entry.exists) {
+      existingDocs += 1;
+    } else {
+      blockers.push(`${entry.fileName} is missing.`);
+    }
+
+    if (entry.record.reviewStatus === "approved") {
+      approvedDocs += 1;
+    } else {
+      blockers.push(`${entry.fileName} is not approved.`);
+    }
+
+    if (entry.record.locked) {
+      lockedDocs += 1;
+    } else if (input.requireLocked) {
+      blockers.push(`${entry.fileName} is not locked.`);
+    }
+  }
+
+  return {
+    ready: blockers.length === 0,
+    blockers,
+    summary: {
+      requiredDocs: status.length,
+      existingDocs,
+      approvedDocs,
+      lockedDocs,
+    },
+  };
+}
+
 function buildCanonDocGenerationPrompt(input: {
   spec: GameCreatorSpecPackage;
   templates: CanonDocFile[];
@@ -2795,6 +2857,58 @@ app.post("/api/tools/game-creator/canon-docs/:fileName/regenerate", async (req, 
     harnessesUsed: generated.harnessesUsed,
     warnings: generated.warnings,
     status,
+  });
+});
+
+app.get("/api/tools/game-creator/gates/gate2", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim();
+  const requireLocked = String(req.query.requireLocked ?? "true").trim().toLowerCase() !== "false";
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
+  const readiness = await evaluateGate2Readiness({
+    state,
+    workspacePath: workspace.path,
+    requireLocked,
+  });
+
+  res.json({
+    ok: true,
+    gateId: "gate-2-preproduction-docs",
+    requireLocked,
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    ...readiness,
+  });
+});
+
+app.post("/api/tools/game-creator/process/start", async (req, res) => {
+  const body = req.body as { workspaceId?: string; requireLocked?: boolean };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const readiness = await evaluateGate2Readiness({
+    state,
+    workspacePath: workspace.path,
+    requireLocked: body.requireLocked !== false,
+  });
+
+  if (!readiness.ready) {
+    return res.status(412).json({
+      error: "Gate 2 is blocked. Resolve blockers before starting the Game Creator pipeline.",
+      gateId: "gate-2-preproduction-docs",
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      ...readiness,
+    });
+  }
+
+  return res.json({
+    ok: true,
+    gateId: "gate-2-preproduction-docs",
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    started: true,
+    message: "Gate 2 passed. Pipeline start is approved (execution stages can be connected next).",
+    ...readiness,
   });
 });
 
