@@ -157,6 +157,64 @@ body {
   font-size: 0.91rem;
 }
 
+.app-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 220ms ease;
+  z-index: 0;
+}
+
+:root[data-background-visual="matrix-rain"] .app-shell::before,
+body[data-background-visual="matrix-rain"] .app-shell::before {
+  opacity: 0.22;
+  background:
+    repeating-linear-gradient(90deg, rgba(78, 255, 161, 0.35) 0, rgba(78, 255, 161, 0.35) 1px, transparent 1px, transparent 12px),
+    repeating-linear-gradient(180deg, rgba(78, 255, 161, 0.18) 0, rgba(78, 255, 161, 0.18) 2px, transparent 2px, transparent 26px);
+  animation: nexusMatrixDrift 8s linear infinite;
+}
+
+:root[data-background-visual="prism-gradient"] .app-shell::before,
+body[data-background-visual="prism-gradient"] .app-shell::before {
+  opacity: 0.22;
+  background: conic-gradient(from 130deg at 35% 40%, rgba(255, 180, 81, 0.4), rgba(76, 212, 255, 0.34), rgba(255, 133, 169, 0.3), rgba(255, 180, 81, 0.4));
+  animation: nexusPrismSpin 14s linear infinite;
+}
+
+:root[data-background-visual="liquid-chrome"] .app-shell::before,
+body[data-background-visual="liquid-chrome"] .app-shell::before {
+  opacity: 0.2;
+  background:
+    radial-gradient(120% 90% at 15% 20%, rgba(255, 255, 255, 0.34), transparent 55%),
+    radial-gradient(120% 90% at 85% 85%, rgba(150, 196, 224, 0.3), transparent 58%),
+    linear-gradient(120deg, rgba(255, 255, 255, 0.2), rgba(138, 166, 184, 0.11), rgba(255, 255, 255, 0.16));
+  animation: nexusLiquidPulse 7.2s ease-in-out infinite;
+}
+
+:root[data-background-visual="animated-gradient"] .app-shell::before,
+body[data-background-visual="animated-gradient"] .app-shell::before {
+  opacity: 0.21;
+  background: linear-gradient(120deg, rgba(255, 122, 24, 0.38), rgba(85, 215, 255, 0.3), rgba(125, 230, 154, 0.28), rgba(255, 122, 24, 0.38));
+  background-size: 260% 260%;
+  animation: nexusGradientFlow 9.5s ease infinite;
+}
+
+:root[data-background-visual="closing-plasma"] .app-shell::before,
+body[data-background-visual="closing-plasma"] .app-shell::before {
+  opacity: 0.23;
+  background:
+    radial-gradient(100% 70% at 50% 100%, rgba(255, 120, 90, 0.45), rgba(255, 120, 90, 0.05) 58%),
+    radial-gradient(80% 60% at 45% 0%, rgba(122, 246, 215, 0.33), rgba(122, 246, 215, 0.04) 56%);
+  animation: nexusPlasmaBreathe 6s ease-in-out infinite;
+}
+
+.app-shell > * {
+  position: relative;
+  z-index: 1;
+}
+
 .orb {
   position: absolute;
   border-radius: 999px;

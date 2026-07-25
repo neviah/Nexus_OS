@@ -422,6 +422,18 @@ type GameCreatorGenerationProgress = {
   events: GameCreatorGenerationProgressEvent[];
 };
 
+type GameCreatorQueueLane = "design" | "engineering" | "gameplay" | "content" | "art" | "audio" | "production" | "qa";
+
+type GameCreatorQueueItem = {
+  id: string;
+  lane: GameCreatorQueueLane;
+  title: string;
+  sourceDocFile: string;
+  status: "backlog" | "ready" | "in-progress" | "blocked" | "done";
+  notes?: string;
+  updatedAt: string;
+};
+
 const GAME_CREATOR_CANON_DOC_ROOT = "docs/game-creator";
 const GAME_CREATOR_CANON_DOC_VERSION_ROOT = "docs/game-creator/.versions";
 const gameCreatorGenerationProgressByWorkspace = new Map<string, GameCreatorGenerationProgress>();
@@ -483,6 +495,79 @@ function writeGameCreatorCanonDocsStore(state: SystemState, input: {
       snapshots: input.snapshots,
     },
   };
+}
+
+function getGameCreatorExecutionQueueStore(state: SystemState): {
+  builtAt?: string;
+  items: GameCreatorQueueItem[];
+} {
+  return {
+    builtAt: state.gameCreator?.executionQueue?.builtAt,
+    items: state.gameCreator?.executionQueue?.items ?? [],
+  };
+}
+
+function writeGameCreatorExecutionQueueStore(state: SystemState, input: {
+  builtAt: string;
+  items: GameCreatorQueueItem[];
+}): void {
+  state.gameCreator = {
+    ...(state.gameCreator ?? {}),
+    executionQueue: {
+      builtAt: input.builtAt,
+      items: input.items,
+    },
+  };
+}
+
+function mapDocToQueueItem(fileName: string): { lane: GameCreatorQueueLane; title: string; notes: string } {
+  const now = new Date().toISOString();
+  switch (fileName) {
+    case "GAME_BIBLE.md":
+      return { lane: "design", title: "Lock core fantasy and loop acceptance criteria", notes: `Derived at ${now}` };
+    case "TECHNICAL_DESIGN.md":
+      return { lane: "engineering", title: "Create technical implementation plan and system ownership", notes: `Derived at ${now}` };
+    case "UI_UX_SPEC.md":
+      return { lane: "design", title: "Define UI flows and HUD interaction states", notes: `Derived at ${now}` };
+    case "CONTROLS_CAMERA_SPEC.md":
+      return { lane: "gameplay", title: "Implement controls and camera baseline", notes: `Derived at ${now}` };
+    case "ART_BIBLE.md":
+      return { lane: "art", title: "Establish asset style guide and starter asset list", notes: `Derived at ${now}` };
+    case "LORE_BOOK.md":
+      return { lane: "content", title: "Author lore constraints and narrative beats", notes: `Derived at ${now}` };
+    case "AUDIO_BIBLE.md":
+      return { lane: "audio", title: "Plan music/SFX coverage for core loop", notes: `Derived at ${now}` };
+    case "PRODUCTION_PLAN.md":
+      return { lane: "production", title: "Convert milestones into sprint checkpoints", notes: `Derived at ${now}` };
+    case "ENEMY_ROSTER.md":
+      return { lane: "content", title: "Build enemy family backlog and biome mapping", notes: `Derived at ${now}` };
+    case "DIFFICULTY_CURVE.md":
+      return { lane: "qa", title: "Define progression balance tests and telemetry hooks", notes: `Derived at ${now}` };
+    default:
+      return { lane: "design", title: `Review ${fileName} and capture implementation tasks`, notes: `Derived at ${now}` };
+  }
+}
+
+function buildGameCreatorExecutionQueueFromStatus(status: Array<{
+  fileName: string;
+  exists: boolean;
+  record: GameCreatorCanonDocRecord;
+}>): GameCreatorQueueItem[] {
+  const now = new Date().toISOString();
+  return status
+    .filter((entry) => entry.exists && entry.record.reviewStatus === "approved" && entry.record.locked)
+    .map((entry) => {
+      const mapped = mapDocToQueueItem(entry.fileName);
+      return {
+        id: crypto.randomUUID(),
+        lane: mapped.lane,
+        title: mapped.title,
+        sourceDocFile: entry.fileName,
+        status: "ready",
+        notes: mapped.notes,
+        updatedAt: now,
+      };
+    });
 }
 
 function createDefaultCanonDocRecord(file: CanonDocFile): GameCreatorCanonDocRecord {
@@ -3004,6 +3089,117 @@ app.post("/api/tools/game-creator/process/start", async (req, res) => {
     started: true,
     message: "Gate 2 passed. Pipeline start is approved (execution stages can be connected next).",
     ...readiness,
+  });
+});
+
+app.get("/api/tools/game-creator/queue", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim();
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
+  const queue = getGameCreatorExecutionQueueStore(state);
+  const summary = {
+    total: queue.items.length,
+    ready: queue.items.filter((entry) => entry.status === "ready").length,
+    inProgress: queue.items.filter((entry) => entry.status === "in-progress").length,
+    blocked: queue.items.filter((entry) => entry.status === "blocked").length,
+    done: queue.items.filter((entry) => entry.status === "done").length,
+    backlog: queue.items.filter((entry) => entry.status === "backlog").length,
+  };
+
+  return res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    builtAt: queue.builtAt ?? null,
+    items: queue.items,
+    summary,
+  });
+});
+
+app.post("/api/tools/game-creator/queue/build", async (req, res) => {
+  const body = req.body as { workspaceId?: string; requireLocked?: boolean };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const spec = buildGameCreatorSpecPackage(draft);
+  const files = buildCanonDocTemplateFiles(spec).filter((entry) => entry.fileName !== "CANON_DOC_INDEX.md");
+  const store = getGameCreatorCanonDocsStore(state);
+  const status = await readCanonDocStatus({
+    workspacePath: workspace.path,
+    files,
+    records: store.records,
+    snapshots: store.snapshots,
+  });
+  const readiness = await evaluateGate2Readiness({
+    state,
+    workspacePath: workspace.path,
+    requireLocked: body.requireLocked !== false,
+  });
+  const items = buildGameCreatorExecutionQueueFromStatus(status);
+  const builtAt = new Date().toISOString();
+  writeGameCreatorExecutionQueueStore(state, { builtAt, items });
+  await writeSystemState(state);
+
+  return res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    builtAt,
+    readyForExecution: readiness.ready,
+    blockers: readiness.blockers,
+    items,
+    summary: {
+      total: items.length,
+      ready: items.filter((entry) => entry.status === "ready").length,
+      inProgress: items.filter((entry) => entry.status === "in-progress").length,
+      blocked: items.filter((entry) => entry.status === "blocked").length,
+      done: items.filter((entry) => entry.status === "done").length,
+      backlog: items.filter((entry) => entry.status === "backlog").length,
+    },
+  });
+});
+
+app.post("/api/tools/game-creator/queue/:itemId/status", async (req, res) => {
+  const body = req.body as {
+    workspaceId?: string;
+    status?: "backlog" | "ready" | "in-progress" | "blocked" | "done";
+    notes?: string;
+  };
+  const nextStatus = pickEnumValue(body.status, ["backlog", "ready", "in-progress", "blocked", "done"] as const, "backlog");
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const queue = getGameCreatorExecutionQueueStore(state);
+  const now = new Date().toISOString();
+  const items = queue.items.map((entry) => {
+    if (entry.id !== req.params.itemId) {
+      return entry;
+    }
+    return {
+      ...entry,
+      status: nextStatus,
+      notes: typeof body.notes === "string" ? body.notes.trim().slice(0, 1000) : entry.notes,
+      updatedAt: now,
+    };
+  });
+  writeGameCreatorExecutionQueueStore(state, {
+    builtAt: queue.builtAt ?? now,
+    items,
+  });
+  await writeSystemState(state);
+
+  const summary = {
+    total: items.length,
+    ready: items.filter((entry) => entry.status === "ready").length,
+    inProgress: items.filter((entry) => entry.status === "in-progress").length,
+    blocked: items.filter((entry) => entry.status === "blocked").length,
+    done: items.filter((entry) => entry.status === "done").length,
+    backlog: items.filter((entry) => entry.status === "backlog").length,
+  };
+
+  return res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    builtAt: queue.builtAt ?? now,
+    items,
+    summary,
   });
 });
 

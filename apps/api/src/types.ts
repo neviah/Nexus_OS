@@ -71,6 +71,18 @@ export type GameCreatorState = {
       createdAt: string;
     }>;
   };
+  executionQueue?: {
+    builtAt?: string;
+    items?: Array<{
+      id: string;
+      lane: "design" | "engineering" | "gameplay" | "content" | "art" | "audio" | "production" | "qa";
+      title: string;
+      sourceDocFile: string;
+      status: "backlog" | "ready" | "in-progress" | "blocked" | "done";
+      notes?: string;
+      updatedAt: string;
+    }>;
+  };
 };
 
 export type WorkspaceRecord = {

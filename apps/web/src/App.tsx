@@ -652,7 +652,7 @@ type GitHubDeviceFlow = {
 
 type SettingsTab = "connectors" | "appearance" | "automation";
 
-type MediaCenterTab = "voice" | "music" | "image" | "video" | "models" | "animation";
+type MediaCenterTab = "voice" | "music" | "image" | "video" | "models" | "sprites" | "animation";
 
 type GameCreatorSetupWizardTarget = "unity-3d" | "unity-2d" | "web-2d";
 
@@ -792,6 +792,35 @@ type GameCreatorStartProcessResponse = GameCreatorGate2Status & {
   started?: boolean;
   message?: string;
   error?: string;
+};
+
+type GameCreatorQueueItem = {
+  id: string;
+  lane: "design" | "engineering" | "gameplay" | "content" | "art" | "audio" | "production" | "qa";
+  title: string;
+  sourceDocFile: string;
+  status: "backlog" | "ready" | "in-progress" | "blocked" | "done";
+  notes?: string;
+  updatedAt: string;
+};
+
+type GameCreatorQueueSummary = {
+  total: number;
+  ready: number;
+  inProgress: number;
+  blocked: number;
+  done: number;
+  backlog: number;
+};
+
+type GameCreatorQueueResponse = {
+  ok: boolean;
+  workspaceId: string;
+  builtAt: string | null;
+  items: GameCreatorQueueItem[];
+  summary: GameCreatorQueueSummary;
+  readyForExecution?: boolean;
+  blockers?: string[];
 };
 
 type BackgroundVisualId = "none" | "matrix-rain" | "prism-gradient" | "liquid-chrome" | "animated-gradient" | "closing-plasma";
@@ -1341,6 +1370,11 @@ function App() {
   const [gameCreatorStartBusy, setGameCreatorStartBusy] = useState(false);
   const [gameCreatorGate2Expanded, setGameCreatorGate2Expanded] = useState(false);
   const [gameCreatorShowMissingDocCards, setGameCreatorShowMissingDocCards] = useState(false);
+  const [gameCreatorQueueItems, setGameCreatorQueueItems] = useState<GameCreatorQueueItem[]>([]);
+  const [gameCreatorQueueSummary, setGameCreatorQueueSummary] = useState<GameCreatorQueueSummary | null>(null);
+  const [gameCreatorQueueBuiltAt, setGameCreatorQueueBuiltAt] = useState<string | null>(null);
+  const [gameCreatorQueueBlockers, setGameCreatorQueueBlockers] = useState<string[]>([]);
+  const [gameCreatorQueueBusyAction, setGameCreatorQueueBusyAction] = useState<"build" | "refresh" | string | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -2344,6 +2378,7 @@ function App() {
       await loadGameCreatorCanonDocsStatus();
       await loadGameCreatorGate2Status();
       await loadGameCreatorGenerationProgress();
+      await loadGameCreatorQueue();
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2498,6 +2533,79 @@ function App() {
       pushToast(String(error), "err");
     } finally {
       setGameCreatorStartBusy(false);
+    }
+  }
+
+  async function loadGameCreatorQueue() {
+    setGameCreatorQueueBusyAction("refresh");
+    try {
+      const response = await fetch(`/api/tools/game-creator/queue?workspaceId=${encodeURIComponent(boot?.activeWorkspaceId ?? "")}`);
+      if (!response.ok) {
+        throw new Error("Failed to load Game Creator queue.");
+      }
+      const payload = (await response.json()) as GameCreatorQueueResponse;
+      setGameCreatorQueueItems(payload.items ?? []);
+      setGameCreatorQueueSummary(payload.summary ?? null);
+      setGameCreatorQueueBuiltAt(payload.builtAt ?? null);
+      setGameCreatorQueueBlockers(payload.blockers ?? []);
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorQueueBusyAction(null);
+    }
+  }
+
+  async function buildGameCreatorQueue() {
+    setGameCreatorQueueBusyAction("build");
+    try {
+      const response = await fetch("/api/tools/game-creator/queue/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, requireLocked: true }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to build Game Creator queue.");
+      }
+      const payload = (await response.json()) as GameCreatorQueueResponse;
+      setGameCreatorQueueItems(payload.items ?? []);
+      setGameCreatorQueueSummary(payload.summary ?? null);
+      setGameCreatorQueueBuiltAt(payload.builtAt ?? null);
+      setGameCreatorQueueBlockers(payload.blockers ?? []);
+      setStatusMessage(`Built Step 4 queue with ${payload.items.length} task(s).`);
+      pushToast(`Step 4 queue built (${payload.items.length} tasks).`, "ok");
+      if ((payload.blockers?.length ?? 0) > 0) {
+        pushToast("Queue built with Gate 2 blockers still present.", "warn");
+      }
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorQueueBusyAction(null);
+    }
+  }
+
+  async function updateGameCreatorQueueItemStatus(itemId: string, status: GameCreatorQueueItem["status"]) {
+    const busyKey = `queue:${itemId}:${status}`;
+    setGameCreatorQueueBusyAction(busyKey);
+    try {
+      const response = await fetch(`/api/tools/game-creator/queue/${encodeURIComponent(itemId)}/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, status }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to update Step 4 queue item.");
+      }
+      const payload = (await response.json()) as GameCreatorQueueResponse;
+      setGameCreatorQueueItems(payload.items ?? []);
+      setGameCreatorQueueSummary(payload.summary ?? null);
+      setGameCreatorQueueBuiltAt(payload.builtAt ?? null);
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorQueueBusyAction(null);
     }
   }
 
@@ -3987,6 +4095,7 @@ function App() {
 
   useEffect(() => {
     document.documentElement.setAttribute("data-background-visual", backgroundVisualId);
+    document.body.setAttribute("data-background-visual", backgroundVisualId);
     window.localStorage.setItem("nexus-background-visual", backgroundVisualId);
   }, [backgroundVisualId]);
 
@@ -4066,6 +4175,7 @@ function App() {
         <button type="button" className={`tool-tab ${mediaCenterTab === "image" ? "active" : ""}`} onClick={() => setMediaCenterTab("image")}>Image</button>
         <button type="button" className={`tool-tab ${mediaCenterTab === "video" ? "active" : ""}`} onClick={() => setMediaCenterTab("video")}>Video</button>
         <button type="button" className={`tool-tab ${mediaCenterTab === "models" ? "active" : ""}`} onClick={() => setMediaCenterTab("models")}>3D Models</button>
+        <button type="button" className={`tool-tab ${mediaCenterTab === "sprites" ? "active" : ""}`} onClick={() => setMediaCenterTab("sprites")}>Sprite Sheets</button>
         <button type="button" className={`tool-tab ${mediaCenterTab === "animation" ? "active" : ""}`} onClick={() => setMediaCenterTab("animation")}>Animation</button>
       </div>
     );
@@ -6236,6 +6346,39 @@ function App() {
             </div>
           ) : null}
 
+          {selectedPane.type === "tool" && selectedPane.id === "media-center" && mediaCenterTab === "sprites" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Media Center</h2>
+                  <p className="subtitle">Sprite Sheets workflow hub for 2D assets, transparent frame sequences, and GIF previews.</p>
+                </div>
+              </div>
+
+              {renderMediaCenterTabs()}
+
+              <section className="tool-section">
+                <h3>Sprite Sheets (Planned Integration)</h3>
+                <small>Planned engine: 0x0funky/agent-sprite-forge</small>
+                <small>Use case: character sprite sheets, UI elements, maps, transparent PNG frames, and animated GIF previews.</small>
+                <small>Runtime: codex-based flow (compatible with your current environment).</small>
+                <div className="tool-action-row">
+                  <a href="https://github.com/0x0funky/agent-sprite-forge" target="_blank" rel="noreferrer">Open Repository</a>
+                </div>
+              </section>
+
+              <section className="tool-section">
+                <h3>Planned Controls</h3>
+                <ul className="tool-list">
+                  <li><small>Prompt + style + frame-count preset</small></li>
+                  <li><small>Sprite dimensions, atlas packing, and transparent background enforcement</small></li>
+                  <li><small>Export targets: sprite sheet PNG, frame folder, animated GIF</small></li>
+                  <li><small>Save path under active workspace Assets/sprites</small></li>
+                </ul>
+              </section>
+            </div>
+          ) : null}
+
           {selectedPane.type === "tool" && selectedPane.id === "media-center" && mediaCenterTab === "animation" ? (
             <div className="tool-view tool-console">
               <div className="tool-header-row">
@@ -6785,6 +6928,62 @@ function App() {
                             <button type="button" className="ghost" onClick={() => void toggleGameCreatorCanonDocLock(entry.fileName, !entry.record.locked)} disabled={busy}>{entry.record.locked ? "Unlock" : "Lock"}</button>
                             <button type="button" className="ghost" onClick={() => void snapshotGameCreatorCanonDoc(entry.fileName)} disabled={busy || !entry.exists}>Snapshot</button>
                             <button type="button" className="ghost" onClick={() => void regenerateSingleGameCreatorCanonDoc(entry.fileName)} disabled={busy || entry.record.locked}>Regenerate</button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </section>
+
+              <section className="tool-section">
+                <div className="tool-header-row">
+                  <h3>Step 4: Execution Queue</h3>
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => void buildGameCreatorQueue()} disabled={gameCreatorQueueBusyAction !== null}>
+                      {gameCreatorQueueBusyAction === "build" ? "Building Queue..." : "Build Queue"}
+                    </button>
+                    <button type="button" className="ghost" onClick={() => void loadGameCreatorQueue()} disabled={gameCreatorQueueBusyAction !== null}>
+                      {gameCreatorQueueBusyAction === "refresh" ? "Refreshing..." : "Refresh Queue"}
+                    </button>
+                  </div>
+                </div>
+
+                <small>Builds actionable tasks from docs that are generated, approved, and locked.</small>
+                {gameCreatorQueueBuiltAt ? <small>Queue built: {new Date(gameCreatorQueueBuiltAt).toLocaleString()}</small> : <small>Queue not built yet.</small>}
+                {gameCreatorQueueSummary ? (
+                  <small>
+                    Total {gameCreatorQueueSummary.total} · Ready {gameCreatorQueueSummary.ready} · In Progress {gameCreatorQueueSummary.inProgress} · Blocked {gameCreatorQueueSummary.blocked} · Done {gameCreatorQueueSummary.done}
+                  </small>
+                ) : null}
+                {gameCreatorQueueBlockers.length > 0 ? (
+                  <details className="tool-details">
+                    <summary>Current blockers</summary>
+                    <ul className="tool-list">
+                      {gameCreatorQueueBlockers.map((blocker) => (
+                        <li key={blocker}><small className="runtime-warning">{blocker}</small></li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
+
+                {gameCreatorQueueItems.length === 0 ? (
+                  <small>No queue items yet. Finish Step 3 approvals/locks, then build queue.</small>
+                ) : (
+                  <ul className="tool-list">
+                    {gameCreatorQueueItems.map((item) => {
+                      const busy = Boolean(gameCreatorQueueBusyAction && gameCreatorQueueBusyAction.includes(item.id));
+                      return (
+                        <li key={item.id}>
+                          <strong>{item.title}</strong>
+                          <small>Lane: {item.lane} · Source: {item.sourceDocFile}</small>
+                          <small>Status: {item.status} · Updated: {new Date(item.updatedAt).toLocaleString()}</small>
+                          {item.notes ? <small>Notes: {item.notes}</small> : null}
+                          <div className="tool-action-row">
+                            <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "ready")} disabled={busy}>Ready</button>
+                            <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "in-progress")} disabled={busy}>In Progress</button>
+                            <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "blocked")} disabled={busy}>Blocked</button>
+                            <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "done")} disabled={busy}>Done</button>
                           </div>
                         </li>
                       );
