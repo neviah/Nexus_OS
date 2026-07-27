@@ -1430,11 +1430,14 @@ function App() {
   const [gameCreatorStartBusy, setGameCreatorStartBusy] = useState(false);
   const [gameCreatorGate2Expanded, setGameCreatorGate2Expanded] = useState(false);
   const [gameCreatorShowMissingDocCards, setGameCreatorShowMissingDocCards] = useState(false);
+  const [gameCreatorDocFocusFilter, setGameCreatorDocFocusFilter] = useState<"all" | "needs-review" | "quality-fail" | "unlocked">("needs-review");
+  const [gameCreatorSectionControlsExpanded, setGameCreatorSectionControlsExpanded] = useState(false);
   const [gameCreatorQueueItems, setGameCreatorQueueItems] = useState<GameCreatorQueueItem[]>([]);
   const [gameCreatorQueueSummary, setGameCreatorQueueSummary] = useState<GameCreatorQueueSummary | null>(null);
   const [gameCreatorQueueBuiltAt, setGameCreatorQueueBuiltAt] = useState<string | null>(null);
   const [gameCreatorQueueBlockers, setGameCreatorQueueBlockers] = useState<string[]>([]);
   const [gameCreatorQueueImpactSummary, setGameCreatorQueueImpactSummary] = useState<{ changedDocs: string[]; impactedQueueItems: number } | null>(null);
+  const [gameCreatorQueueStatusFilter, setGameCreatorQueueStatusFilter] = useState<"all" | GameCreatorQueueItem["status"]>("ready");
   const [gameCreatorQueueBusyAction, setGameCreatorQueueBusyAction] = useState<"build" | "refresh" | string | null>(null);
   const [gameCreatorSpritePrompt, setGameCreatorSpritePrompt] = useState("pixel-art hero run cycle, transparent background");
   const [gameCreatorSpriteModel, setGameCreatorSpriteModel] = useState("dreamshaper-8");
@@ -1523,6 +1526,26 @@ function App() {
     }
     return gameCreatorCanonDocsStatus.filter((entry) => entry.exists);
   }, [gameCreatorCanonDocsStatus, gameCreatorShowMissingDocCards]);
+
+  const gameCreatorFocusedDocStatus = useMemo(() => {
+    if (gameCreatorDocFocusFilter === "all") {
+      return gameCreatorVisibleDocStatus;
+    }
+    if (gameCreatorDocFocusFilter === "needs-review") {
+      return gameCreatorVisibleDocStatus.filter((entry) => entry.record.reviewStatus !== "approved" || !entry.record.locked);
+    }
+    if (gameCreatorDocFocusFilter === "quality-fail") {
+      return gameCreatorVisibleDocStatus.filter((entry) => !entry.quality?.passed);
+    }
+    return gameCreatorVisibleDocStatus.filter((entry) => !entry.record.locked);
+  }, [gameCreatorDocFocusFilter, gameCreatorVisibleDocStatus]);
+
+  const gameCreatorVisibleQueueItems = useMemo(() => {
+    if (gameCreatorQueueStatusFilter === "all") {
+      return gameCreatorQueueItems;
+    }
+    return gameCreatorQueueItems.filter((entry) => entry.status === gameCreatorQueueStatusFilter);
+  }, [gameCreatorQueueItems, gameCreatorQueueStatusFilter]);
 
   useEffect(() => {
     const candidate = model3dResult?.relativePath?.trim() ?? "";
@@ -7216,6 +7239,15 @@ function App() {
                 <div className="tool-header-row">
                   <h3>Step 3: Review, Lock, and Version</h3>
                   <div className="tool-action-row">
+                    <select value={gameCreatorDocFocusFilter} onChange={(event) => setGameCreatorDocFocusFilter(event.target.value as "all" | "needs-review" | "quality-fail" | "unlocked")}>
+                      <option value="needs-review">Focus: Needs review</option>
+                      <option value="quality-fail">Focus: Quality fails</option>
+                      <option value="unlocked">Focus: Unlocked</option>
+                      <option value="all">Focus: All docs</option>
+                    </select>
+                    <button type="button" className="ghost" onClick={() => setGameCreatorSectionControlsExpanded((current) => !current)}>
+                      {gameCreatorSectionControlsExpanded ? "Hide Section Controls" : "Show Section Controls"}
+                    </button>
                     <button type="button" className="ghost" onClick={() => setGameCreatorShowMissingDocCards((current) => !current)}>
                       {gameCreatorShowMissingDocCards ? "Hide Missing Templates" : "Show Missing Templates"}
                     </button>
@@ -7224,19 +7256,24 @@ function App() {
                     </button>
                   </div>
                 </div>
-                {gameCreatorVisibleDocStatus.length === 0 ? (
+                <div className="status-chip-row">
+                  <span className="status-chip">Visible {gameCreatorVisibleDocStatus.length}</span>
+                  <span className="status-chip">Focused {gameCreatorFocusedDocStatus.length}</span>
+                  <span className="status-chip">Approved {gameCreatorVisibleDocStatus.filter((entry) => entry.record.reviewStatus === "approved").length}</span>
+                  <span className="status-chip">Locked {gameCreatorVisibleDocStatus.filter((entry) => entry.record.locked).length}</span>
+                </div>
+                {gameCreatorFocusedDocStatus.length === 0 ? (
                   <small>No generated canon docs yet. Run Step 2 first.</small>
                 ) : (
                   <ul className="tool-list">
-                    {gameCreatorVisibleDocStatus.map((entry) => {
+                    {gameCreatorFocusedDocStatus.map((entry) => {
                       const statusTone = entry.record.reviewStatus === "approved" ? "runtime-ready" : entry.record.reviewStatus === "rejected" ? "runtime-warning" : "side-status";
                       const busy = Boolean(gameCreatorReviewBusyKey && gameCreatorReviewBusyKey.startsWith(`${entry.fileName}:`));
                       return (
                         <li key={entry.fileName}>
                           <strong>{entry.fileName}</strong>
-                          <small>{entry.title}</small>
-                          <small>Path: {entry.relativePath}</small>
-                          <small className={statusTone}>Review: {entry.record.reviewStatus} · Version: v{entry.record.version} · Locked: {entry.record.locked ? "yes" : "no"}</small>
+                          <small>{entry.title} · {entry.relativePath}</small>
+                          <small className={statusTone}>Review: {entry.record.reviewStatus} · v{entry.record.version} · Locked: {entry.record.locked ? "yes" : "no"}</small>
                           <small>Snapshots: {entry.snapshots.length} · Last generated: {entry.record.lastGeneratedAt ? new Date(entry.record.lastGeneratedAt).toLocaleString() : "n/a"}</small>
                           {entry.quality ? (
                             <small className={entry.quality.passed ? "runtime-ready" : "runtime-warning"}>
@@ -7250,56 +7287,38 @@ function App() {
                               {entry.record.lastDiffSummary.changedSections.length ? ` · changed sections: ${entry.record.lastDiffSummary.changedSections.join(", ")}` : ""}
                             </small>
                           ) : null}
-                          {entry.sectionStatuses?.length ? (
-                            <div className="tool-list">
-                              {entry.sectionStatuses.map((sectionStatus) => {
-                                const sectionBusyPrefix = `${entry.fileName}:section:${sectionStatus.section}:`;
-                                const sectionBusy = Boolean(gameCreatorReviewBusyKey && gameCreatorReviewBusyKey.startsWith(sectionBusyPrefix));
-                                return (
-                                  <div key={`${entry.fileName}:${sectionStatus.section}`}>
-                                    <small>
-                                      Section: {sectionStatus.section} · {sectionStatus.status}
-                                    </small>
-                                    <div className="tool-action-row">
-                                      <button
-                                        type="button"
-                                        className="ghost"
-                                        onClick={() => void updateGameCreatorCanonDocSectionDecision(entry.fileName, sectionStatus.section, "approved")}
-                                        disabled={sectionBusy}
-                                      >
-                                        Approve Section
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="ghost"
-                                        onClick={() => void updateGameCreatorCanonDocSectionDecision(entry.fileName, sectionStatus.section, "rejected")}
-                                        disabled={sectionBusy}
-                                      >
-                                        Reject Section
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="ghost"
-                                        onClick={() => void updateGameCreatorCanonDocSectionDecision(entry.fileName, sectionStatus.section, "pending")}
-                                        disabled={sectionBusy}
-                                      >
-                                        Reset Section
-                                      </button>
-                                    </div>
-                                  </div>
-                                );
-                              })}
+                          <details className="tool-details">
+                            <summary>Review actions</summary>
+                            {entry.record.reviewNote ? <small>Note: {entry.record.reviewNote}</small> : null}
+                            <div className="tool-action-row">
+                              <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "approved")} disabled={busy}>Approve</button>
+                              <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "rejected")} disabled={busy}>Reject</button>
+                              <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "pending")} disabled={busy}>Reset Review</button>
+                              <button type="button" className="ghost" onClick={() => void toggleGameCreatorCanonDocLock(entry.fileName, !entry.record.locked)} disabled={busy}>{entry.record.locked ? "Unlock" : "Lock"}</button>
+                              <button type="button" className="ghost" onClick={() => void snapshotGameCreatorCanonDoc(entry.fileName)} disabled={busy || !entry.exists}>Snapshot</button>
+                              <button type="button" className="ghost" onClick={() => void regenerateSingleGameCreatorCanonDoc(entry.fileName)} disabled={busy || entry.record.locked}>Regenerate</button>
                             </div>
-                          ) : null}
-                          {entry.record.reviewNote ? <small>Note: {entry.record.reviewNote}</small> : null}
-                          <div className="tool-action-row">
-                            <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "approved")} disabled={busy}>Approve</button>
-                            <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "rejected")} disabled={busy}>Reject</button>
-                            <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "pending")} disabled={busy}>Reset Review</button>
-                            <button type="button" className="ghost" onClick={() => void toggleGameCreatorCanonDocLock(entry.fileName, !entry.record.locked)} disabled={busy}>{entry.record.locked ? "Unlock" : "Lock"}</button>
-                            <button type="button" className="ghost" onClick={() => void snapshotGameCreatorCanonDoc(entry.fileName)} disabled={busy || !entry.exists}>Snapshot</button>
-                            <button type="button" className="ghost" onClick={() => void regenerateSingleGameCreatorCanonDoc(entry.fileName)} disabled={busy || entry.record.locked}>Regenerate</button>
-                          </div>
+                            {gameCreatorSectionControlsExpanded && entry.sectionStatuses?.length ? (
+                              <div className="tool-list section-review-list">
+                                {entry.sectionStatuses.map((sectionStatus) => {
+                                  const sectionBusyPrefix = `${entry.fileName}:section:${sectionStatus.section}:`;
+                                  const sectionBusy = Boolean(gameCreatorReviewBusyKey && gameCreatorReviewBusyKey.startsWith(sectionBusyPrefix));
+                                  return (
+                                    <div key={`${entry.fileName}:${sectionStatus.section}`} className="section-review-row">
+                                      <small>
+                                        Section: {sectionStatus.section} · {sectionStatus.status}
+                                      </small>
+                                      <div className="tool-action-row">
+                                        <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocSectionDecision(entry.fileName, sectionStatus.section, "approved")} disabled={sectionBusy}>Approve</button>
+                                        <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocSectionDecision(entry.fileName, sectionStatus.section, "rejected")} disabled={sectionBusy}>Reject</button>
+                                        <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocSectionDecision(entry.fileName, sectionStatus.section, "pending")} disabled={sectionBusy}>Reset</button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                          </details>
                         </li>
                       );
                     })}
@@ -7311,6 +7330,14 @@ function App() {
                 <div className="tool-header-row">
                   <h3>Step 4: Execution Queue</h3>
                   <div className="tool-action-row">
+                    <select value={gameCreatorQueueStatusFilter} onChange={(event) => setGameCreatorQueueStatusFilter(event.target.value as "all" | GameCreatorQueueItem["status"])}>
+                      <option value="ready">Focus: Ready</option>
+                      <option value="in-progress">Focus: In Progress</option>
+                      <option value="blocked">Focus: Blocked</option>
+                      <option value="backlog">Focus: Backlog</option>
+                      <option value="done">Focus: Done</option>
+                      <option value="all">Focus: All</option>
+                    </select>
                     <button type="button" onClick={() => void buildGameCreatorQueue()} disabled={gameCreatorQueueBusyAction !== null}>
                       {gameCreatorQueueBusyAction === "build" ? "Building Queue..." : "Build Queue"}
                     </button>
@@ -7332,6 +7359,13 @@ function App() {
                     Impact: {gameCreatorQueueImpactSummary.changedDocs.length} changed doc(s) affecting {gameCreatorQueueImpactSummary.impactedQueueItems} queue item(s)
                   </small>
                 ) : null}
+                <div className="status-chip-row">
+                  <span className="status-chip">Visible {gameCreatorVisibleQueueItems.length}</span>
+                  <span className="status-chip">Ready {gameCreatorQueueSummary?.ready ?? 0}</span>
+                  <span className="status-chip">In Progress {gameCreatorQueueSummary?.inProgress ?? 0}</span>
+                  <span className="status-chip">Blocked {gameCreatorQueueSummary?.blocked ?? 0}</span>
+                  <span className="status-chip">Done {gameCreatorQueueSummary?.done ?? 0}</span>
+                </div>
                 {gameCreatorQueueBlockers.length > 0 ? (
                   <details className="tool-details">
                     <summary>Current blockers</summary>
@@ -7343,11 +7377,11 @@ function App() {
                   </details>
                 ) : null}
 
-                {gameCreatorQueueItems.length === 0 ? (
+                {gameCreatorVisibleQueueItems.length === 0 ? (
                   <small>No queue items yet. Finish Step 3 approvals/locks, then build queue.</small>
                 ) : (
                   <ul className="tool-list">
-                    {gameCreatorQueueItems.map((item) => {
+                    {gameCreatorVisibleQueueItems.map((item) => {
                       const busy = Boolean(gameCreatorQueueBusyAction && gameCreatorQueueBusyAction.includes(item.id));
                       return (
                         <li key={item.id}>

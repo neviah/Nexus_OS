@@ -1129,6 +1129,34 @@ button:disabled {
   gap: 8px;
 }
 
+.status-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.status-chip {
+  border: 1px solid rgba(47, 71, 79, 0.45);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.72rem;
+  color: var(--ink-2);
+  background: rgba(12, 21, 27, 0.56);
+}
+
+.section-review-list {
+  margin-top: 8px;
+}
+
+.section-review-row {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(9, 15, 20, 0.35);
+  display: grid;
+  gap: 6px;
+}
+
 .settings-tabs {
   display: inline-flex;
   gap: 4px;
