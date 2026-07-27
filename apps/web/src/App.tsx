@@ -839,6 +839,12 @@ type GameCreatorQueueItem = {
   title: string;
   sourceDocFile: string;
   status: "backlog" | "ready" | "in-progress" | "blocked" | "done";
+  dependencyItemIds?: string[];
+  blockers?: string[];
+  regenerateArtifact?: {
+    artifactId: string;
+    kind: GameCreatorExecutionArtifact["kind"];
+  };
   notes?: string;
   updatedAt: string;
 };
@@ -3242,13 +3248,47 @@ function App() {
           decidedBy: "user",
         }),
       });
-      const payload = (await response.json()) as { error?: string };
+      const payload = (await response.json()) as { error?: string; followUpQueueItem?: GameCreatorQueueItem | null };
       if (!response.ok) {
         throw new Error(payload.error ?? "Failed to update artifact decision.");
       }
       pushToast(`Artifact marked ${decision}.`, decision === "rejected" ? "warn" : "ok");
+      if (payload.followUpQueueItem) {
+        pushToast("Follow-up regeneration task was added to the queue.", "warn");
+      }
       await loadGameCreatorExecutionStatus();
       await loadGameCreatorQueue();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorExecutionBusyAction(null);
+    }
+  }
+
+  async function regenerateGameCreatorArtifact(artifactId: string) {
+    setGameCreatorExecutionBusyAction("artifact");
+    try {
+      const response = await fetch(`/api/tools/game-creator/execution/artifacts/${encodeURIComponent(artifactId)}/regenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          mode: gameCreatorExecutionMode,
+        }),
+      });
+      const payload = (await response.json()) as { error?: string; outputs?: string[] };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to regenerate artifact.");
+      }
+      if ((payload.outputs?.length ?? 0) > 0) {
+        pushToast(`Regenerated ${payload.outputs?.length ?? 0} artifact output(s).`, "ok");
+      } else {
+        pushToast("Artifact regeneration completed.", "ok");
+      }
+      await loadGameCreatorExecutionStatus();
+      await loadGameCreatorQueue();
+      await refreshActiveWorkspaceTree(boot?.activeWorkspaceId);
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -7968,6 +8008,14 @@ function App() {
                                 <strong>{item.title}</strong>
                                 <small>Lane: {item.lane} · Source: {item.sourceDocFile}</small>
                                 <small>Status: {item.status} · Updated: {new Date(item.updatedAt).toLocaleString()}</small>
+                                {item.dependencyItemIds?.length ? <small>Dependencies: {item.dependencyItemIds.length}</small> : null}
+                                {item.blockers?.length ? (
+                                  <div className="tool-list">
+                                    {item.blockers.map((blocker) => (
+                                      <small key={`${item.id}-${blocker}`} className="runtime-warning">Blocker: {blocker}</small>
+                                    ))}
+                                  </div>
+                                ) : <small className="runtime-ready">Blockers: none</small>}
                                 {item.notes ? <small>Notes: {item.notes}</small> : null}
                                 <div className="tool-action-row">
                                   <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "ready")} disabled={busy}>Ready</button>
@@ -8039,6 +8087,7 @@ function App() {
                             <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "approved")} disabled={gameCreatorExecutionBusyAction !== null}>Approve</button>
                             <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "rejected")} disabled={gameCreatorExecutionBusyAction !== null}>Reject</button>
                             <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "pending")} disabled={gameCreatorExecutionBusyAction !== null}>Reset</button>
+                            <button type="button" className="ghost" onClick={() => void regenerateGameCreatorArtifact(artifact.id)} disabled={gameCreatorExecutionBusyAction !== null}>Regenerate</button>
                           </div>
                         </li>
                       ))}

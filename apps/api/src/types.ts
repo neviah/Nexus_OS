@@ -100,6 +100,12 @@ export type GameCreatorState = {
       title: string;
       sourceDocFile: string;
       status: "backlog" | "ready" | "in-progress" | "blocked" | "done";
+      dependencyItemIds?: string[];
+      blockers?: string[];
+      regenerateArtifact?: {
+        artifactId: string;
+        kind: "code" | "ui-image" | "concept-art" | "sprite-sheet" | "music" | "sfx" | "model";
+      };
       notes?: string;
       updatedAt: string;
     }>;

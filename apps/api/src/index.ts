@@ -463,6 +463,12 @@ type GameCreatorQueueItem = {
   title: string;
   sourceDocFile: string;
   status: "backlog" | "ready" | "in-progress" | "blocked" | "done";
+  dependencyItemIds?: string[];
+  blockers?: string[];
+  regenerateArtifact?: {
+    artifactId: string;
+    kind: GameCreatorArtifactKind;
+  };
   notes?: string;
   updatedAt: string;
 };
@@ -1125,28 +1131,73 @@ function writeGameCreatorExecutionRunState(state: SystemState, run: GameCreatorE
   };
 }
 
-function areDependenciesSatisfied(item: GameCreatorQueueItem, queueItems: GameCreatorQueueItem[]): boolean {
-  const laneDependencies: Partial<Record<GameCreatorQueueLane, GameCreatorQueueLane[]>> = {
-    engineering: ["design", "content", "gameplay"],
-    art: ["design"],
-    audio: ["design", "content"],
-    qa: ["engineering", "gameplay", "art", "audio"],
-    production: ["design", "engineering", "content"],
-    gameplay: ["design"],
-    content: ["design"],
+function dependencyDocOrderFor(fileName: string): string[] {
+  const graph: Record<string, string[]> = {
+    "GAME_BIBLE.md": [],
+    "UI_UX_SPEC.md": ["GAME_BIBLE.md"],
+    "LORE_BOOK.md": ["GAME_BIBLE.md"],
+    "CONTROLS_CAMERA_SPEC.md": ["GAME_BIBLE.md", "UI_UX_SPEC.md"],
+    "ART_BIBLE.md": ["GAME_BIBLE.md", "UI_UX_SPEC.md"],
+    "AUDIO_BIBLE.md": ["GAME_BIBLE.md", "LORE_BOOK.md"],
+    "ENEMY_ROSTER.md": ["GAME_BIBLE.md", "LORE_BOOK.md"],
+    "TECHNICAL_DESIGN.md": ["GAME_BIBLE.md", "UI_UX_SPEC.md", "CONTROLS_CAMERA_SPEC.md"],
+    "DIFFICULTY_CURVE.md": ["TECHNICAL_DESIGN.md", "CONTROLS_CAMERA_SPEC.md", "ENEMY_ROSTER.md"],
+    "PRODUCTION_PLAN.md": ["GAME_BIBLE.md", "TECHNICAL_DESIGN.md", "ART_BIBLE.md", "AUDIO_BIBLE.md"],
   };
-  const required = laneDependencies[item.lane] ?? [];
-  for (const dependencyLane of required) {
-    const laneItems = queueItems.filter((entry) => entry.lane === dependencyLane);
-    if (!laneItems.length) {
+  return graph[fileName] ?? ["GAME_BIBLE.md"];
+}
+
+function buildQueueItemDependencyBlockers(item: GameCreatorQueueItem, queueItems: GameCreatorQueueItem[]): string[] {
+  const blockers: string[] = [];
+  const deps = item.dependencyItemIds ?? [];
+  for (const dependencyId of deps) {
+    const dependency = queueItems.find((entry) => entry.id === dependencyId);
+    if (!dependency) {
       continue;
     }
-    const allDone = laneItems.every((entry) => entry.status === "done");
-    if (!allDone) {
-      return false;
+    if (dependency.status !== "done") {
+      blockers.push(`Waiting on dependency: ${dependency.title} (${dependency.status})`);
     }
   }
-  return true;
+  return blockers;
+}
+
+function annotateQueueItemBlockers(input: {
+  items: GameCreatorQueueItem[];
+  mode: GameCreatorExecutionMode;
+  artifacts: GameCreatorExecutionArtifact[];
+}): GameCreatorQueueItem[] {
+  const pendingArtifacts = input.artifacts.filter((artifact) => artifact.status === "pending");
+  return input.items.map((item) => {
+    if (item.status === "done") {
+      return { ...item, blockers: [] };
+    }
+
+    const blockers = buildQueueItemDependencyBlockers(item, input.items);
+    if (input.mode === "strict-approval" && item.status === "ready") {
+      const foreignPending = pendingArtifacts.some((artifact) => artifact.queueItemId !== item.id);
+      if (foreignPending) {
+        blockers.push("Strict mode waiting on pending artifact approvals from earlier tasks.");
+      }
+    }
+
+    if (item.regenerateArtifact) {
+      const targetArtifact = input.artifacts.find((artifact) => artifact.id === item.regenerateArtifact?.artifactId);
+      if (!targetArtifact) {
+        blockers.push("Target artifact for regeneration no longer exists.");
+      }
+    }
+
+    return {
+      ...item,
+      blockers,
+    };
+  });
+}
+
+function areDependenciesSatisfied(item: GameCreatorQueueItem, queueItems: GameCreatorQueueItem[]): boolean {
+  const blockers = buildQueueItemDependencyBlockers(item, queueItems);
+  return blockers.length === 0;
 }
 
 function writeGameCreatorExecutionQueueStore(state: SystemState, input: {
@@ -1162,31 +1213,31 @@ function writeGameCreatorExecutionQueueStore(state: SystemState, input: {
   };
 }
 
-function mapDocToQueueItem(fileName: string): { lane: GameCreatorQueueLane; title: string; notes: string } {
+function mapDocToQueueItem(fileName: string): { lane: GameCreatorQueueLane; title: string; notes: string; dependencyDocFiles: string[] } {
   const now = new Date().toISOString();
   switch (fileName) {
     case "GAME_BIBLE.md":
-      return { lane: "design", title: "Lock core fantasy and loop acceptance criteria", notes: `Derived at ${now}` };
+      return { lane: "design", title: "Lock core fantasy and loop acceptance criteria", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     case "TECHNICAL_DESIGN.md":
-      return { lane: "engineering", title: "Create technical implementation plan and system ownership", notes: `Derived at ${now}` };
+      return { lane: "engineering", title: "Create technical implementation plan and system ownership", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     case "UI_UX_SPEC.md":
-      return { lane: "design", title: "Define UI flows and HUD interaction states", notes: `Derived at ${now}` };
+      return { lane: "design", title: "Define UI flows and HUD interaction states", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     case "CONTROLS_CAMERA_SPEC.md":
-      return { lane: "gameplay", title: "Implement controls and camera baseline", notes: `Derived at ${now}` };
+      return { lane: "gameplay", title: "Implement controls and camera baseline", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     case "ART_BIBLE.md":
-      return { lane: "art", title: "Establish asset style guide and starter asset list", notes: `Derived at ${now}` };
+      return { lane: "art", title: "Establish asset style guide and starter asset list", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     case "LORE_BOOK.md":
-      return { lane: "content", title: "Author lore constraints and narrative beats", notes: `Derived at ${now}` };
+      return { lane: "content", title: "Author lore constraints and narrative beats", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     case "AUDIO_BIBLE.md":
-      return { lane: "audio", title: "Plan music/SFX coverage for core loop", notes: `Derived at ${now}` };
+      return { lane: "audio", title: "Plan music/SFX coverage for core loop", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     case "PRODUCTION_PLAN.md":
-      return { lane: "production", title: "Convert milestones into sprint checkpoints", notes: `Derived at ${now}` };
+      return { lane: "production", title: "Convert milestones into sprint checkpoints", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     case "ENEMY_ROSTER.md":
-      return { lane: "content", title: "Build enemy family backlog and biome mapping", notes: `Derived at ${now}` };
+      return { lane: "content", title: "Build enemy family backlog and biome mapping", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     case "DIFFICULTY_CURVE.md":
-      return { lane: "qa", title: "Define progression balance tests and telemetry hooks", notes: `Derived at ${now}` };
+      return { lane: "qa", title: "Define progression balance tests and telemetry hooks", notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
     default:
-      return { lane: "design", title: `Review ${fileName} and capture implementation tasks`, notes: `Derived at ${now}` };
+      return { lane: "design", title: `Review ${fileName} and capture implementation tasks`, notes: `Derived at ${now}`, dependencyDocFiles: dependencyDocOrderFor(fileName) };
   }
 }
 
@@ -1197,7 +1248,7 @@ function buildGameCreatorExecutionQueueFromStatus(status: Array<{
   quality?: { passed: boolean };
 }>, mode: GameCreatorExecutionMode): GameCreatorQueueItem[] {
   const now = new Date().toISOString();
-  return status
+  const draftItems: GameCreatorQueueItem[] = status
     .filter((entry) => {
       if (!entry.exists) {
         return false;
@@ -1214,11 +1265,35 @@ function buildGameCreatorExecutionQueueFromStatus(status: Array<{
         lane: mapped.lane,
         title: mapped.title,
         sourceDocFile: entry.fileName,
-        status: "ready",
+        status: "ready" as const,
+        dependencyItemIds: [],
+        blockers: [],
         notes: mapped.notes,
         updatedAt: now,
       };
     });
+
+  const idByDoc = new Map<string, string>();
+  for (const item of draftItems) {
+    idByDoc.set(item.sourceDocFile, item.id);
+  }
+
+  const withDeps = draftItems.map((item) => {
+    const mapped = mapDocToQueueItem(item.sourceDocFile);
+    const dependencyItemIds = mapped.dependencyDocFiles
+      .map((doc) => idByDoc.get(doc))
+      .filter((value): value is string => Boolean(value));
+    return {
+      ...item,
+      dependencyItemIds,
+    };
+  });
+
+  return annotateQueueItemBlockers({
+    items: withDeps,
+    mode,
+    artifacts: [],
+  });
 }
 
 function buildGameCreatorScaffoldFiles(input: {
@@ -1394,27 +1469,9 @@ async function executeGameCreatorQueueItem(input: {
   jobId: string;
   mode: GameCreatorExecutionMode;
 }): Promise<{ outputs: string[]; warnings: string[]; artifacts: GameCreatorExecutionArtifact[] }> {
-  const files = buildGameCreatorScaffoldFiles({ spec: input.spec, item: input.item });
   const outputs: string[] = [];
-  for (const file of files) {
-    const absolutePath = safeWorkspaceJoin(input.workspacePath, file.relativePath);
-    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, file.content, "utf-8");
-    outputs.push(file.relativePath);
-  }
-
   const warnings: string[] = [];
-  const artifacts: GameCreatorExecutionArtifact[] = files.map((file) => ({
-    id: crypto.randomUUID(),
-    jobId: input.jobId,
-    queueItemId: input.item.id,
-    queueItemTitle: input.item.title,
-    lane: input.item.lane,
-    kind: "code",
-    status: input.mode === "auto-produce" ? "auto-approved" : "pending",
-    relativePath: file.relativePath,
-    createdAt: new Date().toISOString(),
-  }));
+  const artifacts: GameCreatorExecutionArtifact[] = [];
 
   const createArtifact = (entry: {
     kind: GameCreatorArtifactKind;
@@ -1435,125 +1492,211 @@ async function executeGameCreatorQueueItem(input: {
     });
   };
 
-  if (input.item.lane === "design") {
-    try {
-      const generated = await generateLocalImageStreaming(
-        {
-          model: "dreamshaper-8",
-          prompt: `${input.spec.setupWizard.genre} game HUD wireframe, menu layout, UX mockup board, clean labels, high readability`,
-          negativePrompt: "watermark, signature, blurry, low quality",
-          width: 768,
-          height: 512,
-          steps: 20,
-          guidanceScale: 7,
-          seed: Math.floor(Date.now() % 2147483647),
-        },
-        () => undefined,
-      );
-      const bytes = await fs.readFile(generated.outputPath);
-      const saved = await saveBufferToWorkspaceAssets({
-        workspaceId: input.workspaceId,
-        category: "images",
-        baseName: "ui-mockup",
-        extension: "png",
-        bytes,
-      });
-      outputs.push(saved.relativePath);
+  if (!input.item.regenerateArtifact) {
+    const files = buildGameCreatorScaffoldFiles({ spec: input.spec, item: input.item });
+    for (const file of files) {
+      const absolutePath = safeWorkspaceJoin(input.workspacePath, file.relativePath);
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+      await fs.writeFile(absolutePath, file.content, "utf-8");
+      outputs.push(file.relativePath);
       createArtifact({
-        kind: "ui-image",
-        relativePath: saved.relativePath,
-        previewUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        kind: "code",
+        relativePath: file.relativePath,
       });
-    } catch (error) {
-      warnings.push(`Design artifact generation failed: ${String(error)}`);
     }
   }
 
-  if (input.item.lane === "art") {
-    try {
-      const generated = await generateLocalImageStreaming(
-        {
-          model: "dreamshaper-8",
-          prompt: `${input.spec.setupWizard.artStyle} concept sheet for ${input.spec.setupWizard.genre} protagonist and enemy silhouettes`,
-          negativePrompt: "watermark, signature, blurry, low quality",
-          width: 768,
-          height: 768,
-          steps: 22,
-          guidanceScale: 7.5,
-          seed: Math.floor(Date.now() % 2147483647),
-        },
-        () => undefined,
-      );
-      const bytes = await fs.readFile(generated.outputPath);
-      const saved = await saveBufferToWorkspaceAssets({
-        workspaceId: input.workspaceId,
-        category: "images",
-        baseName: "concept-art",
-        extension: "png",
-        bytes,
-      });
-      outputs.push(saved.relativePath);
-      createArtifact({
-        kind: "concept-art",
-        relativePath: saved.relativePath,
-        previewUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
-      });
-    } catch (error) {
-      warnings.push(`Art concept generation failed: ${String(error)}`);
+  const generateArtifactByKind = async (kind: GameCreatorArtifactKind): Promise<void> => {
+    if (kind === "ui-image") {
+      try {
+        const generated = await generateLocalImageStreaming(
+          {
+            model: "dreamshaper-8",
+            prompt: `${input.spec.setupWizard.genre} game HUD wireframe, menu layout, UX mockup board, clean labels, high readability`,
+            negativePrompt: "watermark, signature, blurry, low quality",
+            width: 768,
+            height: 512,
+            steps: 20,
+            guidanceScale: 7,
+            seed: Math.floor(Date.now() % 2147483647),
+          },
+          () => undefined,
+        );
+        const bytes = await fs.readFile(generated.outputPath);
+        const saved = await saveBufferToWorkspaceAssets({
+          workspaceId: input.workspaceId,
+          category: "images",
+          baseName: "ui-mockup",
+          extension: "png",
+          bytes,
+        });
+        outputs.push(saved.relativePath);
+        createArtifact({
+          kind: "ui-image",
+          relativePath: saved.relativePath,
+          previewUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        });
+      } catch (error) {
+        warnings.push(`UI image generation failed: ${String(error)}`);
+      }
+      return;
+    }
+
+    if (kind === "concept-art") {
+      try {
+        const generated = await generateLocalImageStreaming(
+          {
+            model: "dreamshaper-8",
+            prompt: `${input.spec.setupWizard.artStyle} concept sheet for ${input.spec.setupWizard.genre} protagonist and enemy silhouettes`,
+            negativePrompt: "watermark, signature, blurry, low quality",
+            width: 768,
+            height: 768,
+            steps: 22,
+            guidanceScale: 7.5,
+            seed: Math.floor(Date.now() % 2147483647),
+          },
+          () => undefined,
+        );
+        const bytes = await fs.readFile(generated.outputPath);
+        const saved = await saveBufferToWorkspaceAssets({
+          workspaceId: input.workspaceId,
+          category: "images",
+          baseName: "concept-art",
+          extension: "png",
+          bytes,
+        });
+        outputs.push(saved.relativePath);
+        createArtifact({
+          kind: "concept-art",
+          relativePath: saved.relativePath,
+          previewUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        });
+      } catch (error) {
+        warnings.push(`Concept art generation failed: ${String(error)}`);
+      }
+      return;
+    }
+
+    if (kind === "sprite-sheet") {
+      try {
+        const generated = await generateLocalImageStreaming(
+          {
+            model: "dreamshaper-8",
+            prompt: `${input.spec.setupWizard.genre} character sprite sheet, transparent background, 6 animation frames`,
+            negativePrompt: "watermark, signature, blurry, low quality",
+            width: 768,
+            height: 128,
+            steps: 24,
+            guidanceScale: 7.5,
+            seed: Math.floor(Date.now() % 2147483647),
+          },
+          () => undefined,
+        );
+        const bytes = await fs.readFile(generated.outputPath);
+        const saved = await saveBufferToWorkspaceAssets({
+          workspaceId: input.workspaceId,
+          category: "sprites",
+          baseName: "sprite-sheet",
+          extension: "png",
+          bytes,
+        });
+        outputs.push(saved.relativePath);
+        createArtifact({
+          kind: "sprite-sheet",
+          relativePath: saved.relativePath,
+          previewUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        });
+      } catch (error) {
+        warnings.push(`Sprite sheet generation failed: ${String(error)}`);
+      }
+      return;
+    }
+
+    if (kind === "music") {
+      try {
+        const music = await generateStableAudioAudio({
+          mode: "small-music",
+          prompt: `${input.spec.setupWizard.genre} loop music, ${input.spec.setupWizard.artStyle} tone, gameplay supportive, 30 seconds`,
+          duration: 30,
+        });
+        const musicBytes = await fs.readFile(music.outputPath);
+        const savedMusic = await saveBufferToWorkspaceAssets({
+          workspaceId: input.workspaceId,
+          category: "music",
+          baseName: "bgm-loop",
+          extension: "wav",
+          bytes: musicBytes,
+        });
+        outputs.push(savedMusic.relativePath);
+        createArtifact({
+          kind: "music",
+          relativePath: savedMusic.relativePath,
+          previewUrl: `/api/tools/music/file?workspaceId=${encodeURIComponent(savedMusic.workspaceId)}&relativePath=${encodeURIComponent(savedMusic.relativePath)}`,
+        });
+      } catch (error) {
+        warnings.push(`Music generation failed: ${String(error)}`);
+      }
+      return;
+    }
+
+    if (kind === "sfx") {
+      try {
+        const sfx = await generateStableAudioAudio({
+          mode: "small-sfx",
+          prompt: "game UI confirm, jump, and impact one-shot SFX pack",
+          duration: 8,
+        });
+        const sfxBytes = await fs.readFile(sfx.outputPath);
+        const savedSfx = await saveBufferToWorkspaceAssets({
+          workspaceId: input.workspaceId,
+          category: "music",
+          baseName: "sfx-pack",
+          extension: "wav",
+          bytes: sfxBytes,
+        });
+        outputs.push(savedSfx.relativePath);
+        createArtifact({
+          kind: "sfx",
+          relativePath: savedSfx.relativePath,
+          previewUrl: `/api/tools/music/file?workspaceId=${encodeURIComponent(savedSfx.workspaceId)}&relativePath=${encodeURIComponent(savedSfx.relativePath)}`,
+        });
+      } catch (error) {
+        warnings.push(`SFX generation failed: ${String(error)}`);
+      }
+      return;
+    }
+
+    if (kind === "code") {
+      const fileName = `GameBuild/revisions/regenerated-${sanitizeFileNameSegment(input.item.title, "task")}-${Date.now()}.md`;
+      const absolutePath = safeWorkspaceJoin(input.workspacePath, fileName);
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+      await fs.writeFile(absolutePath, `# Regenerated Code Artifact\n\nTask: ${input.item.title}\nGenerated: ${new Date().toISOString()}\n`, "utf-8");
+      outputs.push(fileName);
+      createArtifact({ kind: "code", relativePath: fileName });
+      return;
+    }
+
+    warnings.push(`Artifact kind ${kind} is not wired to a regeneration backend yet.`);
+  };
+
+  if (input.item.regenerateArtifact) {
+    await generateArtifactByKind(input.item.regenerateArtifact.kind);
+  } else {
+    if (input.item.lane === "design") {
+      await generateArtifactByKind("ui-image");
+    }
+
+    if (input.item.lane === "art") {
+      await generateArtifactByKind("concept-art");
+    }
+
+    if (input.item.lane === "audio") {
+      await generateArtifactByKind("music");
+      await generateArtifactByKind("sfx");
     }
   }
 
-  if (input.item.lane === "audio") {
-    try {
-      const music = await generateStableAudioAudio({
-        mode: "small-music",
-        prompt: `${input.spec.setupWizard.genre} loop music, ${input.spec.setupWizard.artStyle} tone, gameplay supportive, 30 seconds`,
-        duration: 30,
-      });
-      const musicBytes = await fs.readFile(music.outputPath);
-      const savedMusic = await saveBufferToWorkspaceAssets({
-        workspaceId: input.workspaceId,
-        category: "music",
-        baseName: "bgm-loop",
-        extension: "wav",
-        bytes: musicBytes,
-      });
-      outputs.push(savedMusic.relativePath);
-      createArtifact({
-        kind: "music",
-        relativePath: savedMusic.relativePath,
-        previewUrl: `/api/tools/music/file?workspaceId=${encodeURIComponent(savedMusic.workspaceId)}&relativePath=${encodeURIComponent(savedMusic.relativePath)}`,
-      });
-    } catch (error) {
-      warnings.push(`Music generation failed: ${String(error)}`);
-    }
-
-    try {
-      const sfx = await generateStableAudioAudio({
-        mode: "small-sfx",
-        prompt: "game UI confirm, jump, and impact one-shot SFX pack",
-        duration: 8,
-      });
-      const sfxBytes = await fs.readFile(sfx.outputPath);
-      const savedSfx = await saveBufferToWorkspaceAssets({
-        workspaceId: input.workspaceId,
-        category: "music",
-        baseName: "sfx-pack",
-        extension: "wav",
-        bytes: sfxBytes,
-      });
-      outputs.push(savedSfx.relativePath);
-      createArtifact({
-        kind: "sfx",
-        relativePath: savedSfx.relativePath,
-        previewUrl: `/api/tools/music/file?workspaceId=${encodeURIComponent(savedSfx.workspaceId)}&relativePath=${encodeURIComponent(savedSfx.relativePath)}`,
-      });
-    } catch (error) {
-      warnings.push(`SFX generation failed: ${String(error)}`);
-    }
-  }
-
-  if (input.item.lane !== "engineering") {
+  if (!input.item.regenerateArtifact && input.item.lane !== "engineering") {
     warnings.push("Generated starter scaffolding and manifests for a non-engineering lane. Deep lane-specific generators are still pending.");
   }
 
@@ -1593,21 +1736,60 @@ function reconcileQueueItemFromArtifactDecisions(input: {
   });
 }
 
+function enqueueArtifactRegenerationTask(input: {
+  state: SystemState;
+  artifact: GameCreatorExecutionArtifact;
+}): GameCreatorQueueItem | null {
+  const queue = getGameCreatorExecutionQueueStore(input.state);
+  const existing = queue.items.find((entry) => entry.regenerateArtifact?.artifactId === input.artifact.id && entry.status !== "done");
+  if (existing) {
+    return existing;
+  }
+
+  const now = new Date().toISOString();
+  const task: GameCreatorQueueItem = {
+    id: crypto.randomUUID(),
+    lane: input.artifact.lane,
+    title: `Regenerate ${input.artifact.kind} for ${input.artifact.queueItemTitle}`,
+    sourceDocFile: "ARTIFACT_REWORK.md",
+    status: "ready",
+    dependencyItemIds: [],
+    blockers: [],
+    regenerateArtifact: {
+      artifactId: input.artifact.id,
+      kind: input.artifact.kind,
+    },
+    notes: `Follow-up created from rejected artifact ${input.artifact.id}`,
+    updatedAt: now,
+  };
+
+  const mode = getGameCreatorExecutionMode(input.state);
+  const artifacts = getGameCreatorExecutionArtifacts(input.state);
+  const nextItems = annotateQueueItemBlockers({
+    items: [task, ...queue.items],
+    mode,
+    artifacts,
+  });
+  writeGameCreatorExecutionQueueStore(input.state, {
+    builtAt: queue.builtAt ?? now,
+    items: nextItems,
+  });
+  return task;
+}
+
 function pickNextExecutableQueueItem(input: {
   items: GameCreatorQueueItem[];
   mode: GameCreatorExecutionMode;
   artifacts: GameCreatorExecutionArtifact[];
 }): { item: GameCreatorQueueItem | null; blocker?: string } {
-  if (input.mode === "strict-approval" && input.artifacts.some((artifact) => artifact.status === "pending")) {
-    return {
-      item: null,
-      blocker: "Strict mode is waiting on artifact approvals from previous tasks.",
-    };
-  }
-
-  const ready = input.items.filter((entry) => entry.status === "ready");
+  const annotated = annotateQueueItemBlockers({
+    items: input.items,
+    mode: input.mode,
+    artifacts: input.artifacts,
+  });
+  const ready = annotated.filter((entry) => entry.status === "ready");
   for (const candidate of ready) {
-    if (areDependenciesSatisfied(candidate, input.items)) {
+    if ((candidate.blockers?.length ?? 0) === 0 && areDependenciesSatisfied(candidate, annotated)) {
       return { item: candidate };
     }
   }
@@ -1643,8 +1825,13 @@ async function runNextGameCreatorExecutionStep(input: {
 
   const queue = getGameCreatorExecutionQueueStore(state);
   const artifacts = getGameCreatorExecutionArtifacts(state);
-  const pick = pickNextExecutableQueueItem({ items: queue.items, mode: input.mode, artifacts });
+  const refreshedItems = annotateQueueItemBlockers({ items: queue.items, mode: input.mode, artifacts });
+  const pick = pickNextExecutableQueueItem({ items: refreshedItems, mode: input.mode, artifacts });
   if (!pick.item) {
+    writeGameCreatorExecutionQueueStore(state, {
+      builtAt: queue.builtAt ?? new Date().toISOString(),
+      items: refreshedItems,
+    });
     await writeSystemState(state);
     return {
       ok: false,
@@ -1671,7 +1858,11 @@ async function runNextGameCreatorExecutionStep(input: {
   writeGameCreatorExecutionJobs(state, jobs);
   writeGameCreatorExecutionQueueStore(state, {
     builtAt: queue.builtAt ?? now,
-    items: queue.items.map((entry) => entry.id === nextItem.id ? { ...entry, status: "in-progress", updatedAt: now } : entry),
+    items: annotateQueueItemBlockers({
+      items: refreshedItems.map((entry) => entry.id === nextItem.id ? { ...entry, status: "in-progress", updatedAt: now } : entry),
+      mode: input.mode,
+      artifacts,
+    }),
   });
   await writeSystemState(state);
 
@@ -1706,11 +1897,15 @@ async function runNextGameCreatorExecutionStep(input: {
     const nextQueue = getGameCreatorExecutionQueueStore(nextState);
     writeGameCreatorExecutionQueueStore(nextState, {
       builtAt: nextQueue.builtAt ?? doneAt,
-      items: reconcileQueueItemFromArtifactDecisions({
+      items: annotateQueueItemBlockers({
+        items: reconcileQueueItemFromArtifactDecisions({
         queueItems: nextQueue.items,
         artifacts: nextArtifacts,
         queueItemId: nextItem.id,
         mode: input.mode,
+        }),
+        mode: input.mode,
+        artifacts: nextArtifacts,
       }),
     });
     await writeSystemState(nextState);
@@ -1738,7 +1933,11 @@ async function runNextGameCreatorExecutionStep(input: {
     const nextQueue = getGameCreatorExecutionQueueStore(nextState);
     writeGameCreatorExecutionQueueStore(nextState, {
       builtAt: nextQueue.builtAt ?? failedAt,
-      items: nextQueue.items.map((entry) => entry.id === nextItem.id ? { ...entry, status: "blocked", updatedAt: failedAt } : entry),
+      items: annotateQueueItemBlockers({
+        items: nextQueue.items.map((entry) => entry.id === nextItem.id ? { ...entry, status: "blocked", updatedAt: failedAt } : entry),
+        mode: input.mode,
+        artifacts: getGameCreatorExecutionArtifacts(nextState),
+      }),
     });
     await writeSystemState(nextState);
 
@@ -4596,21 +4795,34 @@ app.get("/api/tools/game-creator/queue", async (req, res) => {
   const state = await readSystemState();
   const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
   const queue = getGameCreatorExecutionQueueStore(state);
+  const mode = getGameCreatorExecutionMode(state);
+  const artifacts = getGameCreatorExecutionArtifacts(state);
+  const items = annotateQueueItemBlockers({
+    items: queue.items,
+    mode,
+    artifacts,
+  });
   const summary = {
-    total: queue.items.length,
-    ready: queue.items.filter((entry) => entry.status === "ready").length,
-    inProgress: queue.items.filter((entry) => entry.status === "in-progress").length,
-    blocked: queue.items.filter((entry) => entry.status === "blocked").length,
-    done: queue.items.filter((entry) => entry.status === "done").length,
-    backlog: queue.items.filter((entry) => entry.status === "backlog").length,
+    total: items.length,
+    ready: items.filter((entry) => entry.status === "ready").length,
+    inProgress: items.filter((entry) => entry.status === "in-progress").length,
+    blocked: items.filter((entry) => entry.status === "blocked").length,
+    done: items.filter((entry) => entry.status === "done").length,
+    backlog: items.filter((entry) => entry.status === "backlog").length,
   };
+
+  writeGameCreatorExecutionQueueStore(state, {
+    builtAt: queue.builtAt ?? new Date().toISOString(),
+    items,
+  });
+  await writeSystemState(state);
 
   return res.json({
     ok: true,
     workspaceId: workspace.id,
     mode: getGameCreatorExecutionMode(state),
     builtAt: queue.builtAt ?? null,
-    items: queue.items,
+    items,
     summary,
   });
 });
@@ -4638,7 +4850,11 @@ app.post("/api/tools/game-creator/queue/build", async (req, res) => {
     requireLocked: mode === "strict-approval" ? body.requireLocked !== false : false,
     requireApproved: mode === "strict-approval",
   });
-  const items = buildGameCreatorExecutionQueueFromStatus(status, mode);
+  const items = annotateQueueItemBlockers({
+    items: buildGameCreatorExecutionQueueFromStatus(status, mode),
+    mode,
+    artifacts: getGameCreatorExecutionArtifacts(state),
+  });
   const builtAt = new Date().toISOString();
   const changedDocs = Object.values(store.records)
     .filter((record) => record.lastDiffSummary?.changed)
@@ -5010,19 +5226,122 @@ app.post("/api/tools/game-creator/execution/artifacts/:artifactId/decision", asy
     : entry);
   writeGameCreatorExecutionArtifacts(state, nextArtifacts);
 
+  const selectedArtifact = nextArtifacts.find((entry) => entry.id === req.params.artifactId) ?? target;
+  let followUpQueueItem: GameCreatorQueueItem | null = null;
+  if (decision === "rejected") {
+    followUpQueueItem = enqueueArtifactRegenerationTask({
+      state,
+      artifact: selectedArtifact,
+    });
+  }
+
   const queue = getGameCreatorExecutionQueueStore(state);
   writeGameCreatorExecutionQueueStore(state, {
     builtAt: queue.builtAt ?? now,
-    items: reconcileQueueItemFromArtifactDecisions({
-      queueItems: queue.items,
-      artifacts: nextArtifacts,
-      queueItemId: target.queueItemId,
+    items: annotateQueueItemBlockers({
+      items: reconcileQueueItemFromArtifactDecisions({
+        queueItems: queue.items,
+        artifacts: nextArtifacts,
+        queueItemId: target.queueItemId,
+        mode: getGameCreatorExecutionMode(state),
+      }),
       mode: getGameCreatorExecutionMode(state),
+      artifacts: nextArtifacts,
     }),
   });
 
   await writeSystemState(state);
-  return res.json({ ok: true, artifact: nextArtifacts.find((entry) => entry.id === req.params.artifactId), artifacts: nextArtifacts });
+  return res.json({
+    ok: true,
+    artifact: selectedArtifact,
+    artifacts: nextArtifacts,
+    followUpQueueItem,
+  });
+});
+
+app.post("/api/tools/game-creator/execution/artifacts/:artifactId/regenerate", async (req, res) => {
+  const body = req.body as { workspaceId?: string; mode?: GameCreatorExecutionMode };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const mode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
+  const artifacts = getGameCreatorExecutionArtifacts(state);
+  const artifact = artifacts.find((entry) => entry.id === req.params.artifactId);
+  if (!artifact) {
+    return res.status(404).json({ error: "Artifact not found." });
+  }
+
+  const originalQueue = getGameCreatorExecutionQueueStore(state).items.find((entry) => entry.id === artifact.queueItemId);
+  const task: GameCreatorQueueItem = {
+    id: crypto.randomUUID(),
+    lane: artifact.lane,
+    title: `Regenerate ${artifact.kind} for ${artifact.queueItemTitle}`,
+    sourceDocFile: originalQueue?.sourceDocFile ?? artifact.queueItemTitle,
+    status: "ready",
+    dependencyItemIds: [],
+    blockers: [],
+    regenerateArtifact: {
+      artifactId: artifact.id,
+      kind: artifact.kind,
+    },
+    notes: `Manual regeneration requested for artifact ${artifact.id}`,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const draft = readGameCreatorDraft(state);
+  const spec = buildGameCreatorSpecPackage(draft);
+  const job: GameCreatorExecutionJob = {
+    id: crypto.randomUUID(),
+    queueItemId: task.id,
+    queueItemTitle: task.title,
+    lane: task.lane,
+    sourceDocFile: task.sourceDocFile,
+    mode,
+    status: "running",
+    startedAt: new Date().toISOString(),
+  };
+
+  writeGameCreatorExecutionMode(state, mode);
+  writeGameCreatorExecutionJobs(state, [job, ...getGameCreatorExecutionJobs(state)]);
+  await writeSystemState(state);
+
+  try {
+    const result = await executeGameCreatorQueueItem({
+      workspacePath: workspace.path,
+      workspaceId: workspace.id,
+      spec,
+      item: task,
+      jobId: job.id,
+      mode,
+    });
+
+    const nextState = await readSystemState();
+    const finalArtifacts = [...result.artifacts, ...getGameCreatorExecutionArtifacts(nextState)];
+    writeGameCreatorExecutionArtifacts(nextState, finalArtifacts);
+    writeGameCreatorExecutionJobs(nextState, getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
+      ? {
+        ...entry,
+        status: "completed" as const,
+        finishedAt: new Date().toISOString(),
+        outputs: result.outputs,
+        warnings: result.warnings,
+      }
+      : entry));
+    await writeSystemState(nextState);
+
+    return res.json({ ok: true, outputs: result.outputs, warnings: result.warnings, artifacts: result.artifacts });
+  } catch (error) {
+    const nextState = await readSystemState();
+    writeGameCreatorExecutionJobs(nextState, getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
+      ? {
+        ...entry,
+        status: "failed" as const,
+        finishedAt: new Date().toISOString(),
+        error: String(error),
+      }
+      : entry));
+    await writeSystemState(nextState);
+    return res.status(500).json({ error: String(error) });
+  }
 });
 
 app.post("/api/tools/game-creator/queue/:itemId/status", async (req, res) => {
@@ -5035,8 +5354,11 @@ app.post("/api/tools/game-creator/queue/:itemId/status", async (req, res) => {
   const state = await readSystemState();
   const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
   const queue = getGameCreatorExecutionQueueStore(state);
+  const mode = getGameCreatorExecutionMode(state);
+  const artifacts = getGameCreatorExecutionArtifacts(state);
   const now = new Date().toISOString();
-  const items = queue.items.map((entry) => {
+  const items = annotateQueueItemBlockers({
+    items: queue.items.map((entry) => {
     if (entry.id !== req.params.itemId) {
       return entry;
     }
@@ -5046,6 +5368,9 @@ app.post("/api/tools/game-creator/queue/:itemId/status", async (req, res) => {
       notes: typeof body.notes === "string" ? body.notes.trim().slice(0, 1000) : entry.notes,
       updatedAt: now,
     };
+    }),
+    mode,
+    artifacts,
   });
   writeGameCreatorExecutionQueueStore(state, {
     builtAt: queue.builtAt ?? now,
