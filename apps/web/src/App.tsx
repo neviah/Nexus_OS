@@ -828,7 +828,10 @@ type GameCreatorStartProcessResponse = GameCreatorGate2Status & {
   started?: boolean;
   message?: string;
   error?: string;
+  mode?: "strict-approval" | "auto-produce";
 };
+
+type GameCreatorExecutionMode = "strict-approval" | "auto-produce";
 
 type GameCreatorQueueItem = {
   id: string;
@@ -856,11 +859,35 @@ type GameCreatorQueueResponse = {
   items: GameCreatorQueueItem[];
   summary: GameCreatorQueueSummary;
   readyForExecution?: boolean;
+  mode?: GameCreatorExecutionMode;
   blockers?: string[];
   impactSummary?: {
     changedDocs: string[];
     impactedQueueItems: number;
   };
+};
+
+type GameCreatorExecutionJob = {
+  id: string;
+  queueItemId: string;
+  queueItemTitle: string;
+  lane: GameCreatorQueueItem["lane"];
+  sourceDocFile: string;
+  mode: GameCreatorExecutionMode;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  finishedAt?: string;
+  outputs?: string[];
+  warnings?: string[];
+  error?: string;
+};
+
+type GameCreatorExecutionStatusResponse = {
+  ok: boolean;
+  workspaceId: string;
+  mode: GameCreatorExecutionMode;
+  jobs: GameCreatorExecutionJob[];
+  queueSummary: GameCreatorQueueSummary;
 };
 
 type GameCreatorSpriteResult = {
@@ -1439,6 +1466,9 @@ function App() {
   const [gameCreatorQueueBlockers, setGameCreatorQueueBlockers] = useState<string[]>([]);
   const [gameCreatorQueueImpactSummary, setGameCreatorQueueImpactSummary] = useState<{ changedDocs: string[]; impactedQueueItems: number } | null>(null);
   const [gameCreatorQueueStatusFilter, setGameCreatorQueueStatusFilter] = useState<"all" | GameCreatorQueueItem["status"]>("ready");
+  const [gameCreatorExecutionMode, setGameCreatorExecutionMode] = useState<GameCreatorExecutionMode>("strict-approval");
+  const [gameCreatorExecutionJobs, setGameCreatorExecutionJobs] = useState<GameCreatorExecutionJob[]>([]);
+  const [gameCreatorExecutionBusyAction, setGameCreatorExecutionBusyAction] = useState<"mode" | "run-next" | "refresh" | null>(null);
   const [gameCreatorActiveQueueItemId, setGameCreatorActiveQueueItemId] = useState<string | null>(null);
   const [gameCreatorQueueBusyAction, setGameCreatorQueueBusyAction] = useState<"build" | "refresh" | string | null>(null);
   const [gameCreatorSpritePrompt, setGameCreatorSpritePrompt] = useState("pixel-art hero run cycle, transparent background");
@@ -2594,6 +2624,7 @@ function App() {
       await loadGameCreatorGate2Status();
       await loadGameCreatorGenerationProgress();
       await loadGameCreatorQueue();
+      await loadGameCreatorExecutionStatus();
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2768,11 +2799,18 @@ function App() {
       const response = await fetch("/api/tools/game-creator/process/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, requireLocked: true }),
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          requireLocked: gameCreatorExecutionMode === "strict-approval",
+          mode: gameCreatorExecutionMode,
+        }),
       });
 
       const payload = (await response.json()) as GameCreatorStartProcessResponse;
       setGameCreatorGate2Status(payload);
+      if (payload.mode) {
+        setGameCreatorExecutionMode(payload.mode);
+      }
       if (!response.ok) {
         setStatusMessage(payload.error ?? "Gate 2 blocked.");
         pushToast(payload.error ?? "Gate 2 is blocked.", "warn");
@@ -2802,6 +2840,9 @@ function App() {
       setGameCreatorQueueBuiltAt(payload.builtAt ?? null);
       setGameCreatorQueueBlockers(payload.blockers ?? []);
       setGameCreatorQueueImpactSummary(payload.impactSummary ?? null);
+      if (payload.mode) {
+        setGameCreatorExecutionMode(payload.mode);
+      }
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2816,7 +2857,11 @@ function App() {
       const response = await fetch("/api/tools/game-creator/queue/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, requireLocked: true }),
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          requireLocked: gameCreatorExecutionMode === "strict-approval",
+          mode: gameCreatorExecutionMode,
+        }),
       });
       if (!response.ok) {
         throw new Error("Failed to build Game Creator queue.");
@@ -2827,6 +2872,9 @@ function App() {
       setGameCreatorQueueBuiltAt(payload.builtAt ?? null);
       setGameCreatorQueueBlockers(payload.blockers ?? []);
       setGameCreatorQueueImpactSummary(payload.impactSummary ?? null);
+      if (payload.mode) {
+        setGameCreatorExecutionMode(payload.mode);
+      }
       setStatusMessage(`Built Step 4 queue with ${payload.items.length} task(s).`);
       pushToast(`Step 4 queue built (${payload.items.length} tasks).`, "ok");
       if ((payload.blockers?.length ?? 0) > 0) {
@@ -2959,6 +3007,81 @@ function App() {
       pushToast(String(error), "err");
     } finally {
       setGameCreatorQueueBusyAction(null);
+    }
+  }
+
+  async function loadGameCreatorExecutionStatus() {
+    setGameCreatorExecutionBusyAction("refresh");
+    try {
+      const response = await fetch(`/api/tools/game-creator/execution?workspaceId=${encodeURIComponent(boot?.activeWorkspaceId ?? "")}`);
+      if (!response.ok) {
+        throw new Error("Failed to load Game Creator execution status.");
+      }
+      const payload = (await response.json()) as GameCreatorExecutionStatusResponse;
+      setGameCreatorExecutionMode(payload.mode);
+      setGameCreatorExecutionJobs(payload.jobs ?? []);
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorExecutionBusyAction(null);
+    }
+  }
+
+  async function saveGameCreatorExecutionMode(nextMode: GameCreatorExecutionMode) {
+    setGameCreatorExecutionBusyAction("mode");
+    try {
+      const response = await fetch("/api/tools/game-creator/execution/mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: nextMode }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to save execution mode.");
+      }
+      setGameCreatorExecutionMode(nextMode);
+      pushToast(nextMode === "auto-produce" ? "Auto-produce mode enabled." : "Strict approval mode enabled.", "ok");
+      await loadGameCreatorGate2Status();
+      await loadGameCreatorExecutionStatus();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorExecutionBusyAction(null);
+    }
+  }
+
+  async function runNextGameCreatorExecutionTask() {
+    setGameCreatorExecutionBusyAction("run-next");
+    try {
+      const response = await fetch("/api/tools/game-creator/execution/run-next", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, mode: gameCreatorExecutionMode }),
+      });
+      const payload = (await response.json()) as {
+        error?: string;
+        outputs?: string[];
+        warnings?: string[];
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to run next execution task.");
+      }
+
+      if (payload.outputs?.length) {
+        pushToast(`Generated ${payload.outputs.length} scaffold file(s).`, "ok");
+      }
+      if ((payload.warnings?.length ?? 0) > 0) {
+        pushToast("Execution completed with warnings.", "warn");
+      }
+      await loadGameCreatorQueue();
+      await loadGameCreatorExecutionStatus();
+      await refreshActiveWorkspaceTree(boot?.activeWorkspaceId);
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorExecutionBusyAction(null);
     }
   }
 
@@ -7572,8 +7695,32 @@ function App() {
                     <button type="button" className="ghost" onClick={() => void loadGameCreatorQueue()} disabled={gameCreatorQueueBusyAction !== null}>
                       {gameCreatorQueueBusyAction === "refresh" ? "Refreshing..." : "Refresh Queue"}
                     </button>
+                    <button type="button" className="ghost" onClick={() => void loadGameCreatorExecutionStatus()} disabled={gameCreatorExecutionBusyAction !== null}>
+                      {gameCreatorExecutionBusyAction === "refresh" ? "Refreshing Execution..." : "Refresh Execution"}
+                    </button>
                   </div>
                 </div>
+                <div className="tool-action-row">
+                  <label>
+                    <span>Execution Mode</span>
+                    <select
+                      value={gameCreatorExecutionMode}
+                      onChange={(event) => void saveGameCreatorExecutionMode(event.target.value as GameCreatorExecutionMode)}
+                      disabled={gameCreatorExecutionBusyAction !== null}
+                    >
+                      <option value="strict-approval">Strict approval mode</option>
+                      <option value="auto-produce">Auto-produce mode (skip approval gate)</option>
+                    </select>
+                  </label>
+                  <button type="button" onClick={() => void runNextGameCreatorExecutionTask()} disabled={gameCreatorExecutionBusyAction !== null || gameCreatorQueueSummary?.ready === 0}>
+                    {gameCreatorExecutionBusyAction === "run-next" ? "Running Task..." : "Run Next Queue Task"}
+                  </button>
+                </div>
+                <small>
+                  {gameCreatorExecutionMode === "strict-approval"
+                    ? "Strict mode requires approved/locked docs before queue build and execution."
+                    : "Auto-produce mode bypasses approval/lock requirement and runs from quality-passing docs."}
+                </small>
                 <small>Quick keys for selected queue item: 1 ready, 2 in progress, 3 blocked, 4 done.</small>
                 <div className="tool-action-row">
                   <button type="button" className="ghost" onClick={() => void bulkUpdateVisibleQueueStatus("ready")} disabled={gameCreatorQueueBusyAction !== null}>
@@ -7645,6 +7792,29 @@ function App() {
                     ))}
                   </div>
                 )}
+
+                <details className="tool-details">
+                  <summary>Recent Execution Jobs ({gameCreatorExecutionJobs.length})</summary>
+                  {gameCreatorExecutionJobs.length === 0 ? (
+                    <small>No execution jobs yet. Run the next queue task to generate starter files.</small>
+                  ) : (
+                    <ul className="tool-list">
+                      {gameCreatorExecutionJobs.map((job) => (
+                        <li key={job.id}>
+                          <strong>{job.queueItemTitle}</strong>
+                          <small>Lane: {job.lane} · Doc: {job.sourceDocFile}</small>
+                          <small>Status: {job.status} · Mode: {job.mode}</small>
+                          <small>Started: {new Date(job.startedAt).toLocaleString()}{job.finishedAt ? ` · Finished: ${new Date(job.finishedAt).toLocaleString()}` : ""}</small>
+                          {job.outputs?.length ? <small>Outputs: {job.outputs.join(", ")}</small> : null}
+                          {job.warnings?.map((warning) => (
+                            <small key={`${job.id}-${warning}`} className="runtime-warning">Warning: {warning}</small>
+                          ))}
+                          {job.error ? <small className="runtime-warning">Error: {job.error}</small> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </details>
               </section>
 
               <section className="tool-section">

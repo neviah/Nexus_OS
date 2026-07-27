@@ -47,6 +47,7 @@ export type GameCreatorSetupWizardDraft = {
 
 export type GameCreatorState = {
   setupWizardDraft?: Partial<GameCreatorSetupWizardDraft>;
+  executionMode?: "strict-approval" | "auto-produce";
   conceptSwarm?: {
     generatedAt?: string;
     harnessId?: string;
@@ -103,6 +104,20 @@ export type GameCreatorState = {
       updatedAt: string;
     }>;
   };
+  executionJobs?: Array<{
+    id: string;
+    queueItemId: string;
+    queueItemTitle: string;
+    lane: "design" | "engineering" | "gameplay" | "content" | "art" | "audio" | "production" | "qa";
+    sourceDocFile: string;
+    mode: "strict-approval" | "auto-produce";
+    status: "running" | "completed" | "failed";
+    startedAt: string;
+    finishedAt?: string;
+    outputs?: string[];
+    warnings?: string[];
+    error?: string;
+  }>;
 };
 
 export type WorkspaceRecord = {
