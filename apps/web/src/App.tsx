@@ -732,6 +732,14 @@ type GameCreatorCanonDocStatusItem = {
   title: string;
   relativePath: string;
   exists: boolean;
+  quality?: {
+    passed: boolean;
+    minWords: number;
+    wordCount: number;
+    requiredSections: string[];
+    presentSections: string[];
+    missingSections: string[];
+  };
   record: GameCreatorCanonDocStatusRecord;
   snapshots: GameCreatorCanonDocSnapshot[];
 };
@@ -6920,6 +6928,12 @@ function App() {
                           <small>Path: {entry.relativePath}</small>
                           <small className={statusTone}>Review: {entry.record.reviewStatus} · Version: v{entry.record.version} · Locked: {entry.record.locked ? "yes" : "no"}</small>
                           <small>Snapshots: {entry.snapshots.length} · Last generated: {entry.record.lastGeneratedAt ? new Date(entry.record.lastGeneratedAt).toLocaleString() : "n/a"}</small>
+                          {entry.quality ? (
+                            <small className={entry.quality.passed ? "runtime-ready" : "runtime-warning"}>
+                              Quality: {entry.quality.passed ? "pass" : "needs work"} · words {entry.quality.wordCount}/{entry.quality.minWords}
+                              {entry.quality.missingSections.length ? ` · missing: ${entry.quality.missingSections.join(", ")}` : ""}
+                            </small>
+                          ) : null}
                           {entry.record.reviewNote ? <small>Note: {entry.record.reviewNote}</small> : null}
                           <div className="tool-action-row">
                             <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "approved")} disabled={busy}>Approve</button>

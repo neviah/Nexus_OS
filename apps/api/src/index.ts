@@ -434,9 +434,134 @@ type GameCreatorQueueItem = {
   updatedAt: string;
 };
 
+type CanonDocQualityReport = {
+  passed: boolean;
+  minWords: number;
+  wordCount: number;
+  requiredSections: string[];
+  presentSections: string[];
+  missingSections: string[];
+};
+
+type CanonDocPromptProfile = {
+  requiredSections: string[];
+  minWords: number;
+  emphasis: string[];
+  forbidden: string[];
+};
+
 const GAME_CREATOR_CANON_DOC_ROOT = "docs/game-creator";
 const GAME_CREATOR_CANON_DOC_VERSION_ROOT = "docs/game-creator/.versions";
 const gameCreatorGenerationProgressByWorkspace = new Map<string, GameCreatorGenerationProgress>();
+
+const CANON_DOC_PROMPT_PROFILES: Record<string, CanonDocPromptProfile> = {
+  "GAME_BIBLE.md": {
+    requiredSections: ["Vision Statement", "Player Fantasy", "Core Loop", "Target Audience", "Success Criteria", "Progression Milestones", "Risk Assumptions"],
+    minWords: 900,
+    emphasis: [
+      "Define the game as a vertical-slice-ready product vision with concrete player outcomes.",
+      "Use gameplay-first language and avoid vague creative writing.",
+      "Include measurable success criteria and scope boundaries.",
+    ],
+    forbidden: ["lorem ipsum", "TBD", "etc."],
+  },
+  "TECHNICAL_DESIGN.md": {
+    requiredSections: ["Engine Target", "Project Structure", "Runtime Systems", "Build Export Pipeline", "Performance Budgets", "Testing Strategy", "Known Technical Risks"],
+    minWords: 1200,
+    emphasis: [
+      "Provide concrete architecture decisions, including folder/module boundaries.",
+      "Define measurable performance budgets and validation checks.",
+      "Tie each major system to ownership and test coverage expectations.",
+    ],
+    forbidden: ["TBD", "figure it out later", "generic implementation"],
+  },
+  "UI_UX_SPEC.md": {
+    requiredSections: ["UX Principles", "Screen Map", "HUD Layout", "Interaction Flows", "Failure Recovery UX", "Telemetry Events"],
+    minWords: 900,
+    emphasis: [
+      "Specify exact HUD elements and screen-level intent.",
+      "Use player-flow language that is testable.",
+      "Define telemetry events for critical UX outcomes.",
+    ],
+    forbidden: ["nice UI", "good UX"],
+  },
+  "CONTROLS_CAMERA_SPEC.md": {
+    requiredSections: ["Input Mapping", "Camera Behavior Rules", "Controller Parity", "Accessibility", "Edge Cases"],
+    minWords: 850,
+    emphasis: [
+      "Include exact control mappings, including fallback behaviors.",
+      "Define camera collision, smoothing, and recenter rules.",
+      "Describe controller parity and accessibility implications.",
+    ],
+    forbidden: ["default controls"],
+  },
+  "ART_BIBLE.md": {
+    requiredSections: ["Visual Pillars", "Palette Material Language", "Character Style Guide", "Environment Style Guide", "UI Style Bridge", "Asset Budget Targets"],
+    minWords: 1000,
+    emphasis: [
+      "Define concrete art constraints and style boundaries.",
+      "Include production-facing asset budget guardrails.",
+      "Ensure readability constraints for gameplay clarity.",
+    ],
+    forbidden: ["make it pretty"],
+  },
+  "LORE_BOOK.md": {
+    requiredSections: ["World Rules", "Timeline", "Factions", "Character Bios", "Naming Conventions", "Narrative Boundaries"],
+    minWords: 900,
+    emphasis: [
+      "Ensure lore supports gameplay and production scope.",
+      "State hard constraints to prevent narrative drift.",
+      "Use concise but concrete canon-style definitions.",
+    ],
+    forbidden: ["open ended lore"],
+  },
+  "AUDIO_BIBLE.md": {
+    requiredSections: ["Music Direction", "SFX Taxonomy", "Priority Scene List", "Loudness Standards", "Implementation Notes"],
+    minWords: 850,
+    emphasis: [
+      "Specify priority sounds that affect gameplay readability.",
+      "Define loudness/format targets for implementation.",
+      "Include coverage mapping for core loop actions.",
+    ],
+    forbidden: ["ambient stuff"],
+  },
+  "PRODUCTION_PLAN.md": {
+    requiredSections: ["Milestones", "Backlog Categories", "Risk Register", "Approval Owners", "Dependencies", "Exit Criteria"],
+    minWords: 1000,
+    emphasis: [
+      "Make milestones measurable and dependency-aware.",
+      "Include risk mitigation owners and triggers.",
+      "Define objective gate exit criteria.",
+    ],
+    forbidden: ["as needed"],
+  },
+  "ENEMY_ROSTER.md": {
+    requiredSections: ["Enemy Families", "Roles", "Ability Matrix", "Spawn Rules By Biome", "Boss Packages", "Counterplay Notes"],
+    minWords: 950,
+    emphasis: [
+      "Provide per-family combat roles and behavioral purpose.",
+      "Link each family to biome/context constraints.",
+      "Define counterplay and progression escalation.",
+    ],
+    forbidden: ["random enemy"],
+  },
+  "DIFFICULTY_CURVE.md": {
+    requiredSections: ["Early Mid Late Goals", "Encounter Density", "DPS TTK Targets", "Failure Recovery Loops", "Balancing Test Plan"],
+    minWords: 900,
+    emphasis: [
+      "Define measurable tuning metrics and ranges.",
+      "Describe recovery loops and anti-frustration safeguards.",
+      "Include balancing validation scenarios.",
+    ],
+    forbidden: ["just make it hard"],
+  },
+  "CANON_DOC_INDEX.md": {
+    requiredSections: ["Canon Files", "Source", "Warnings"],
+    minWords: 120,
+    emphasis: ["Maintain canonical references and generation metadata."],
+    forbidden: [],
+  },
+};
 
 function pushGameCreatorGenerationEvent(progress: GameCreatorGenerationProgress, level: "info" | "warn" | "error", message: string): void {
   progress.events.push({
@@ -447,6 +572,72 @@ function pushGameCreatorGenerationEvent(progress: GameCreatorGenerationProgress,
   if (progress.events.length > 200) {
     progress.events.splice(0, progress.events.length - 200);
   }
+}
+
+function getCanonDocPromptProfile(fileName: string): CanonDocPromptProfile {
+  return CANON_DOC_PROMPT_PROFILES[fileName] ?? {
+    requiredSections: ["Overview", "Implementation Notes"],
+    minWords: 700,
+    emphasis: ["Provide specific implementation-ready detail."],
+    forbidden: [],
+  };
+}
+
+function extractMarkdownH2Headings(markdown: string): string[] {
+  return markdown
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("## "))
+    .map((line) => line.replace(/^##\s+/, "").trim());
+}
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function evaluateCanonDocQuality(fileName: string, content: string): CanonDocQualityReport {
+  const profile = getCanonDocPromptProfile(fileName);
+  const presentSections = extractMarkdownH2Headings(content).map((entry) => entry.toLowerCase());
+  const missingSections = profile.requiredSections.filter((section) => {
+    const normalized = section.toLowerCase();
+    return !presentSections.some((heading) => heading.includes(normalized) || normalized.includes(heading));
+  });
+  const wordCount = countWords(content);
+  const passed = wordCount >= profile.minWords && missingSections.length === 0;
+  return {
+    passed,
+    minWords: profile.minWords,
+    wordCount,
+    requiredSections: profile.requiredSections,
+    presentSections,
+    missingSections,
+  };
+}
+
+function detectCanonDocContradictions(input: {
+  spec: GameCreatorSpecPackage;
+  docsByFile: Record<string, string>;
+}): string[] {
+  const warnings: string[] = [];
+  const target = input.spec.setupWizard.target.toLowerCase();
+  const perspective = input.spec.setupWizard.perspective.toLowerCase();
+  const controls = input.spec.setupWizard.controls.toLowerCase();
+  const files = Object.entries(input.docsByFile);
+
+  for (const [fileName, content] of files) {
+    const lower = content.toLowerCase();
+    if (!lower.includes(target)) {
+      warnings.push(`${fileName} does not explicitly reference target ${target}.`);
+    }
+    if (!lower.includes(perspective)) {
+      warnings.push(`${fileName} does not explicitly reference perspective ${perspective}.`);
+    }
+    if (!lower.includes(controls)) {
+      warnings.push(`${fileName} does not explicitly reference controls profile ${controls}.`);
+    }
+  }
+
+  return warnings;
 }
 
 function buildCanonDocTemplateFiles(spec: GameCreatorSpecPackage): CanonDocFile[] {
@@ -661,14 +852,29 @@ async function generateCanonDocContent(input: {
   const variants: Array<{ harnessId: string; content: string }> = [];
   const warnings: string[] = [];
   const templates = buildCanonDocTemplateFiles(input.specPackage);
+  const profile = getCanonDocPromptProfile(input.file.fileName);
 
   for (const harness of harnesses) {
     try {
-      const prompt = buildCanonDocGenerationPrompt({
+      const outlinePrompt = buildCanonDocOutlinePrompt({
         spec: input.specPackage,
         templates,
         fileName: input.file.fileName,
         title: input.file.title,
+      });
+      const outline = await generateCanonDocWithHarness({
+        harness,
+        state: input.state,
+        workspace: input.workspace,
+        prompt: outlinePrompt,
+      });
+
+      const prompt = buildCanonDocExpansionPrompt({
+        spec: input.specPackage,
+        templates,
+        fileName: input.file.fileName,
+        title: input.file.title,
+        outline,
       });
       const harnessContent = await generateCanonDocWithHarness({
         harness,
@@ -677,6 +883,10 @@ async function generateCanonDocContent(input: {
         prompt,
       });
       if (harnessContent.trim()) {
+        const quality = evaluateCanonDocQuality(input.file.fileName, harnessContent);
+        if (!quality.passed) {
+          warnings.push(`Harness ${harness.id} draft for ${input.file.fileName} missed quality bar (${quality.wordCount}/${profile.minWords} words, missing: ${quality.missingSections.join(", ") || "none"}).`);
+        }
         variants.push({ harnessId: harness.id, content: harnessContent });
       }
     } catch (error) {
@@ -696,11 +906,14 @@ async function readCanonDocStatus(input: {
   files: CanonDocFile[];
   records: Record<string, GameCreatorCanonDocRecord>;
   snapshots: GameCreatorCanonDocSnapshot[];
+  includeContent?: boolean;
 }): Promise<Array<{
   fileName: string;
   title: string;
   relativePath: string;
   exists: boolean;
+  content: string;
+  quality: CanonDocQualityReport;
   record: GameCreatorCanonDocRecord;
   snapshots: GameCreatorCanonDocSnapshot[];
 }>> {
@@ -709,6 +922,8 @@ async function readCanonDocStatus(input: {
     title: string;
     relativePath: string;
     exists: boolean;
+    content: string;
+    quality: CanonDocQualityReport;
     record: GameCreatorCanonDocRecord;
     snapshots: GameCreatorCanonDocSnapshot[];
   }> = [];
@@ -716,6 +931,8 @@ async function readCanonDocStatus(input: {
   for (const file of input.files) {
     const absolutePath = safeWorkspaceJoin(input.workspacePath, file.relativePath);
     const exists = await fileExists(absolutePath);
+    const content = exists ? await fs.readFile(absolutePath, "utf-8") : "";
+    const quality = evaluateCanonDocQuality(file.fileName, content);
     const record = input.records[file.fileName] ?? createDefaultCanonDocRecord(file);
     const rowSnapshots = input.snapshots.filter((entry) => entry.fileName === file.fileName);
     rows.push({
@@ -723,6 +940,8 @@ async function readCanonDocStatus(input: {
       title: file.title,
       relativePath: file.relativePath,
       exists,
+      content: input.includeContent ? content : "",
+      quality,
       record,
       snapshots: rowSnapshots,
     });
@@ -753,6 +972,7 @@ async function evaluateGate2Readiness(input: {
     files,
     records: store.records,
     snapshots: store.snapshots,
+    includeContent: true,
   });
 
   const blockers: string[] = [];
@@ -765,6 +985,10 @@ async function evaluateGate2Readiness(input: {
       existingDocs += 1;
     } else {
       blockers.push(`${entry.fileName} is missing.`);
+    }
+
+    if (entry.exists && !entry.quality.passed) {
+      blockers.push(`${entry.fileName} failed quality thresholds (${entry.quality.wordCount}/${entry.quality.minWords} words, missing sections: ${entry.quality.missingSections.join(", ") || "none"}).`);
     }
 
     if (entry.record.reviewStatus === "approved") {
@@ -780,6 +1004,15 @@ async function evaluateGate2Readiness(input: {
     }
   }
 
+  const docsByFile: Record<string, string> = {};
+  for (const entry of status) {
+    if (entry.exists && entry.content.trim()) {
+      docsByFile[entry.fileName] = entry.content;
+    }
+  }
+  const contradictions = detectCanonDocContradictions({ spec, docsByFile });
+  contradictions.forEach((warning) => blockers.push(`Consistency check: ${warning}`));
+
   return {
     ready: blockers.length === 0,
     blockers,
@@ -792,23 +1025,57 @@ async function evaluateGate2Readiness(input: {
   };
 }
 
-function buildCanonDocGenerationPrompt(input: {
+function buildCanonDocOutlinePrompt(input: {
   spec: GameCreatorSpecPackage;
   templates: CanonDocFile[];
   fileName: string;
   title: string;
 }): string {
   const { spec, templates, fileName, title } = input;
+  const profile = getCanonDocPromptProfile(fileName);
   const setup = JSON.stringify(spec.setupWizard, null, 2);
   const baseline = templates.find((entry) => entry.fileName === fileName)?.content ?? "";
   return [
-    `You are generating a canon game-design document named ${fileName} (${title}).`,
+    `You are preparing a production-grade outline for canon document ${fileName} (${title}).`,
     "Return only markdown content. Do not wrap in code fences.",
-    "Keep practical implementation detail and include concise sections and bullet points.",
+    "Create a full outline with H2 and H3 headings only plus short bullets under each section.",
+    `Required top-level sections: ${profile.requiredSections.join(", ")}.`,
+    `The final expanded document must exceed ${profile.minWords} words, so design the outline for depth.`,
+    `Emphasis: ${profile.emphasis.join(" ")}.`,
     "Project setup:",
     setup,
-    "Baseline draft (improve and expand it while preserving constraints):",
+    "Baseline draft (improve and expand while preserving constraints):",
     baseline,
+  ].join("\n\n");
+}
+
+function buildCanonDocExpansionPrompt(input: {
+  spec: GameCreatorSpecPackage;
+  templates: CanonDocFile[];
+  fileName: string;
+  title: string;
+  outline: string;
+}): string {
+  const { spec, templates, fileName, title, outline } = input;
+  const profile = getCanonDocPromptProfile(fileName);
+  const setup = JSON.stringify(spec.setupWizard, null, 2);
+  const baseline = templates.find((entry) => entry.fileName === fileName)?.content ?? "";
+  const forbidden = profile.forbidden.length ? profile.forbidden.join(", ") : "none";
+  return [
+    `Expand canon game-design document ${fileName} (${title}) into implementation-ready detail.`,
+    "Return only markdown content. Do not wrap in code fences.",
+    `Minimum length: ${profile.minWords} words.`,
+    `Required sections (H2): ${profile.requiredSections.join(", ")}.`,
+    "For each section include actionable details, constraints, examples, and validation criteria.",
+    `Avoid weak filler terms: ${forbidden}.`,
+    `Emphasis: ${profile.emphasis.join(" ")}.`,
+    "Include a final section named ## Validation Checklist with concrete pass/fail checks.",
+    "Project setup:",
+    setup,
+    "Baseline draft:",
+    baseline,
+    "Approved outline to expand:",
+    outline,
   ].join("\n\n");
 }
 
@@ -2791,6 +3058,25 @@ app.post("/api/tools/game-creator/canon-docs/generate", async (req, res) => {
     files: templates,
     records,
     snapshots,
+  });
+
+  const statusWithContent = await readCanonDocStatus({
+    workspacePath: workspace.path,
+    files: templates,
+    records,
+    snapshots,
+    includeContent: true,
+  });
+  const docsByFile: Record<string, string> = {};
+  for (const entry of statusWithContent) {
+    if (entry.exists && entry.content.trim()) {
+      docsByFile[entry.fileName] = entry.content;
+    }
+  }
+  const consistencyWarnings = detectCanonDocContradictions({ spec: specPackage, docsByFile });
+  consistencyWarnings.forEach((warning) => {
+    warnings.push(`Consistency check: ${warning}`);
+    pushGameCreatorGenerationEvent(progress, "warn", warning);
   });
 
   res.json({
