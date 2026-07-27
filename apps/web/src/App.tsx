@@ -1432,12 +1432,14 @@ function App() {
   const [gameCreatorShowMissingDocCards, setGameCreatorShowMissingDocCards] = useState(false);
   const [gameCreatorDocFocusFilter, setGameCreatorDocFocusFilter] = useState<"all" | "needs-review" | "quality-fail" | "unlocked">("needs-review");
   const [gameCreatorSectionControlsExpanded, setGameCreatorSectionControlsExpanded] = useState(false);
+  const [gameCreatorActiveDocFileName, setGameCreatorActiveDocFileName] = useState<string | null>(null);
   const [gameCreatorQueueItems, setGameCreatorQueueItems] = useState<GameCreatorQueueItem[]>([]);
   const [gameCreatorQueueSummary, setGameCreatorQueueSummary] = useState<GameCreatorQueueSummary | null>(null);
   const [gameCreatorQueueBuiltAt, setGameCreatorQueueBuiltAt] = useState<string | null>(null);
   const [gameCreatorQueueBlockers, setGameCreatorQueueBlockers] = useState<string[]>([]);
   const [gameCreatorQueueImpactSummary, setGameCreatorQueueImpactSummary] = useState<{ changedDocs: string[]; impactedQueueItems: number } | null>(null);
   const [gameCreatorQueueStatusFilter, setGameCreatorQueueStatusFilter] = useState<"all" | GameCreatorQueueItem["status"]>("ready");
+  const [gameCreatorActiveQueueItemId, setGameCreatorActiveQueueItemId] = useState<string | null>(null);
   const [gameCreatorQueueBusyAction, setGameCreatorQueueBusyAction] = useState<"build" | "refresh" | string | null>(null);
   const [gameCreatorSpritePrompt, setGameCreatorSpritePrompt] = useState("pixel-art hero run cycle, transparent background");
   const [gameCreatorSpriteModel, setGameCreatorSpriteModel] = useState("dreamshaper-8");
@@ -1546,6 +1548,125 @@ function App() {
     }
     return gameCreatorQueueItems.filter((entry) => entry.status === gameCreatorQueueStatusFilter);
   }, [gameCreatorQueueItems, gameCreatorQueueStatusFilter]);
+
+  const gameCreatorActiveDoc = useMemo(() => {
+    return gameCreatorFocusedDocStatus.find((entry) => entry.fileName === gameCreatorActiveDocFileName) ?? gameCreatorFocusedDocStatus[0] ?? null;
+  }, [gameCreatorActiveDocFileName, gameCreatorFocusedDocStatus]);
+
+  const gameCreatorActiveQueueItem = useMemo(() => {
+    return gameCreatorVisibleQueueItems.find((entry) => entry.id === gameCreatorActiveQueueItemId) ?? gameCreatorVisibleQueueItems[0] ?? null;
+  }, [gameCreatorActiveQueueItemId, gameCreatorVisibleQueueItems]);
+
+  const gameCreatorQueueByLane = useMemo(() => {
+    const laneOrder: GameCreatorQueueItem["lane"][] = ["design", "engineering", "gameplay", "content", "art", "audio", "production", "qa"];
+    const grouped = new Map<GameCreatorQueueItem["lane"], GameCreatorQueueItem[]>();
+    for (const item of gameCreatorVisibleQueueItems) {
+      const bucket = grouped.get(item.lane) ?? [];
+      bucket.push(item);
+      grouped.set(item.lane, bucket);
+    }
+
+    return laneOrder
+      .map((lane) => ({ lane, items: grouped.get(lane) ?? [] }))
+      .filter((group) => group.items.length > 0);
+  }, [gameCreatorVisibleQueueItems]);
+
+  useEffect(() => {
+    if (!gameCreatorActiveDoc && gameCreatorActiveDocFileName !== null) {
+      setGameCreatorActiveDocFileName(null);
+      return;
+    }
+    if (gameCreatorActiveDoc && gameCreatorActiveDocFileName !== gameCreatorActiveDoc.fileName) {
+      setGameCreatorActiveDocFileName(gameCreatorActiveDoc.fileName);
+    }
+  }, [gameCreatorActiveDoc, gameCreatorActiveDocFileName]);
+
+  useEffect(() => {
+    if (!gameCreatorActiveQueueItem && gameCreatorActiveQueueItemId !== null) {
+      setGameCreatorActiveQueueItemId(null);
+      return;
+    }
+    if (gameCreatorActiveQueueItem && gameCreatorActiveQueueItemId !== gameCreatorActiveQueueItem.id) {
+      setGameCreatorActiveQueueItemId(gameCreatorActiveQueueItem.id);
+    }
+  }, [gameCreatorActiveQueueItem, gameCreatorActiveQueueItemId]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (selectedPane.type !== "tool" || selectedPane.id !== "game-creator") {
+        return;
+      }
+      if (event.altKey || event.ctrlKey || event.metaKey) {
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName.toLowerCase();
+        if (tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable) {
+          return;
+        }
+      }
+
+      const key = event.key.toLowerCase();
+      if (key === "a" && gameCreatorActiveDoc) {
+        event.preventDefault();
+        void updateGameCreatorCanonDocDecision(gameCreatorActiveDoc.fileName, "approved");
+        return;
+      }
+      if (key === "r" && gameCreatorActiveDoc) {
+        event.preventDefault();
+        void updateGameCreatorCanonDocDecision(gameCreatorActiveDoc.fileName, "rejected");
+        return;
+      }
+      if (key === "l" && gameCreatorActiveDoc) {
+        event.preventDefault();
+        void toggleGameCreatorCanonDocLock(gameCreatorActiveDoc.fileName, !gameCreatorActiveDoc.record.locked);
+        return;
+      }
+      if (key === "s" && gameCreatorActiveDoc && gameCreatorActiveDoc.exists) {
+        event.preventDefault();
+        void snapshotGameCreatorCanonDoc(gameCreatorActiveDoc.fileName);
+        return;
+      }
+      if (key === "g" && gameCreatorActiveDoc && !gameCreatorActiveDoc.record.locked) {
+        event.preventDefault();
+        void regenerateSingleGameCreatorCanonDoc(gameCreatorActiveDoc.fileName);
+        return;
+      }
+
+      if (!gameCreatorActiveQueueItem) {
+        return;
+      }
+      if (key === "1") {
+        event.preventDefault();
+        void updateGameCreatorQueueItemStatus(gameCreatorActiveQueueItem.id, "ready");
+        return;
+      }
+      if (key === "2") {
+        event.preventDefault();
+        void updateGameCreatorQueueItemStatus(gameCreatorActiveQueueItem.id, "in-progress");
+        return;
+      }
+      if (key === "3") {
+        event.preventDefault();
+        void updateGameCreatorQueueItemStatus(gameCreatorActiveQueueItem.id, "blocked");
+        return;
+      }
+      if (key === "4") {
+        event.preventDefault();
+        void updateGameCreatorQueueItemStatus(gameCreatorActiveQueueItem.id, "done");
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    gameCreatorActiveDoc,
+    gameCreatorActiveQueueItem,
+    selectedPane.id,
+    selectedPane.type,
+  ]);
 
   useEffect(() => {
     const candidate = model3dResult?.relativePath?.trim() ?? "";
@@ -2736,6 +2857,103 @@ function App() {
       setGameCreatorQueueSummary(payload.summary ?? null);
       setGameCreatorQueueBuiltAt(payload.builtAt ?? null);
       setGameCreatorQueueImpactSummary(payload.impactSummary ?? null);
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorQueueBusyAction(null);
+    }
+  }
+
+  async function bulkApprovePassingFocusedDocs() {
+    const targets = gameCreatorFocusedDocStatus
+      .filter((entry) => entry.quality?.passed && entry.record.reviewStatus !== "approved")
+      .map((entry) => entry.fileName);
+    if (targets.length === 0) {
+      pushToast("No focused docs are eligible for bulk approve.", "warn");
+      return;
+    }
+
+    setGameCreatorReviewBusyKey("bulk:approve");
+    try {
+      for (const fileName of targets) {
+        const response = await fetch(`/api/tools/game-creator/canon-docs/${encodeURIComponent(fileName)}/decision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspaceId: boot?.activeWorkspaceId,
+            decision: "approved",
+            reviewedBy: "user",
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(`Bulk approve failed on ${fileName}.`);
+        }
+      }
+      await loadGameCreatorCanonDocsStatus();
+      await loadGameCreatorGate2Status();
+      pushToast(`Bulk approved ${targets.length} doc(s).`, "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorReviewBusyKey(null);
+    }
+  }
+
+  async function bulkLockApprovedFocusedDocs() {
+    const targets = gameCreatorFocusedDocStatus
+      .filter((entry) => entry.record.reviewStatus === "approved" && !entry.record.locked)
+      .map((entry) => entry.fileName);
+    if (targets.length === 0) {
+      pushToast("No focused approved docs are eligible for bulk lock.", "warn");
+      return;
+    }
+
+    setGameCreatorReviewBusyKey("bulk:lock");
+    try {
+      for (const fileName of targets) {
+        const response = await fetch(`/api/tools/game-creator/canon-docs/${encodeURIComponent(fileName)}/lock`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, locked: true }),
+        });
+        if (!response.ok) {
+          throw new Error(`Bulk lock failed on ${fileName}.`);
+        }
+      }
+      await loadGameCreatorCanonDocsStatus();
+      await loadGameCreatorGate2Status();
+      pushToast(`Bulk locked ${targets.length} doc(s).`, "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorReviewBusyKey(null);
+    }
+  }
+
+  async function bulkUpdateVisibleQueueStatus(status: GameCreatorQueueItem["status"]) {
+    const targets = gameCreatorVisibleQueueItems.filter((entry) => entry.status !== status);
+    if (targets.length === 0) {
+      pushToast(`No visible queue items need status ${status}.`, "warn");
+      return;
+    }
+
+    setGameCreatorQueueBusyAction(`bulk:${status}`);
+    try {
+      for (const item of targets) {
+        const response = await fetch(`/api/tools/game-creator/queue/${encodeURIComponent(item.id)}/status`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, status }),
+        });
+        if (!response.ok) {
+          throw new Error(`Bulk queue update failed on ${item.title}.`);
+        }
+      }
+      await loadGameCreatorQueue();
+      pushToast(`Updated ${targets.length} queue item(s) to ${status}.`, "ok");
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -7256,6 +7474,15 @@ function App() {
                     </button>
                   </div>
                 </div>
+                <small>Quick keys for selected doc: A approve, R reject, L lock/unlock, S snapshot, G regenerate.</small>
+                <div className="tool-action-row">
+                  <button type="button" className="ghost" onClick={() => void bulkApprovePassingFocusedDocs()} disabled={gameCreatorReviewBusyKey !== null}>
+                    Bulk Approve Passing (Focused)
+                  </button>
+                  <button type="button" className="ghost" onClick={() => void bulkLockApprovedFocusedDocs()} disabled={gameCreatorReviewBusyKey !== null}>
+                    Bulk Lock Approved (Focused)
+                  </button>
+                </div>
                 <div className="status-chip-row">
                   <span className="status-chip">Visible {gameCreatorVisibleDocStatus.length}</span>
                   <span className="status-chip">Focused {gameCreatorFocusedDocStatus.length}</span>
@@ -7269,8 +7496,9 @@ function App() {
                     {gameCreatorFocusedDocStatus.map((entry) => {
                       const statusTone = entry.record.reviewStatus === "approved" ? "runtime-ready" : entry.record.reviewStatus === "rejected" ? "runtime-warning" : "side-status";
                       const busy = Boolean(gameCreatorReviewBusyKey && gameCreatorReviewBusyKey.startsWith(`${entry.fileName}:`));
+                      const active = gameCreatorActiveDoc?.fileName === entry.fileName;
                       return (
-                        <li key={entry.fileName}>
+                        <li key={entry.fileName} className={active ? "active-row" : ""} onClick={() => setGameCreatorActiveDocFileName(entry.fileName)}>
                           <strong>{entry.fileName}</strong>
                           <small>{entry.title} · {entry.relativePath}</small>
                           <small className={statusTone}>Review: {entry.record.reviewStatus} · v{entry.record.version} · Locked: {entry.record.locked ? "yes" : "no"}</small>
@@ -7346,6 +7574,15 @@ function App() {
                     </button>
                   </div>
                 </div>
+                <small>Quick keys for selected queue item: 1 ready, 2 in progress, 3 blocked, 4 done.</small>
+                <div className="tool-action-row">
+                  <button type="button" className="ghost" onClick={() => void bulkUpdateVisibleQueueStatus("ready")} disabled={gameCreatorQueueBusyAction !== null}>
+                    Bulk Mark Visible Ready
+                  </button>
+                  <button type="button" className="ghost" onClick={() => void bulkUpdateVisibleQueueStatus("done")} disabled={gameCreatorQueueBusyAction !== null}>
+                    Bulk Mark Visible Done
+                  </button>
+                </div>
 
                 <small>Builds actionable tasks from docs that are generated, approved, and locked.</small>
                 {gameCreatorQueueBuiltAt ? <small>Queue built: {new Date(gameCreatorQueueBuiltAt).toLocaleString()}</small> : <small>Queue not built yet.</small>}
@@ -7380,25 +7617,33 @@ function App() {
                 {gameCreatorVisibleQueueItems.length === 0 ? (
                   <small>No queue items yet. Finish Step 3 approvals/locks, then build queue.</small>
                 ) : (
-                  <ul className="tool-list">
-                    {gameCreatorVisibleQueueItems.map((item) => {
-                      const busy = Boolean(gameCreatorQueueBusyAction && gameCreatorQueueBusyAction.includes(item.id));
-                      return (
-                        <li key={item.id}>
-                          <strong>{item.title}</strong>
-                          <small>Lane: {item.lane} · Source: {item.sourceDocFile}</small>
-                          <small>Status: {item.status} · Updated: {new Date(item.updatedAt).toLocaleString()}</small>
-                          {item.notes ? <small>Notes: {item.notes}</small> : null}
-                          <div className="tool-action-row">
-                            <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "ready")} disabled={busy}>Ready</button>
-                            <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "in-progress")} disabled={busy}>In Progress</button>
-                            <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "blocked")} disabled={busy}>Blocked</button>
-                            <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "done")} disabled={busy}>Done</button>
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
+                  <div className="tool-list">
+                    {gameCreatorQueueByLane.map((laneGroup) => (
+                      <details key={laneGroup.lane} className="tool-details" open>
+                        <summary>{laneGroup.lane.toUpperCase()} · {laneGroup.items.length} item(s)</summary>
+                        <ul className="tool-list">
+                          {laneGroup.items.map((item) => {
+                            const busy = Boolean(gameCreatorQueueBusyAction && gameCreatorQueueBusyAction.includes(item.id));
+                            const active = gameCreatorActiveQueueItem?.id === item.id;
+                            return (
+                              <li key={item.id} className={active ? "active-row" : ""} onClick={() => setGameCreatorActiveQueueItemId(item.id)}>
+                                <strong>{item.title}</strong>
+                                <small>Lane: {item.lane} · Source: {item.sourceDocFile}</small>
+                                <small>Status: {item.status} · Updated: {new Date(item.updatedAt).toLocaleString()}</small>
+                                {item.notes ? <small>Notes: {item.notes}</small> : null}
+                                <div className="tool-action-row">
+                                  <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "ready")} disabled={busy}>Ready</button>
+                                  <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "in-progress")} disabled={busy}>In Progress</button>
+                                  <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "blocked")} disabled={busy}>Blocked</button>
+                                  <button type="button" className="ghost" onClick={() => void updateGameCreatorQueueItemStatus(item.id, "done")} disabled={busy}>Done</button>
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </details>
+                    ))}
+                  </div>
                 )}
               </section>
 

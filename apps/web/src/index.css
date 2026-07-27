@@ -1111,6 +1111,19 @@ button:disabled {
   gap: 8px;
 }
 
+.tool-list li {
+  border: 1px solid rgba(47, 71, 79, 0.35);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(13, 22, 28, 0.35);
+}
+
+.tool-list li.active-row {
+  border-color: rgba(93, 169, 199, 0.75);
+  box-shadow: inset 2px 0 0 rgba(93, 169, 199, 0.9);
+  background: rgba(18, 30, 38, 0.6);
+}
+
 .recommendation-head {
   display: flex;
   justify-content: space-between;
