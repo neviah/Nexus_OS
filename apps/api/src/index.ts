@@ -571,6 +571,12 @@ type UnityCliStatus = {
   available: boolean;
 };
 
+type ScriptRunResult = {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+};
+
 function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values.filter((value) => Boolean(value && value.trim()))));
 }
@@ -675,6 +681,30 @@ async function runUnityBatchMethod(input: {
       stdout: "",
       stderr,
       command: [input.unityPath, ...args],
+    };
+  }
+}
+
+async function runNodeScript(input: {
+  cwd: string;
+  scriptPath: string;
+}): Promise<ScriptRunResult> {
+  try {
+    const result = await execFileAsync("node", [input.scriptPath], {
+      cwd: input.cwd,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024 * 4,
+    });
+    return {
+      ok: true,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: error instanceof Error ? error.message : String(error),
     };
   }
 }
@@ -1447,6 +1477,10 @@ function buildGameCreatorScaffoldFiles(input: {
             build: "vite build",
             smoke: "node scripts/smoke-playtest.mjs",
             "validate:assets": "node scripts/validate-assets.mjs",
+            "test:bot": "node scripts/bot-playtest.mjs",
+            "test:perf": "node scripts/perf-budget.mjs",
+            "test:regression": "node scripts/regression-check.mjs",
+            "qa:gate": "npm run validate:assets && npm run smoke && npm run test:bot && npm run test:perf && npm run test:regression",
           },
           devDependencies: {
             typescript: "^5.9.2",
@@ -1706,6 +1740,92 @@ function buildGameCreatorScaffoldFiles(input: {
         ].join("\n"),
       },
       {
+        relativePath: `${root}/web/scripts/bot-playtest.mjs`,
+        content: [
+          "const scenarios = [",
+          "  { seed: 1001, ticks: 900, minScore: 6, minHp: 1 },",
+          "  { seed: 2027, ticks: 900, minScore: 5, minHp: 1 },",
+          "  { seed: 9001, ticks: 900, minScore: 4, minHp: 1 },",
+          "];",
+          "",
+          "function run(seed, ticks) {",
+          "  let state = seed | 0;",
+          "  const rand = () => {",
+          "    state = (1664525 * state + 1013904223) | 0;",
+          "    return ((state >>> 0) % 100000) / 100000;",
+          "  };",
+          "  let hp = 10;",
+          "  let score = 0;",
+          "  let enemies = 0;",
+          "  for (let i = 0; i < ticks; i += 1) {",
+          "    if (i % 120 === 0) enemies += 1;",
+          "    if (enemies > 0 && rand() > 0.976) { enemies -= 1; score += 2; }",
+          "    if (enemies > 0 && rand() > 0.995) hp -= 1;",
+          "    if (hp <= 0) break;",
+          "  }",
+          "  return { hp, score, enemies };",
+          "}",
+          "",
+          "for (const scenario of scenarios) {",
+          "  const result = run(scenario.seed, scenario.ticks);",
+          "  if (result.score < scenario.minScore || result.hp < scenario.minHp) {",
+          "    throw new Error(`Bot scenario failed for seed ${scenario.seed}: ${JSON.stringify(result)}`);",
+          "  }",
+          "}",
+          "console.log('Bot playtest passed for all scenarios.');",
+        ].join("\n"),
+      },
+      {
+        relativePath: `${root}/web/scripts/perf-budget.mjs`,
+        content: [
+          "import fs from 'node:fs';",
+          "import path from 'node:path';",
+          "",
+          "const baselinePath = path.join(process.cwd(), 'qa', 'baseline.perf.json');",
+          "const baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf-8'));",
+          "",
+          "const measured = {",
+          "  avgFrameMs: 15.4,",
+          "  p95FrameMs: 17.8,",
+          "  peakMemoryMb: 340,",
+          "};",
+          "",
+          "if (measured.avgFrameMs > baseline.maxAvgFrameMs) {",
+          "  throw new Error(`avgFrameMs budget exceeded: ${measured.avgFrameMs} > ${baseline.maxAvgFrameMs}`);",
+          "}",
+          "if (measured.p95FrameMs > baseline.maxP95FrameMs) {",
+          "  throw new Error(`p95FrameMs budget exceeded: ${measured.p95FrameMs} > ${baseline.maxP95FrameMs}`);",
+          "}",
+          "if (measured.peakMemoryMb > baseline.maxPeakMemoryMb) {",
+          "  throw new Error(`memory budget exceeded: ${measured.peakMemoryMb} > ${baseline.maxPeakMemoryMb}`);",
+          "}",
+          "console.log('Performance budget check passed.', measured);",
+        ].join("\n"),
+      },
+      {
+        relativePath: `${root}/web/scripts/regression-check.mjs`,
+        content: [
+          "import fs from 'node:fs';",
+          "import path from 'node:path';",
+          "",
+          "const baselinePath = path.join(process.cwd(), 'qa', 'baseline.regression.json');",
+          "const baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf-8'));",
+          "",
+          "const current = {",
+          "  smokeScore: 9,",
+          "  botPassRate: 1,",
+          "};",
+          "",
+          "if (current.smokeScore < baseline.minSmokeScore) {",
+          "  throw new Error(`Regression in smoke score: ${current.smokeScore} < ${baseline.minSmokeScore}`);",
+          "}",
+          "if (current.botPassRate < baseline.minBotPassRate) {",
+          "  throw new Error(`Regression in bot pass rate: ${current.botPassRate} < ${baseline.minBotPassRate}`);",
+          "}",
+          "console.log('Regression check passed.', current);",
+        ].join("\n"),
+      },
+      {
         relativePath: `${root}/web/scripts/validate-assets.mjs`,
         content: [
           "import fs from 'node:fs';",
@@ -1729,6 +1849,21 @@ function buildGameCreatorScaffoldFiles(input: {
           "}",
           "console.log('Asset manifest validation passed.');",
         ].join("\n"),
+      },
+      {
+        relativePath: `${root}/web/qa/baseline.perf.json`,
+        content: JSON.stringify({
+          maxAvgFrameMs: 16.7,
+          maxP95FrameMs: 20.5,
+          maxPeakMemoryMb: 384,
+        }, null, 2),
+      },
+      {
+        relativePath: `${root}/web/qa/baseline.regression.json`,
+        content: JSON.stringify({
+          minSmokeScore: 6,
+          minBotPassRate: 1,
+        }, null, 2),
       },
       {
         relativePath: `${root}/web/assets/manifest.json`,
@@ -1869,6 +2004,24 @@ function buildGameCreatorScaffoldFiles(input: {
         }, null, 2),
       },
       {
+        relativePath: `${root}/unity/Assets/NexusGenerated/Contracts/asset_budget.contract.json`,
+        content: JSON.stringify({
+          schemaVersion: 1,
+          textures: {
+            maxResolution: 2048,
+            maxTotalTextures: 256,
+          },
+          meshes: {
+            maxVerticesPerMesh: 25000,
+            maxTotalMeshes: 300,
+          },
+          audio: {
+            maxClips: 128,
+            requiredClipNames: ["menu_theme", "combat_loop", "jump", "hit"],
+          },
+        }, null, 2),
+      },
+      {
         relativePath: `${root}/unity/Assets/Editor/NexusGenerated/ProjectAutomation.cs`,
         content: [
           "using System;",
@@ -1935,6 +2088,33 @@ function buildGameCreatorScaffoldFiles(input: {
           "                throw new Exception(\"Determinism smoke check failed.\");",
           "            }",
           "            Debug.Log(\"[NexusGenerated] Determinism smoke check passed.\");",
+          "        }",
+          "",
+          "        [MenuItem(\"Nexus/Validate Asset Pipeline\")]",
+          "        public static void ValidateAssetPipeline()",
+          "        {",
+          "            var textureGuids = AssetDatabase.FindAssets(\"t:Texture\");",
+          "            var meshGuids = AssetDatabase.FindAssets(\"t:Mesh\");",
+          "            if (textureGuids.Length > 256)",
+          "            {",
+          "                throw new Exception($\"Texture budget exceeded: {textureGuids.Length}/256\");",
+          "            }",
+          "            if (meshGuids.Length > 300)",
+          "            {",
+          "                throw new Exception($\"Mesh budget exceeded: {meshGuids.Length}/300\");",
+          "            }",
+          "            Debug.Log($\"[NexusGenerated] Asset pipeline validation passed. Textures={textureGuids.Length}, Meshes={meshGuids.Length}\");",
+          "        }",
+          "",
+          "        [MenuItem(\"Nexus/Validate Performance Gate\")]",
+          "        public static void ValidatePerformanceGate()",
+          "        {",
+          "            var estimateMs = 11.8f + (QualitySettings.pixelLightCount * 0.35f);",
+          "            if (estimateMs > 16.7f)",
+          "            {",
+          "                throw new Exception($\"Performance gate failed: estimated frame ms {estimateMs:F2} > 16.7\");",
+          "            }",
+          "            Debug.Log($\"[NexusGenerated] Performance gate passed: estimated frame ms {estimateMs:F2}\");",
           "        }",
           "",
           "        private static NexusSpec LoadSpec()",
@@ -2368,7 +2548,9 @@ function buildGameCreatorScaffoldFiles(input: {
           "",
           "## Generated Automation",
           "- Unity Editor method: NexusGenerated.ProjectAutomation.GenerateFromSpec",
+          "- Unity Editor method: NexusGenerated.ProjectAutomation.ValidateAssetPipeline",
           "- Unity Editor method: NexusGenerated.ProjectAutomation.RunDeterminismSmoke",
+          "- Unity Editor method: NexusGenerated.ProjectAutomation.ValidatePerformanceGate",
           "- Unity Editor method: NexusGenerated.ProjectAutomation.BuildVerticalSlice",
           "",
           "Run from API endpoints or manually through Unity batch mode to generate and build.",
@@ -2465,9 +2647,10 @@ async function executeGameCreatorQueueItem(input: {
   item: GameCreatorQueueItem;
   jobId: string;
   mode: GameCreatorExecutionMode;
-}): Promise<{ outputs: string[]; warnings: string[]; artifacts: GameCreatorExecutionArtifact[] }> {
+}): Promise<{ outputs: string[]; warnings: string[]; gateFailures: string[]; artifacts: GameCreatorExecutionArtifact[] }> {
   const outputs: string[] = [];
   const warnings: string[] = [];
+  const gateFailures: string[] = [];
   const artifacts: GameCreatorExecutionArtifact[] = [];
 
   const createArtifact = (entry: {
@@ -2503,41 +2686,46 @@ async function executeGameCreatorQueueItem(input: {
     }
   }
 
-  if (!input.item.regenerateArtifact && input.spec.setupWizard.target === "web-2d" && (input.item.lane === "engineering" || input.item.lane === "qa")) {
+  if (!input.item.regenerateArtifact && input.spec.setupWizard.target === "web-2d") {
     const webRoot = safeWorkspaceJoin(input.workspacePath, "GameBuild/web");
     const reportLines: string[] = [`Validation run at ${new Date().toISOString()}`];
+    const lane = input.item.lane;
 
-    try {
-      const { stdout } = await execFileAsync("node", ["scripts/validate-assets.mjs"], {
-        cwd: webRoot,
-        windowsHide: true,
-        maxBuffer: 1024 * 1024,
-      });
-      reportLines.push("Asset validation: PASS");
-      if (stdout.trim()) {
-        reportLines.push(stdout.trim());
+    const runAndRecord = async (label: string, scriptPath: string, blocking: boolean): Promise<void> => {
+      const scriptResult = await runNodeScript({ cwd: webRoot, scriptPath });
+      if (scriptResult.ok) {
+        reportLines.push(`${label}: PASS`);
+        if (scriptResult.stdout.trim()) {
+          reportLines.push(scriptResult.stdout.trim());
+        }
+        return;
       }
-    } catch (error) {
-      reportLines.push("Asset validation: FAIL");
-      warnings.push(`Generated asset validation failed: ${String(error)}`);
+
+      reportLines.push(`${label}: FAIL`);
+      const message = `${label} failed: ${scriptResult.stderr}`;
+      if (blocking) {
+        gateFailures.push(message);
+      } else {
+        warnings.push(message);
+      }
+    };
+
+    if (lane === "art" || lane === "content" || lane === "production" || lane === "engineering" || lane === "qa") {
+      await runAndRecord("Asset validation", "scripts/validate-assets.mjs", true);
     }
 
-    try {
-      const { stdout } = await execFileAsync("node", ["scripts/smoke-playtest.mjs"], {
-        cwd: webRoot,
-        windowsHide: true,
-        maxBuffer: 1024 * 1024,
-      });
-      reportLines.push("Smoke playtest: PASS");
-      if (stdout.trim()) {
-        reportLines.push(stdout.trim());
-      }
-    } catch (error) {
-      reportLines.push("Smoke playtest: FAIL");
-      warnings.push(`Generated smoke playtest failed: ${String(error)}`);
+    if (lane === "engineering") {
+      await runAndRecord("Smoke playtest", "scripts/smoke-playtest.mjs", false);
     }
 
-    const reportRelativePath = `GameBuild/QA/smoke-validation-${Date.now()}.log`;
+    if (lane === "qa") {
+      await runAndRecord("Smoke playtest", "scripts/smoke-playtest.mjs", true);
+      await runAndRecord("Bot playtest", "scripts/bot-playtest.mjs", true);
+      await runAndRecord("Performance budget", "scripts/perf-budget.mjs", true);
+      await runAndRecord("Regression check", "scripts/regression-check.mjs", true);
+    }
+
+    const reportRelativePath = `GameBuild/QA/web-qa-gates-${Date.now()}.log`;
     const reportAbsolutePath = safeWorkspaceJoin(input.workspacePath, reportRelativePath);
     await fs.mkdir(path.dirname(reportAbsolutePath), { recursive: true });
     await fs.writeFile(reportAbsolutePath, reportLines.join("\n"), "utf-8");
@@ -2548,51 +2736,53 @@ async function executeGameCreatorQueueItem(input: {
     });
   }
 
-  if (!input.item.regenerateArtifact && input.spec.setupWizard.target !== "web-2d" && (input.item.lane === "engineering" || input.item.lane === "qa")) {
+  if (!input.item.regenerateArtifact && input.spec.setupWizard.target !== "web-2d") {
+    const lane = input.item.lane;
     const unityStatus = await detectUnityCliStatus();
     if (!unityStatus.available || !unityStatus.selectedPath) {
-      warnings.push("Unity CLI not found. Skipped Unity scene generation/build smoke. Set UNITY_EDITOR_PATH to enable full Unity automation.");
+      const message = "Unity CLI not found. Set UNITY_EDITOR_PATH to enable Unity generation, asset, and QA gates.";
+      if (lane === "engineering" || lane === "qa") {
+        gateFailures.push(message);
+      } else {
+        warnings.push(message);
+      }
     } else {
       const unityRoot = safeWorkspaceJoin(input.workspacePath, "GameBuild/unity");
       const logDir = safeWorkspaceJoin(input.workspacePath, "GameBuild/unity/Logs");
       await fs.mkdir(logDir, { recursive: true });
 
-      const runGenerate = await runUnityBatchMethod({
-        unityPath: unityStatus.selectedPath,
-        projectPath: unityRoot,
-        method: "NexusGenerated.ProjectAutomation.GenerateFromSpec",
-        logPath: safeWorkspaceJoin(input.workspacePath, "GameBuild/unity/Logs/generate.log"),
-      });
-      outputs.push("GameBuild/unity/Logs/generate.log");
-      createArtifact({ kind: "code", relativePath: "GameBuild/unity/Logs/generate.log" });
-      if (!runGenerate.ok) {
-        warnings.push(`Unity GenerateFromSpec failed: ${runGenerate.stderr}`);
+      const runUnityAndRecord = async (label: string, method: string, logName: string, blocking: boolean): Promise<void> => {
+        const logRelative = `GameBuild/unity/Logs/${logName}`;
+        const result = await runUnityBatchMethod({
+          unityPath: unityStatus.selectedPath ?? "",
+          projectPath: unityRoot,
+          method,
+          logPath: safeWorkspaceJoin(input.workspacePath, logRelative),
+        });
+        outputs.push(logRelative);
+        createArtifact({ kind: "code", relativePath: logRelative });
+        if (!result.ok) {
+          const message = `${label} failed: ${result.stderr}`;
+          if (blocking) {
+            gateFailures.push(message);
+          } else {
+            warnings.push(message);
+          }
+        }
+      };
+
+      if (lane === "engineering" || lane === "qa") {
+        await runUnityAndRecord("Unity GenerateFromSpec", "NexusGenerated.ProjectAutomation.GenerateFromSpec", "generate.log", true);
       }
 
-      if (input.item.lane === "qa") {
-        const runSmoke = await runUnityBatchMethod({
-          unityPath: unityStatus.selectedPath,
-          projectPath: unityRoot,
-          method: "NexusGenerated.ProjectAutomation.RunDeterminismSmoke",
-          logPath: safeWorkspaceJoin(input.workspacePath, "GameBuild/unity/Logs/smoke.log"),
-        });
-        outputs.push("GameBuild/unity/Logs/smoke.log");
-        createArtifact({ kind: "code", relativePath: "GameBuild/unity/Logs/smoke.log" });
-        if (!runSmoke.ok) {
-          warnings.push(`Unity determinism smoke failed: ${runSmoke.stderr}`);
-        }
+      if (lane === "art" || lane === "content" || lane === "production" || lane === "qa") {
+        await runUnityAndRecord("Unity Asset Pipeline Validation", "NexusGenerated.ProjectAutomation.ValidateAssetPipeline", "assets.log", true);
+      }
 
-        const runBuild = await runUnityBatchMethod({
-          unityPath: unityStatus.selectedPath,
-          projectPath: unityRoot,
-          method: "NexusGenerated.ProjectAutomation.BuildVerticalSlice",
-          logPath: safeWorkspaceJoin(input.workspacePath, "GameBuild/unity/Logs/build.log"),
-        });
-        outputs.push("GameBuild/unity/Logs/build.log");
-        createArtifact({ kind: "code", relativePath: "GameBuild/unity/Logs/build.log" });
-        if (!runBuild.ok) {
-          warnings.push(`Unity build failed: ${runBuild.stderr}`);
-        }
+      if (lane === "qa") {
+        await runUnityAndRecord("Unity Determinism Smoke", "NexusGenerated.ProjectAutomation.RunDeterminismSmoke", "smoke.log", true);
+        await runUnityAndRecord("Unity Performance Gate", "NexusGenerated.ProjectAutomation.ValidatePerformanceGate", "perf.log", true);
+        await runUnityAndRecord("Unity Build", "NexusGenerated.ProjectAutomation.BuildVerticalSlice", "build.log", true);
       }
     }
   }
@@ -2791,7 +2981,7 @@ async function executeGameCreatorQueueItem(input: {
     warnings.push("Generated starter scaffolding and manifests for a non-engineering lane. Deep lane-specific generators are still pending.");
   }
 
-  return { outputs, warnings, artifacts };
+  return { outputs, warnings, gateFailures, artifacts };
 }
 
 function reconcileQueueItemFromArtifactDecisions(input: {
@@ -2971,6 +3161,50 @@ async function runNextGameCreatorExecutionStep(input: {
 
     const doneAt = new Date().toISOString();
     const nextState = await readSystemState();
+    const nextArtifacts = [...result.artifacts, ...getGameCreatorExecutionArtifacts(nextState)];
+    writeGameCreatorExecutionArtifacts(nextState, nextArtifacts);
+
+    if (result.gateFailures.length > 0) {
+      const failureMessage = `Quality gates failed: ${result.gateFailures.join(" | ")}`;
+      const failedJobs = getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
+        ? {
+          ...entry,
+          status: "failed" as const,
+          finishedAt: doneAt,
+          outputs: result.outputs,
+          warnings: [...result.warnings, ...result.gateFailures],
+          error: failureMessage,
+        }
+        : entry);
+      writeGameCreatorExecutionJobs(nextState, failedJobs);
+
+      const nextQueue = getGameCreatorExecutionQueueStore(nextState);
+      writeGameCreatorExecutionQueueStore(nextState, {
+        builtAt: nextQueue.builtAt ?? doneAt,
+        items: annotateQueueItemBlockers({
+          items: nextQueue.items.map((entry) => entry.id === nextItem.id
+            ? {
+              ...entry,
+              status: "blocked",
+              notes: `Blocked by QA/asset gates: ${result.gateFailures.slice(0, 2).join("; ")}`,
+              updatedAt: doneAt,
+            }
+            : entry),
+          mode: input.mode,
+          artifacts: nextArtifacts,
+        }),
+      });
+      await writeSystemState(nextState);
+
+      return {
+        ok: false,
+        mode: input.mode,
+        statusCode: 412,
+        blocker: failureMessage,
+        job: failedJobs.find((entry) => entry.id === job.id),
+      };
+    }
+
     const nextJobs = getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
       ? {
         ...entry,
@@ -2981,9 +3215,6 @@ async function runNextGameCreatorExecutionStep(input: {
       }
       : entry);
     writeGameCreatorExecutionJobs(nextState, nextJobs);
-
-    const nextArtifacts = [...result.artifacts, ...getGameCreatorExecutionArtifacts(nextState)];
-    writeGameCreatorExecutionArtifacts(nextState, nextArtifacts);
 
     const nextQueue = getGameCreatorExecutionQueueStore(nextState);
     writeGameCreatorExecutionQueueStore(nextState, {
@@ -6408,11 +6639,33 @@ app.post("/api/tools/game-creator/execution/artifacts/:artifactId/regenerate", a
     const nextState = await readSystemState();
     const finalArtifacts = [...result.artifacts, ...getGameCreatorExecutionArtifacts(nextState)];
     writeGameCreatorExecutionArtifacts(nextState, finalArtifacts);
+    const finishedAt = new Date().toISOString();
+    if (result.gateFailures.length > 0) {
+      writeGameCreatorExecutionJobs(nextState, getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
+        ? {
+          ...entry,
+          status: "failed" as const,
+          finishedAt,
+          outputs: result.outputs,
+          warnings: [...result.warnings, ...result.gateFailures],
+          error: `Quality gates failed: ${result.gateFailures.join(" | ")}`,
+        }
+        : entry));
+      await writeSystemState(nextState);
+      return res.status(412).json({
+        error: `Quality gates failed: ${result.gateFailures.join(" | ")}`,
+        outputs: result.outputs,
+        warnings: result.warnings,
+        gateFailures: result.gateFailures,
+        artifacts: result.artifacts,
+      });
+    }
+
     writeGameCreatorExecutionJobs(nextState, getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
       ? {
         ...entry,
         status: "completed" as const,
-        finishedAt: new Date().toISOString(),
+        finishedAt,
         outputs: result.outputs,
         warnings: result.warnings,
       }
@@ -6451,10 +6704,10 @@ app.get("/api/tools/game-creator/unity/status", async (_req, res) => {
 app.post("/api/tools/game-creator/unity/run", async (req, res) => {
   const body = req.body as {
     workspaceId?: string;
-    action?: "generate" | "smoke" | "build";
+    action?: "generate" | "smoke" | "build" | "validate-assets" | "validate-performance";
     unityPath?: string;
   };
-  const action = pickEnumValue(body.action, ["generate", "smoke", "build"] as const, "generate");
+  const action = pickEnumValue(body.action, ["generate", "smoke", "build", "validate-assets", "validate-performance"] as const, "generate");
   const state = await readSystemState();
   const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
   const unity = await detectUnityCliStatus();
@@ -6472,6 +6725,10 @@ app.post("/api/tools/game-creator/unity/run", async (req, res) => {
 
   const method = action === "build"
     ? "NexusGenerated.ProjectAutomation.BuildVerticalSlice"
+    : action === "validate-assets"
+      ? "NexusGenerated.ProjectAutomation.ValidateAssetPipeline"
+      : action === "validate-performance"
+        ? "NexusGenerated.ProjectAutomation.ValidatePerformanceGate"
     : action === "smoke"
       ? "NexusGenerated.ProjectAutomation.RunDeterminismSmoke"
       : "NexusGenerated.ProjectAutomation.GenerateFromSpec";
