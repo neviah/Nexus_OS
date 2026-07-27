@@ -882,11 +882,39 @@ type GameCreatorExecutionJob = {
   error?: string;
 };
 
+type GameCreatorExecutionArtifact = {
+  id: string;
+  jobId: string;
+  queueItemId: string;
+  queueItemTitle: string;
+  lane: GameCreatorQueueItem["lane"];
+  kind: "code" | "ui-image" | "concept-art" | "sprite-sheet" | "music" | "sfx" | "model";
+  status: "pending" | "approved" | "rejected" | "auto-approved";
+  relativePath: string;
+  previewUrl?: string;
+  createdAt: string;
+  decidedAt?: string;
+  decidedBy?: string;
+  note?: string;
+};
+
+type GameCreatorExecutionRunState = {
+  id: string;
+  status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
+  mode: GameCreatorExecutionMode;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  message?: string;
+};
+
 type GameCreatorExecutionStatusResponse = {
   ok: boolean;
   workspaceId: string;
   mode: GameCreatorExecutionMode;
   jobs: GameCreatorExecutionJob[];
+  artifacts: GameCreatorExecutionArtifact[];
+  run: GameCreatorExecutionRunState;
   queueSummary: GameCreatorQueueSummary;
 };
 
@@ -1468,7 +1496,10 @@ function App() {
   const [gameCreatorQueueStatusFilter, setGameCreatorQueueStatusFilter] = useState<"all" | GameCreatorQueueItem["status"]>("ready");
   const [gameCreatorExecutionMode, setGameCreatorExecutionMode] = useState<GameCreatorExecutionMode>("strict-approval");
   const [gameCreatorExecutionJobs, setGameCreatorExecutionJobs] = useState<GameCreatorExecutionJob[]>([]);
-  const [gameCreatorExecutionBusyAction, setGameCreatorExecutionBusyAction] = useState<"mode" | "run-next" | "refresh" | null>(null);
+  const [gameCreatorExecutionArtifacts, setGameCreatorExecutionArtifacts] = useState<GameCreatorExecutionArtifact[]>([]);
+  const [gameCreatorExecutionRun, setGameCreatorExecutionRun] = useState<GameCreatorExecutionRunState | null>(null);
+  const [gameCreatorArtifactFilter, setGameCreatorArtifactFilter] = useState<"all" | GameCreatorExecutionArtifact["status"]>("pending");
+  const [gameCreatorExecutionBusyAction, setGameCreatorExecutionBusyAction] = useState<"mode" | "run-next" | "run-all" | "pause" | "resume" | "stop" | "artifact" | "refresh" | null>(null);
   const [gameCreatorActiveQueueItemId, setGameCreatorActiveQueueItemId] = useState<string | null>(null);
   const [gameCreatorQueueBusyAction, setGameCreatorQueueBusyAction] = useState<"build" | "refresh" | string | null>(null);
   const [gameCreatorSpritePrompt, setGameCreatorSpritePrompt] = useState("pixel-art hero run cycle, transparent background");
@@ -1601,6 +1632,13 @@ function App() {
       .filter((group) => group.items.length > 0);
   }, [gameCreatorVisibleQueueItems]);
 
+  const gameCreatorVisibleExecutionArtifacts = useMemo(() => {
+    if (gameCreatorArtifactFilter === "all") {
+      return gameCreatorExecutionArtifacts;
+    }
+    return gameCreatorExecutionArtifacts.filter((artifact) => artifact.status === gameCreatorArtifactFilter);
+  }, [gameCreatorArtifactFilter, gameCreatorExecutionArtifacts]);
+
   useEffect(() => {
     if (!gameCreatorActiveDoc && gameCreatorActiveDocFileName !== null) {
       setGameCreatorActiveDocFileName(null);
@@ -1620,6 +1658,21 @@ function App() {
       setGameCreatorActiveQueueItemId(gameCreatorActiveQueueItem.id);
     }
   }, [gameCreatorActiveQueueItem, gameCreatorActiveQueueItemId]);
+
+  useEffect(() => {
+    if (selectedPane.type !== "tool" || selectedPane.id !== "game-creator") {
+      return;
+    }
+    if (gameCreatorExecutionRun?.status !== "running") {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadGameCreatorExecutionStatus();
+      void loadGameCreatorQueue();
+    }, 6000);
+    return () => window.clearInterval(timer);
+  }, [gameCreatorExecutionRun?.status, selectedPane.id, selectedPane.type]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -3020,6 +3073,8 @@ function App() {
       const payload = (await response.json()) as GameCreatorExecutionStatusResponse;
       setGameCreatorExecutionMode(payload.mode);
       setGameCreatorExecutionJobs(payload.jobs ?? []);
+      setGameCreatorExecutionArtifacts(payload.artifacts ?? []);
+      setGameCreatorExecutionRun(payload.run ?? null);
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -3077,6 +3132,123 @@ function App() {
       await loadGameCreatorQueue();
       await loadGameCreatorExecutionStatus();
       await refreshActiveWorkspaceTree(boot?.activeWorkspaceId);
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorExecutionBusyAction(null);
+    }
+  }
+
+  async function runAllGameCreatorExecutionTasks() {
+    setGameCreatorExecutionBusyAction("run-all");
+    try {
+      const response = await fetch("/api/tools/game-creator/execution/run-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, mode: gameCreatorExecutionMode }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to start run-all execution.");
+      }
+      pushToast("Run-all started.", "ok");
+      await loadGameCreatorExecutionStatus();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorExecutionBusyAction(null);
+    }
+  }
+
+  async function pauseGameCreatorExecutionRun() {
+    setGameCreatorExecutionBusyAction("pause");
+    try {
+      const response = await fetch("/api/tools/game-creator/execution/pause", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to pause run-all.");
+      }
+      pushToast("Run-all paused.", "ok");
+      await loadGameCreatorExecutionStatus();
+      await loadGameCreatorQueue();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorExecutionBusyAction(null);
+    }
+  }
+
+  async function resumeGameCreatorExecutionRun() {
+    setGameCreatorExecutionBusyAction("resume");
+    try {
+      const response = await fetch("/api/tools/game-creator/execution/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId, mode: gameCreatorExecutionMode }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to resume run-all.");
+      }
+      pushToast("Run-all resumed.", "ok");
+      await loadGameCreatorExecutionStatus();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorExecutionBusyAction(null);
+    }
+  }
+
+  async function stopGameCreatorExecutionRun() {
+    setGameCreatorExecutionBusyAction("stop");
+    try {
+      const response = await fetch("/api/tools/game-creator/execution/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to stop run-all.");
+      }
+      pushToast("Run-all stopped.", "warn");
+      await loadGameCreatorExecutionStatus();
+      await loadGameCreatorQueue();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorExecutionBusyAction(null);
+    }
+  }
+
+  async function decideGameCreatorArtifact(artifactId: string, decision: "approved" | "rejected" | "pending") {
+    setGameCreatorExecutionBusyAction("artifact");
+    try {
+      const response = await fetch(`/api/tools/game-creator/execution/artifacts/${encodeURIComponent(artifactId)}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          decision,
+          decidedBy: "user",
+        }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to update artifact decision.");
+      }
+      pushToast(`Artifact marked ${decision}.`, decision === "rejected" ? "warn" : "ok");
+      await loadGameCreatorExecutionStatus();
+      await loadGameCreatorQueue();
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -7706,7 +7878,7 @@ function App() {
                     <select
                       value={gameCreatorExecutionMode}
                       onChange={(event) => void saveGameCreatorExecutionMode(event.target.value as GameCreatorExecutionMode)}
-                      disabled={gameCreatorExecutionBusyAction !== null}
+                      disabled={gameCreatorExecutionBusyAction !== null || gameCreatorExecutionRun?.status === "running"}
                     >
                       <option value="strict-approval">Strict approval mode</option>
                       <option value="auto-produce">Auto-produce mode (skip approval gate)</option>
@@ -7715,12 +7887,31 @@ function App() {
                   <button type="button" onClick={() => void runNextGameCreatorExecutionTask()} disabled={gameCreatorExecutionBusyAction !== null || gameCreatorQueueSummary?.ready === 0}>
                     {gameCreatorExecutionBusyAction === "run-next" ? "Running Task..." : "Run Next Queue Task"}
                   </button>
+                  <button type="button" className="ghost" onClick={() => void runAllGameCreatorExecutionTasks()} disabled={gameCreatorExecutionBusyAction !== null || gameCreatorExecutionRun?.status === "running"}>
+                    {gameCreatorExecutionBusyAction === "run-all" ? "Starting Run-All..." : "Run All Ready Tasks"}
+                  </button>
+                  <button type="button" className="ghost" onClick={() => void pauseGameCreatorExecutionRun()} disabled={gameCreatorExecutionBusyAction !== null || gameCreatorExecutionRun?.status !== "running"}>
+                    {gameCreatorExecutionBusyAction === "pause" ? "Pausing..." : "Pause"}
+                  </button>
+                  <button type="button" className="ghost" onClick={() => void resumeGameCreatorExecutionRun()} disabled={gameCreatorExecutionBusyAction !== null || gameCreatorExecutionRun?.status !== "paused"}>
+                    {gameCreatorExecutionBusyAction === "resume" ? "Resuming..." : "Resume"}
+                  </button>
+                  <button type="button" className="ghost" onClick={() => void stopGameCreatorExecutionRun()} disabled={gameCreatorExecutionBusyAction !== null || (gameCreatorExecutionRun?.status !== "running" && gameCreatorExecutionRun?.status !== "paused")}>
+                    {gameCreatorExecutionBusyAction === "stop" ? "Stopping..." : "Stop"}
+                  </button>
                 </div>
                 <small>
                   {gameCreatorExecutionMode === "strict-approval"
                     ? "Strict mode requires approved/locked docs before queue build and execution."
                     : "Auto-produce mode bypasses approval/lock requirement and runs from quality-passing docs."}
                 </small>
+                {gameCreatorExecutionRun ? (
+                  <small>
+                    Run: {gameCreatorExecutionRun.status} · Started {new Date(gameCreatorExecutionRun.startedAt).toLocaleString()}
+                    {gameCreatorExecutionRun.finishedAt ? ` · Finished ${new Date(gameCreatorExecutionRun.finishedAt).toLocaleString()}` : ""}
+                    {gameCreatorExecutionRun.message ? ` · ${gameCreatorExecutionRun.message}` : ""}
+                  </small>
+                ) : null}
                 <small>Quick keys for selected queue item: 1 ready, 2 in progress, 3 blocked, 4 done.</small>
                 <div className="tool-action-row">
                   <button type="button" className="ghost" onClick={() => void bulkUpdateVisibleQueueStatus("ready")} disabled={gameCreatorQueueBusyAction !== null}>
@@ -7810,6 +8001,45 @@ function App() {
                             <small key={`${job.id}-${warning}`} className="runtime-warning">Warning: {warning}</small>
                           ))}
                           {job.error ? <small className="runtime-warning">Error: {job.error}</small> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </details>
+
+                <details className="tool-details">
+                  <summary>Artifact Review ({gameCreatorExecutionArtifacts.length})</summary>
+                  <div className="tool-action-row">
+                    <label>
+                      <span>Artifact filter</span>
+                      <select value={gameCreatorArtifactFilter} onChange={(event) => setGameCreatorArtifactFilter(event.target.value as "all" | GameCreatorExecutionArtifact["status"])}>
+                        <option value="pending">Pending</option>
+                        <option value="rejected">Rejected</option>
+                        <option value="approved">Approved</option>
+                        <option value="auto-approved">Auto-approved</option>
+                        <option value="all">All</option>
+                      </select>
+                    </label>
+                  </div>
+                  {gameCreatorVisibleExecutionArtifacts.length === 0 ? (
+                    <small>No artifacts in this filter.</small>
+                  ) : (
+                    <ul className="tool-list">
+                      {gameCreatorVisibleExecutionArtifacts.map((artifact) => (
+                        <li key={artifact.id}>
+                          <strong>{artifact.queueItemTitle}</strong>
+                          <small>Kind: {artifact.kind} · Lane: {artifact.lane} · Status: {artifact.status}</small>
+                          <small>File: {artifact.relativePath}</small>
+                          {artifact.previewUrl ? (
+                            <small>
+                              <a href={artifact.previewUrl} target="_blank" rel="noreferrer">Preview artifact</a>
+                            </small>
+                          ) : null}
+                          <div className="tool-action-row">
+                            <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "approved")} disabled={gameCreatorExecutionBusyAction !== null}>Approve</button>
+                            <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "rejected")} disabled={gameCreatorExecutionBusyAction !== null}>Reject</button>
+                            <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "pending")} disabled={gameCreatorExecutionBusyAction !== null}>Reset</button>
+                          </div>
                         </li>
                       ))}
                     </ul>

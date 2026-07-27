@@ -118,6 +118,30 @@ export type GameCreatorState = {
     warnings?: string[];
     error?: string;
   }>;
+  executionArtifacts?: Array<{
+    id: string;
+    jobId: string;
+    queueItemId: string;
+    queueItemTitle: string;
+    lane: "design" | "engineering" | "gameplay" | "content" | "art" | "audio" | "production" | "qa";
+    kind: "code" | "ui-image" | "concept-art" | "sprite-sheet" | "music" | "sfx" | "model";
+    status: "pending" | "approved" | "rejected" | "auto-approved";
+    relativePath: string;
+    previewUrl?: string;
+    createdAt: string;
+    decidedAt?: string;
+    decidedBy?: string;
+    note?: string;
+  }>;
+  executionRun?: {
+    id: string;
+    status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
+    mode: "strict-approval" | "auto-produce";
+    startedAt: string;
+    updatedAt: string;
+    finishedAt?: string;
+    message?: string;
+  };
 };
 
 export type WorkspaceRecord = {

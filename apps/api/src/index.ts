@@ -484,6 +484,43 @@ type GameCreatorExecutionJob = {
   error?: string;
 };
 
+type GameCreatorArtifactKind = "code" | "ui-image" | "concept-art" | "sprite-sheet" | "music" | "sfx" | "model";
+
+type GameCreatorExecutionArtifact = {
+  id: string;
+  jobId: string;
+  queueItemId: string;
+  queueItemTitle: string;
+  lane: GameCreatorQueueLane;
+  kind: GameCreatorArtifactKind;
+  status: "pending" | "approved" | "rejected" | "auto-approved";
+  relativePath: string;
+  previewUrl?: string;
+  createdAt: string;
+  decidedAt?: string;
+  decidedBy?: string;
+  note?: string;
+};
+
+type GameCreatorExecutionRunState = {
+  id: string;
+  status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
+  mode: GameCreatorExecutionMode;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  message?: string;
+};
+
+type GameCreatorExecutionRunnerControl = {
+  workspaceId: string;
+  runId: string;
+  mode: GameCreatorExecutionMode;
+  running: boolean;
+  paused: boolean;
+  canceled: boolean;
+};
+
 type CanonDocQualityReport = {
   passed: boolean;
   minWords: number;
@@ -520,6 +557,7 @@ type ConsistencyIssue = {
 const GAME_CREATOR_CANON_DOC_ROOT = "docs/game-creator";
 const GAME_CREATOR_CANON_DOC_VERSION_ROOT = "docs/game-creator/.versions";
 const gameCreatorGenerationProgressByWorkspace = new Map<string, GameCreatorGenerationProgress>();
+const gameCreatorExecutionRunnerByWorkspace = new Map<string, GameCreatorExecutionRunnerControl>();
 
 const CANON_DOC_PROMPT_PROFILES: Record<string, CanonDocPromptProfile> = {
   "GAME_BIBLE.md": {
@@ -1050,6 +1088,67 @@ function writeGameCreatorExecutionJobs(state: SystemState, jobs: GameCreatorExec
   };
 }
 
+function getGameCreatorExecutionArtifacts(state: SystemState): GameCreatorExecutionArtifact[] {
+  return state.gameCreator?.executionArtifacts ?? [];
+}
+
+function writeGameCreatorExecutionArtifacts(state: SystemState, artifacts: GameCreatorExecutionArtifact[]): void {
+  state.gameCreator = {
+    ...(state.gameCreator ?? {}),
+    executionArtifacts: artifacts.slice(0, 400),
+  };
+}
+
+function getGameCreatorExecutionRunState(state: SystemState): GameCreatorExecutionRunState {
+  const existing = state.gameCreator?.executionRun;
+  if (!existing) {
+    const now = new Date().toISOString();
+    return {
+      id: crypto.randomUUID(),
+      status: "idle",
+      mode: getGameCreatorExecutionMode(state),
+      startedAt: now,
+      updatedAt: now,
+      message: "No execution run started.",
+    };
+  }
+  return {
+    ...existing,
+    mode: existing.mode === "auto-produce" ? "auto-produce" : "strict-approval",
+  };
+}
+
+function writeGameCreatorExecutionRunState(state: SystemState, run: GameCreatorExecutionRunState): void {
+  state.gameCreator = {
+    ...(state.gameCreator ?? {}),
+    executionRun: run,
+  };
+}
+
+function areDependenciesSatisfied(item: GameCreatorQueueItem, queueItems: GameCreatorQueueItem[]): boolean {
+  const laneDependencies: Partial<Record<GameCreatorQueueLane, GameCreatorQueueLane[]>> = {
+    engineering: ["design", "content", "gameplay"],
+    art: ["design"],
+    audio: ["design", "content"],
+    qa: ["engineering", "gameplay", "art", "audio"],
+    production: ["design", "engineering", "content"],
+    gameplay: ["design"],
+    content: ["design"],
+  };
+  const required = laneDependencies[item.lane] ?? [];
+  for (const dependencyLane of required) {
+    const laneItems = queueItems.filter((entry) => entry.lane === dependencyLane);
+    if (!laneItems.length) {
+      continue;
+    }
+    const allDone = laneItems.every((entry) => entry.status === "done");
+    if (!allDone) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function writeGameCreatorExecutionQueueStore(state: SystemState, input: {
   builtAt: string;
   items: GameCreatorQueueItem[];
@@ -1289,9 +1388,12 @@ function buildGameCreatorScaffoldFiles(input: {
 
 async function executeGameCreatorQueueItem(input: {
   workspacePath: string;
+  workspaceId: string;
   spec: GameCreatorSpecPackage;
   item: GameCreatorQueueItem;
-}): Promise<{ outputs: string[]; warnings: string[] }> {
+  jobId: string;
+  mode: GameCreatorExecutionMode;
+}): Promise<{ outputs: string[]; warnings: string[]; artifacts: GameCreatorExecutionArtifact[] }> {
   const files = buildGameCreatorScaffoldFiles({ spec: input.spec, item: input.item });
   const outputs: string[] = [];
   for (const file of files) {
@@ -1302,11 +1404,352 @@ async function executeGameCreatorQueueItem(input: {
   }
 
   const warnings: string[] = [];
+  const artifacts: GameCreatorExecutionArtifact[] = files.map((file) => ({
+    id: crypto.randomUUID(),
+    jobId: input.jobId,
+    queueItemId: input.item.id,
+    queueItemTitle: input.item.title,
+    lane: input.item.lane,
+    kind: "code",
+    status: input.mode === "auto-produce" ? "auto-approved" : "pending",
+    relativePath: file.relativePath,
+    createdAt: new Date().toISOString(),
+  }));
+
+  const createArtifact = (entry: {
+    kind: GameCreatorArtifactKind;
+    relativePath: string;
+    previewUrl?: string;
+  }) => {
+    artifacts.push({
+      id: crypto.randomUUID(),
+      jobId: input.jobId,
+      queueItemId: input.item.id,
+      queueItemTitle: input.item.title,
+      lane: input.item.lane,
+      kind: entry.kind,
+      status: input.mode === "auto-produce" ? "auto-approved" : "pending",
+      relativePath: entry.relativePath,
+      previewUrl: entry.previewUrl,
+      createdAt: new Date().toISOString(),
+    });
+  };
+
+  if (input.item.lane === "design") {
+    try {
+      const generated = await generateLocalImageStreaming(
+        {
+          model: "dreamshaper-8",
+          prompt: `${input.spec.setupWizard.genre} game HUD wireframe, menu layout, UX mockup board, clean labels, high readability`,
+          negativePrompt: "watermark, signature, blurry, low quality",
+          width: 768,
+          height: 512,
+          steps: 20,
+          guidanceScale: 7,
+          seed: Math.floor(Date.now() % 2147483647),
+        },
+        () => undefined,
+      );
+      const bytes = await fs.readFile(generated.outputPath);
+      const saved = await saveBufferToWorkspaceAssets({
+        workspaceId: input.workspaceId,
+        category: "images",
+        baseName: "ui-mockup",
+        extension: "png",
+        bytes,
+      });
+      outputs.push(saved.relativePath);
+      createArtifact({
+        kind: "ui-image",
+        relativePath: saved.relativePath,
+        previewUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+      });
+    } catch (error) {
+      warnings.push(`Design artifact generation failed: ${String(error)}`);
+    }
+  }
+
+  if (input.item.lane === "art") {
+    try {
+      const generated = await generateLocalImageStreaming(
+        {
+          model: "dreamshaper-8",
+          prompt: `${input.spec.setupWizard.artStyle} concept sheet for ${input.spec.setupWizard.genre} protagonist and enemy silhouettes`,
+          negativePrompt: "watermark, signature, blurry, low quality",
+          width: 768,
+          height: 768,
+          steps: 22,
+          guidanceScale: 7.5,
+          seed: Math.floor(Date.now() % 2147483647),
+        },
+        () => undefined,
+      );
+      const bytes = await fs.readFile(generated.outputPath);
+      const saved = await saveBufferToWorkspaceAssets({
+        workspaceId: input.workspaceId,
+        category: "images",
+        baseName: "concept-art",
+        extension: "png",
+        bytes,
+      });
+      outputs.push(saved.relativePath);
+      createArtifact({
+        kind: "concept-art",
+        relativePath: saved.relativePath,
+        previewUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+      });
+    } catch (error) {
+      warnings.push(`Art concept generation failed: ${String(error)}`);
+    }
+  }
+
+  if (input.item.lane === "audio") {
+    try {
+      const music = await generateStableAudioAudio({
+        mode: "small-music",
+        prompt: `${input.spec.setupWizard.genre} loop music, ${input.spec.setupWizard.artStyle} tone, gameplay supportive, 30 seconds`,
+        duration: 30,
+      });
+      const musicBytes = await fs.readFile(music.outputPath);
+      const savedMusic = await saveBufferToWorkspaceAssets({
+        workspaceId: input.workspaceId,
+        category: "music",
+        baseName: "bgm-loop",
+        extension: "wav",
+        bytes: musicBytes,
+      });
+      outputs.push(savedMusic.relativePath);
+      createArtifact({
+        kind: "music",
+        relativePath: savedMusic.relativePath,
+        previewUrl: `/api/tools/music/file?workspaceId=${encodeURIComponent(savedMusic.workspaceId)}&relativePath=${encodeURIComponent(savedMusic.relativePath)}`,
+      });
+    } catch (error) {
+      warnings.push(`Music generation failed: ${String(error)}`);
+    }
+
+    try {
+      const sfx = await generateStableAudioAudio({
+        mode: "small-sfx",
+        prompt: "game UI confirm, jump, and impact one-shot SFX pack",
+        duration: 8,
+      });
+      const sfxBytes = await fs.readFile(sfx.outputPath);
+      const savedSfx = await saveBufferToWorkspaceAssets({
+        workspaceId: input.workspaceId,
+        category: "music",
+        baseName: "sfx-pack",
+        extension: "wav",
+        bytes: sfxBytes,
+      });
+      outputs.push(savedSfx.relativePath);
+      createArtifact({
+        kind: "sfx",
+        relativePath: savedSfx.relativePath,
+        previewUrl: `/api/tools/music/file?workspaceId=${encodeURIComponent(savedSfx.workspaceId)}&relativePath=${encodeURIComponent(savedSfx.relativePath)}`,
+      });
+    } catch (error) {
+      warnings.push(`SFX generation failed: ${String(error)}`);
+    }
+  }
+
   if (input.item.lane !== "engineering") {
     warnings.push("Generated starter scaffolding and manifests for a non-engineering lane. Deep lane-specific generators are still pending.");
   }
 
-  return { outputs, warnings };
+  return { outputs, warnings, artifacts };
+}
+
+function reconcileQueueItemFromArtifactDecisions(input: {
+  queueItems: GameCreatorQueueItem[];
+  artifacts: GameCreatorExecutionArtifact[];
+  queueItemId: string;
+  mode: GameCreatorExecutionMode;
+}): GameCreatorQueueItem[] {
+  const now = new Date().toISOString();
+  if (input.mode === "auto-produce") {
+    return input.queueItems.map((entry) => entry.id === input.queueItemId ? { ...entry, status: "done", updatedAt: now } : entry);
+  }
+
+  const related = input.artifacts.filter((artifact) => artifact.queueItemId === input.queueItemId);
+  const hasRejected = related.some((artifact) => artifact.status === "rejected");
+  const hasPending = related.some((artifact) => artifact.status === "pending");
+  const allApproved = related.length > 0 && related.every((artifact) => artifact.status === "approved" || artifact.status === "auto-approved");
+
+  return input.queueItems.map((entry) => {
+    if (entry.id !== input.queueItemId) {
+      return entry;
+    }
+    if (hasRejected) {
+      return { ...entry, status: "blocked", notes: "Artifact rejected. Regenerate or replace artifacts.", updatedAt: now };
+    }
+    if (hasPending) {
+      return { ...entry, status: "blocked", notes: "Awaiting artifact approvals.", updatedAt: now };
+    }
+    if (allApproved) {
+      return { ...entry, status: "done", updatedAt: now };
+    }
+    return { ...entry, status: "in-progress", updatedAt: now };
+  });
+}
+
+function pickNextExecutableQueueItem(input: {
+  items: GameCreatorQueueItem[];
+  mode: GameCreatorExecutionMode;
+  artifacts: GameCreatorExecutionArtifact[];
+}): { item: GameCreatorQueueItem | null; blocker?: string } {
+  if (input.mode === "strict-approval" && input.artifacts.some((artifact) => artifact.status === "pending")) {
+    return {
+      item: null,
+      blocker: "Strict mode is waiting on artifact approvals from previous tasks.",
+    };
+  }
+
+  const ready = input.items.filter((entry) => entry.status === "ready");
+  for (const candidate of ready) {
+    if (areDependenciesSatisfied(candidate, input.items)) {
+      return { item: candidate };
+    }
+  }
+
+  if (ready.length > 0) {
+    return {
+      item: null,
+      blocker: "No ready items passed dependency checks. Complete prerequisite lane tasks first.",
+    };
+  }
+
+  return {
+    item: null,
+    blocker: "No ready queue item found. Build queue and/or mark items as ready first.",
+  };
+}
+
+async function runNextGameCreatorExecutionStep(input: {
+  workspaceId?: string;
+  mode: GameCreatorExecutionMode;
+}): Promise<{
+  ok: boolean;
+  mode: GameCreatorExecutionMode;
+  job?: GameCreatorExecutionJob;
+  outputs?: string[];
+  warnings?: string[];
+  blocker?: string;
+  statusCode?: number;
+}> {
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, input.workspaceId ?? state.activeWorkspaceId);
+  writeGameCreatorExecutionMode(state, input.mode);
+
+  const queue = getGameCreatorExecutionQueueStore(state);
+  const artifacts = getGameCreatorExecutionArtifacts(state);
+  const pick = pickNextExecutableQueueItem({ items: queue.items, mode: input.mode, artifacts });
+  if (!pick.item) {
+    await writeSystemState(state);
+    return {
+      ok: false,
+      mode: input.mode,
+      blocker: pick.blocker,
+      statusCode: 409,
+    };
+  }
+
+  const nextItem = pick.item;
+  const now = new Date().toISOString();
+  const job: GameCreatorExecutionJob = {
+    id: crypto.randomUUID(),
+    queueItemId: nextItem.id,
+    queueItemTitle: nextItem.title,
+    lane: nextItem.lane,
+    sourceDocFile: nextItem.sourceDocFile,
+    mode: input.mode,
+    status: "running",
+    startedAt: now,
+  };
+
+  const jobs = [job, ...getGameCreatorExecutionJobs(state)];
+  writeGameCreatorExecutionJobs(state, jobs);
+  writeGameCreatorExecutionQueueStore(state, {
+    builtAt: queue.builtAt ?? now,
+    items: queue.items.map((entry) => entry.id === nextItem.id ? { ...entry, status: "in-progress", updatedAt: now } : entry),
+  });
+  await writeSystemState(state);
+
+  try {
+    const draft = readGameCreatorDraft(state);
+    const spec = buildGameCreatorSpecPackage(draft);
+    const result = await executeGameCreatorQueueItem({
+      workspacePath: workspace.path,
+      workspaceId: workspace.id,
+      spec,
+      item: nextItem,
+      jobId: job.id,
+      mode: input.mode,
+    });
+
+    const doneAt = new Date().toISOString();
+    const nextState = await readSystemState();
+    const nextJobs = getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
+      ? {
+        ...entry,
+        status: "completed" as const,
+        finishedAt: doneAt,
+        outputs: result.outputs,
+        warnings: result.warnings,
+      }
+      : entry);
+    writeGameCreatorExecutionJobs(nextState, nextJobs);
+
+    const nextArtifacts = [...result.artifacts, ...getGameCreatorExecutionArtifacts(nextState)];
+    writeGameCreatorExecutionArtifacts(nextState, nextArtifacts);
+
+    const nextQueue = getGameCreatorExecutionQueueStore(nextState);
+    writeGameCreatorExecutionQueueStore(nextState, {
+      builtAt: nextQueue.builtAt ?? doneAt,
+      items: reconcileQueueItemFromArtifactDecisions({
+        queueItems: nextQueue.items,
+        artifacts: nextArtifacts,
+        queueItemId: nextItem.id,
+        mode: input.mode,
+      }),
+    });
+    await writeSystemState(nextState);
+
+    return {
+      ok: true,
+      mode: input.mode,
+      job: nextJobs.find((entry) => entry.id === job.id),
+      outputs: result.outputs,
+      warnings: result.warnings,
+    };
+  } catch (error) {
+    const failedAt = new Date().toISOString();
+    const nextState = await readSystemState();
+    const nextJobs = getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
+      ? {
+        ...entry,
+        status: "failed" as const,
+        finishedAt: failedAt,
+        error: String(error),
+      }
+      : entry);
+    writeGameCreatorExecutionJobs(nextState, nextJobs);
+
+    const nextQueue = getGameCreatorExecutionQueueStore(nextState);
+    writeGameCreatorExecutionQueueStore(nextState, {
+      builtAt: nextQueue.builtAt ?? failedAt,
+      items: nextQueue.items.map((entry) => entry.id === nextItem.id ? { ...entry, status: "blocked", updatedAt: failedAt } : entry),
+    });
+    await writeSystemState(nextState);
+
+    return {
+      ok: false,
+      mode: input.mode,
+      statusCode: 500,
+      blocker: String(error),
+      job: nextJobs.find((entry) => entry.id === job.id),
+    };
+  }
 }
 
 function createDefaultCanonDocRecord(file: CanonDocFile): GameCreatorCanonDocRecord {
@@ -4165,6 +4608,7 @@ app.get("/api/tools/game-creator/queue", async (req, res) => {
   return res.json({
     ok: true,
     workspaceId: workspace.id,
+    mode: getGameCreatorExecutionMode(state),
     builtAt: queue.builtAt ?? null,
     items: queue.items,
     summary,
@@ -4232,12 +4676,16 @@ app.get("/api/tools/game-creator/execution", async (req, res) => {
   const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
   const mode = getGameCreatorExecutionMode(state);
   const jobs = getGameCreatorExecutionJobs(state);
+  const artifacts = getGameCreatorExecutionArtifacts(state);
+  const run = getGameCreatorExecutionRunState(state);
   const queue = getGameCreatorExecutionQueueStore(state);
   return res.json({
     ok: true,
     workspaceId: workspace.id,
     mode,
     jobs,
+    artifacts,
+    run,
     queueSummary: {
       total: queue.items.length,
       ready: queue.items.filter((entry) => entry.status === "ready").length,
@@ -4253,6 +4701,10 @@ app.post("/api/tools/game-creator/execution/mode", async (req, res) => {
   const body = req.body as { mode?: GameCreatorExecutionMode };
   const nextMode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, "strict-approval");
   const state = await readSystemState();
+  const run = getGameCreatorExecutionRunState(state);
+  if (run.status === "running") {
+    return res.status(409).json({ error: "Cannot change execution mode while run-all is active." });
+  }
   writeGameCreatorExecutionMode(state, nextMode);
   await writeSystemState(state);
   return res.json({ ok: true, mode: nextMode });
@@ -4261,99 +4713,316 @@ app.post("/api/tools/game-creator/execution/mode", async (req, res) => {
 app.post("/api/tools/game-creator/execution/run-next", async (req, res) => {
   const body = req.body as { workspaceId?: string; mode?: GameCreatorExecutionMode };
   const state = await readSystemState();
-  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
   const mode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
-  writeGameCreatorExecutionMode(state, mode);
-
-  const queue = getGameCreatorExecutionQueueStore(state);
-  const nextItem = queue.items.find((entry) => entry.status === "ready");
-  if (!nextItem) {
-    await writeSystemState(state);
-    return res.status(409).json({ error: "No ready queue item found. Build queue and/or mark items as ready first.", mode });
+  const run = getGameCreatorExecutionRunState(state);
+  if (run.status === "running") {
+    return res.status(409).json({ error: "Run-all is active. Stop or pause it before running a single task.", mode });
   }
 
-  const now = new Date().toISOString();
-  const job: GameCreatorExecutionJob = {
-    id: crypto.randomUUID(),
-    queueItemId: nextItem.id,
-    queueItemTitle: nextItem.title,
-    lane: nextItem.lane,
-    sourceDocFile: nextItem.sourceDocFile,
-    mode,
-    status: "running",
-    startedAt: now,
-  };
+  const result = await runNextGameCreatorExecutionStep({ workspaceId: body.workspaceId, mode });
+  if (!result.ok) {
+    return res.status(result.statusCode ?? 500).json({ error: result.blocker ?? "Execution failed.", mode, job: result.job });
+  }
+  return res.json(result);
+});
 
-  const jobs = [job, ...getGameCreatorExecutionJobs(state)];
-  writeGameCreatorExecutionJobs(state, jobs);
-  writeGameCreatorExecutionQueueStore(state, {
-    builtAt: queue.builtAt ?? now,
-    items: queue.items.map((entry) => entry.id === nextItem.id ? { ...entry, status: "in-progress", updatedAt: now } : entry),
+app.post("/api/tools/game-creator/execution/run-all", async (req, res) => {
+  const body = req.body as { workspaceId?: string; mode?: GameCreatorExecutionMode };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const mode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
+  const existing = gameCreatorExecutionRunnerByWorkspace.get(workspace.id);
+  if (existing?.running && !existing.canceled) {
+    return res.status(409).json({ error: "Run-all is already active for this workspace.", mode });
+  }
+
+  const runId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const control: GameCreatorExecutionRunnerControl = {
+    workspaceId: workspace.id,
+    runId,
+    mode,
+    running: true,
+    paused: false,
+    canceled: false,
+  };
+  gameCreatorExecutionRunnerByWorkspace.set(workspace.id, control);
+
+  writeGameCreatorExecutionMode(state, mode);
+  writeGameCreatorExecutionRunState(state, {
+    id: runId,
+    status: "running",
+    mode,
+    startedAt: now,
+    updatedAt: now,
+    message: "Run-all started.",
   });
   await writeSystemState(state);
 
-  try {
-    const draft = readGameCreatorDraft(state);
-    const spec = buildGameCreatorSpecPackage(draft);
-    const result = await executeGameCreatorQueueItem({
-      workspacePath: workspace.path,
-      spec,
-      item: nextItem,
-    });
+  void (async () => {
+    try {
+      while (control.running && !control.canceled) {
+        if (control.paused) {
+          const pausedState = await readSystemState();
+          writeGameCreatorExecutionRunState(pausedState, {
+            ...getGameCreatorExecutionRunState(pausedState),
+            id: runId,
+            status: "paused",
+            mode,
+            updatedAt: new Date().toISOString(),
+            message: "Run-all paused.",
+          });
+          await writeSystemState(pausedState);
+          break;
+        }
 
-    const doneAt = new Date().toISOString();
-    const nextState = await readSystemState();
-    const nextJobs = getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
-      ? {
-        ...entry,
-        status: "completed" as const,
-        finishedAt: doneAt,
-        outputs: result.outputs,
-        warnings: result.warnings,
+        const step = await runNextGameCreatorExecutionStep({ workspaceId: workspace.id, mode });
+        if (!step.ok) {
+          const failState = await readSystemState();
+          const reason = step.blocker ?? "No further work could be scheduled.";
+          const lowerReason = reason.toLowerCase();
+          const terminalStatus = lowerReason.includes("no ready")
+            ? "completed"
+            : lowerReason.includes("artifact approvals")
+              ? "paused"
+              : "failed";
+          writeGameCreatorExecutionRunState(failState, {
+            ...getGameCreatorExecutionRunState(failState),
+            id: runId,
+            status: terminalStatus,
+            mode,
+            updatedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            message: reason,
+          });
+          await writeSystemState(failState);
+          break;
+        }
       }
-      : entry);
-    writeGameCreatorExecutionJobs(nextState, nextJobs);
 
-    const nextQueue = getGameCreatorExecutionQueueStore(nextState);
-    writeGameCreatorExecutionQueueStore(nextState, {
-      builtAt: nextQueue.builtAt ?? doneAt,
-      items: nextQueue.items.map((entry) => entry.id === nextItem.id ? { ...entry, status: "done", updatedAt: doneAt } : entry),
-    });
-    await writeSystemState(nextState);
-
-    return res.json({
-      ok: true,
-      mode,
-      job: nextJobs.find((entry) => entry.id === job.id),
-      outputs: result.outputs,
-      warnings: result.warnings,
-    });
-  } catch (error) {
-    const failedAt = new Date().toISOString();
-    const nextState = await readSystemState();
-    const nextJobs = getGameCreatorExecutionJobs(nextState).map((entry) => entry.id === job.id
-      ? {
-        ...entry,
-        status: "failed" as const,
-        finishedAt: failedAt,
-        error: String(error),
+      if (control.canceled) {
+        const canceledState = await readSystemState();
+        writeGameCreatorExecutionRunState(canceledState, {
+          ...getGameCreatorExecutionRunState(canceledState),
+          id: runId,
+          status: "canceled",
+          mode,
+          updatedAt: new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+          message: "Run-all canceled.",
+        });
+        await writeSystemState(canceledState);
       }
-      : entry);
-    writeGameCreatorExecutionJobs(nextState, nextJobs);
+    } catch (error) {
+      const failedState = await readSystemState();
+      writeGameCreatorExecutionRunState(failedState, {
+        ...getGameCreatorExecutionRunState(failedState),
+        id: runId,
+        status: "failed",
+        mode,
+        updatedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        message: `Run-all failed: ${String(error)}`,
+      });
+      await writeSystemState(failedState);
+    } finally {
+      control.running = false;
+      gameCreatorExecutionRunnerByWorkspace.set(workspace.id, control);
+    }
+  })();
 
-    const nextQueue = getGameCreatorExecutionQueueStore(nextState);
-    writeGameCreatorExecutionQueueStore(nextState, {
-      builtAt: nextQueue.builtAt ?? failedAt,
-      items: nextQueue.items.map((entry) => entry.id === nextItem.id ? { ...entry, status: "blocked", updatedAt: failedAt } : entry),
-    });
-    await writeSystemState(nextState);
-
-    return res.status(500).json({
-      error: String(error),
+  return res.json({
+    ok: true,
+    mode,
+    run: {
+      id: runId,
+      status: "running",
       mode,
-      job: nextJobs.find((entry) => entry.id === job.id),
-    });
+      startedAt: now,
+      updatedAt: now,
+      message: "Run-all started.",
+    },
+  });
+});
+
+app.post("/api/tools/game-creator/execution/stop", async (req, res) => {
+  const body = req.body as { workspaceId?: string };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const control = gameCreatorExecutionRunnerByWorkspace.get(workspace.id);
+  if (!control?.running) {
+    return res.status(409).json({ error: "No active run-all session for this workspace." });
   }
+  control.canceled = true;
+  control.running = false;
+  control.paused = false;
+  gameCreatorExecutionRunnerByWorkspace.set(workspace.id, control);
+
+  writeGameCreatorExecutionRunState(state, {
+    ...getGameCreatorExecutionRunState(state),
+    id: control.runId,
+    status: "canceled",
+    mode: control.mode,
+    updatedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    message: "Run-all canceled by user.",
+  });
+  await writeSystemState(state);
+  return res.json({ ok: true, run: getGameCreatorExecutionRunState(state) });
+});
+
+app.post("/api/tools/game-creator/execution/resume", async (req, res) => {
+  const body = req.body as { workspaceId?: string; mode?: GameCreatorExecutionMode };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const mode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
+  const control = gameCreatorExecutionRunnerByWorkspace.get(workspace.id);
+  if (!control || !control.paused) {
+    return res.status(409).json({ error: "No paused run-all session found. Use run-all to start a new session." });
+  }
+
+  control.running = true;
+  control.paused = false;
+  control.canceled = false;
+  control.mode = mode;
+  gameCreatorExecutionRunnerByWorkspace.set(workspace.id, control);
+  writeGameCreatorExecutionMode(state, mode);
+  writeGameCreatorExecutionRunState(state, {
+    ...getGameCreatorExecutionRunState(state),
+    id: control.runId,
+    status: "running",
+    mode,
+    updatedAt: new Date().toISOString(),
+    message: "Run-all resumed.",
+  });
+  await writeSystemState(state);
+
+  void (async () => {
+    try {
+      while (control.running && !control.canceled) {
+        if (control.paused) {
+          const pausedState = await readSystemState();
+          writeGameCreatorExecutionRunState(pausedState, {
+            ...getGameCreatorExecutionRunState(pausedState),
+            id: control.runId,
+            status: "paused",
+            mode,
+            updatedAt: new Date().toISOString(),
+            message: "Run-all paused.",
+          });
+          await writeSystemState(pausedState);
+          break;
+        }
+
+        const step = await runNextGameCreatorExecutionStep({ workspaceId: workspace.id, mode });
+        if (!step.ok) {
+          const nextState = await readSystemState();
+          const reason = step.blocker ?? "No further work could be scheduled.";
+          const lowerReason = reason.toLowerCase();
+          const terminalStatus = lowerReason.includes("no ready")
+            ? "completed"
+            : lowerReason.includes("artifact approvals")
+              ? "paused"
+              : "failed";
+          writeGameCreatorExecutionRunState(nextState, {
+            ...getGameCreatorExecutionRunState(nextState),
+            id: control.runId,
+            status: terminalStatus,
+            mode,
+            updatedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            message: reason,
+          });
+          await writeSystemState(nextState);
+          break;
+        }
+      }
+    } catch (error) {
+      const failedState = await readSystemState();
+      writeGameCreatorExecutionRunState(failedState, {
+        ...getGameCreatorExecutionRunState(failedState),
+        id: control.runId,
+        status: "failed",
+        mode,
+        updatedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        message: `Run-all failed: ${String(error)}`,
+      });
+      await writeSystemState(failedState);
+    } finally {
+      control.running = false;
+      gameCreatorExecutionRunnerByWorkspace.set(workspace.id, control);
+    }
+  })();
+
+  return res.json({ ok: true, run: getGameCreatorExecutionRunState(state), mode });
+});
+
+app.post("/api/tools/game-creator/execution/pause", async (req, res) => {
+  const body = req.body as { workspaceId?: string };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const control = gameCreatorExecutionRunnerByWorkspace.get(workspace.id);
+  if (!control?.running) {
+    return res.status(409).json({ error: "No active run-all session to pause." });
+  }
+  control.paused = true;
+  gameCreatorExecutionRunnerByWorkspace.set(workspace.id, control);
+  writeGameCreatorExecutionRunState(state, {
+    ...getGameCreatorExecutionRunState(state),
+    id: control.runId,
+    status: "paused",
+    mode: control.mode,
+    updatedAt: new Date().toISOString(),
+    message: "Run-all pause requested.",
+  });
+  await writeSystemState(state);
+  return res.json({ ok: true, run: getGameCreatorExecutionRunState(state) });
+});
+
+app.post("/api/tools/game-creator/execution/artifacts/:artifactId/decision", async (req, res) => {
+  const body = req.body as {
+    workspaceId?: string;
+    decision?: "approved" | "rejected" | "pending";
+    note?: string;
+    decidedBy?: string;
+  };
+  const decision = pickEnumValue(body.decision, ["approved", "rejected", "pending"] as const, "pending");
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  void workspace;
+
+  const now = new Date().toISOString();
+  const artifacts = getGameCreatorExecutionArtifacts(state);
+  const target = artifacts.find((entry) => entry.id === req.params.artifactId);
+  if (!target) {
+    return res.status(404).json({ error: "Artifact not found." });
+  }
+
+  const nextArtifacts = artifacts.map((entry) => entry.id === req.params.artifactId
+    ? {
+      ...entry,
+      status: decision,
+      decidedAt: now,
+      decidedBy: typeof body.decidedBy === "string" && body.decidedBy.trim() ? body.decidedBy.trim().slice(0, 120) : "user",
+      note: typeof body.note === "string" ? body.note.trim().slice(0, 1000) : entry.note,
+    }
+    : entry);
+  writeGameCreatorExecutionArtifacts(state, nextArtifacts);
+
+  const queue = getGameCreatorExecutionQueueStore(state);
+  writeGameCreatorExecutionQueueStore(state, {
+    builtAt: queue.builtAt ?? now,
+    items: reconcileQueueItemFromArtifactDecisions({
+      queueItems: queue.items,
+      artifacts: nextArtifacts,
+      queueItemId: target.queueItemId,
+      mode: getGameCreatorExecutionMode(state),
+    }),
+  });
+
+  await writeSystemState(state);
+  return res.json({ ok: true, artifact: nextArtifacts.find((entry) => entry.id === req.params.artifactId), artifacts: nextArtifacts });
 });
 
 app.post("/api/tools/game-creator/queue/:itemId/status", async (req, res) => {
