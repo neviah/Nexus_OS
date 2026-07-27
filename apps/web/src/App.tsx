@@ -709,6 +709,7 @@ type GameCreatorCanonDocStatusRecord = {
   version: number;
   locked: boolean;
   reviewStatus: "pending" | "approved" | "rejected";
+  sectionApprovals?: Record<string, "pending" | "approved" | "rejected">;
   reviewNote?: string;
   reviewedAt?: string;
   reviewedBy?: string;
@@ -717,6 +718,15 @@ type GameCreatorCanonDocStatusRecord = {
   lastGenerationStrategy?: GameCreatorDocGenerationStrategy;
   lastHarnessIds?: string[];
   snapshotCount?: number;
+  lastDiffSummary?: {
+    changed: boolean;
+    oldWordCount: number;
+    newWordCount: number;
+    deltaWords: number;
+    addedSections: string[];
+    removedSections: string[];
+    changedSections: string[];
+  };
 };
 
 type GameCreatorCanonDocSnapshot = {
@@ -740,8 +750,26 @@ type GameCreatorCanonDocStatusItem = {
     presentSections: string[];
     missingSections: string[];
   };
+  sectionStatuses?: Array<{
+    section: string;
+    status: "pending" | "approved" | "rejected";
+  }>;
   record: GameCreatorCanonDocStatusRecord;
   snapshots: GameCreatorCanonDocSnapshot[];
+};
+
+type GameCreatorConceptSwarm = {
+  ok: boolean;
+  generatedAt: string | null;
+  harnessId: string | null;
+  briefs: {
+    story: string;
+    gameplay: string;
+    visuals: string;
+    tech: string;
+  };
+  warnings?: string[];
+  specPackage: GameCreatorSpecPackage;
 };
 
 type GameCreatorCanonDocsStatusResponse = {
@@ -829,7 +857,29 @@ type GameCreatorQueueResponse = {
   summary: GameCreatorQueueSummary;
   readyForExecution?: boolean;
   blockers?: string[];
+  impactSummary?: {
+    changedDocs: string[];
+    impactedQueueItems: number;
+  };
 };
+
+type GameCreatorSpriteResult = {
+  imageUrl: string;
+  relativePath: string;
+  descriptorRelativePath: string;
+  workspaceId: string;
+  prompt: string;
+  frameWidth: number;
+  frameHeight: number;
+  frames: number;
+  model: string;
+  seed: number;
+};
+
+type GameCreatorSpriteStreamEnvelope =
+  | { type: "status"; message: string }
+  | { type: "error"; message: string }
+  | { type: "done"; result: GameCreatorSpriteResult };
 
 type BackgroundVisualId = "none" | "matrix-rain" | "prism-gradient" | "liquid-chrome" | "animated-gradient" | "closing-plasma";
 
@@ -1370,6 +1420,8 @@ function App() {
   const [gameCreatorPrimaryHarnessId, setGameCreatorPrimaryHarnessId] = useState("");
   const [gameCreatorDocGenerationBusy, setGameCreatorDocGenerationBusy] = useState(false);
   const [gameCreatorDocGenerationResult, setGameCreatorDocGenerationResult] = useState<GameCreatorCanonDocsGenerationResult | null>(null);
+  const [gameCreatorConceptSwarm, setGameCreatorConceptSwarm] = useState<GameCreatorConceptSwarm | null>(null);
+  const [gameCreatorConceptSwarmBusy, setGameCreatorConceptSwarmBusy] = useState(false);
   const [gameCreatorGenerationProgress, setGameCreatorGenerationProgress] = useState<GameCreatorGenerationProgress | null>(null);
   const [gameCreatorGenerationEvents, setGameCreatorGenerationEvents] = useState<GameCreatorGenerationProgressEvent[]>([]);
   const [gameCreatorCanonDocsStatus, setGameCreatorCanonDocsStatus] = useState<GameCreatorCanonDocStatusItem[]>([]);
@@ -1382,7 +1434,17 @@ function App() {
   const [gameCreatorQueueSummary, setGameCreatorQueueSummary] = useState<GameCreatorQueueSummary | null>(null);
   const [gameCreatorQueueBuiltAt, setGameCreatorQueueBuiltAt] = useState<string | null>(null);
   const [gameCreatorQueueBlockers, setGameCreatorQueueBlockers] = useState<string[]>([]);
+  const [gameCreatorQueueImpactSummary, setGameCreatorQueueImpactSummary] = useState<{ changedDocs: string[]; impactedQueueItems: number } | null>(null);
   const [gameCreatorQueueBusyAction, setGameCreatorQueueBusyAction] = useState<"build" | "refresh" | string | null>(null);
+  const [gameCreatorSpritePrompt, setGameCreatorSpritePrompt] = useState("pixel-art hero run cycle, transparent background");
+  const [gameCreatorSpriteModel, setGameCreatorSpriteModel] = useState("dreamshaper-8");
+  const [gameCreatorSpriteFrameWidth, setGameCreatorSpriteFrameWidth] = useState(128);
+  const [gameCreatorSpriteFrameHeight, setGameCreatorSpriteFrameHeight] = useState(128);
+  const [gameCreatorSpriteFrames, setGameCreatorSpriteFrames] = useState(6);
+  const [gameCreatorSpriteBusy, setGameCreatorSpriteBusy] = useState(false);
+  const [gameCreatorSpriteTrace, setGameCreatorSpriteTrace] = useState("");
+  const [gameCreatorSpriteResult, setGameCreatorSpriteResult] = useState<GameCreatorSpriteResult | null>(null);
+  const gameCreatorSpriteAbortRef = useRef<AbortController | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -2384,6 +2446,7 @@ function App() {
         setGameCreatorPrimaryHarnessId(payload.draft.preferredDocHarnesses[0] ?? "");
       }
       await loadGameCreatorCanonDocsStatus();
+      await loadGameCreatorConceptSwarm();
       await loadGameCreatorGate2Status();
       await loadGameCreatorGenerationProgress();
       await loadGameCreatorQueue();
@@ -2498,6 +2561,44 @@ function App() {
     setGameCreatorCanonDocsStatus(payload.status ?? []);
   }
 
+  async function loadGameCreatorConceptSwarm() {
+    const response = await fetch("/api/tools/game-creator/concept-swarm");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as GameCreatorConceptSwarm;
+    setGameCreatorConceptSwarm(payload);
+  }
+
+  async function generateGameCreatorConceptSwarm() {
+    setGameCreatorConceptSwarmBusy(true);
+    try {
+      const response = await fetch("/api/tools/game-creator/concept-swarm/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          harnessId: gameCreatorPrimaryHarnessId.trim() || undefined,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to generate concept swarm briefs.");
+      }
+      const payload = (await response.json()) as GameCreatorConceptSwarm;
+      setGameCreatorConceptSwarm(payload);
+      setStatusMessage("Concept Swarm briefs generated.");
+      pushToast("Concept Swarm briefs generated.", "ok");
+      if ((payload.warnings?.length ?? 0) > 0) {
+        pushToast("Concept Swarm generated with fallback warnings.", "warn");
+      }
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorConceptSwarmBusy(false);
+    }
+  }
+
   async function loadGameCreatorGate2Status() {
     const response = await fetch(`/api/tools/game-creator/gates/gate2?workspaceId=${encodeURIComponent(boot?.activeWorkspaceId ?? "")}`);
     if (!response.ok) {
@@ -2556,6 +2657,7 @@ function App() {
       setGameCreatorQueueSummary(payload.summary ?? null);
       setGameCreatorQueueBuiltAt(payload.builtAt ?? null);
       setGameCreatorQueueBlockers(payload.blockers ?? []);
+      setGameCreatorQueueImpactSummary(payload.impactSummary ?? null);
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2580,6 +2682,7 @@ function App() {
       setGameCreatorQueueSummary(payload.summary ?? null);
       setGameCreatorQueueBuiltAt(payload.builtAt ?? null);
       setGameCreatorQueueBlockers(payload.blockers ?? []);
+      setGameCreatorQueueImpactSummary(payload.impactSummary ?? null);
       setStatusMessage(`Built Step 4 queue with ${payload.items.length} task(s).`);
       pushToast(`Step 4 queue built (${payload.items.length} tasks).`, "ok");
       if ((payload.blockers?.length ?? 0) > 0) {
@@ -2609,6 +2712,7 @@ function App() {
       setGameCreatorQueueItems(payload.items ?? []);
       setGameCreatorQueueSummary(payload.summary ?? null);
       setGameCreatorQueueBuiltAt(payload.builtAt ?? null);
+      setGameCreatorQueueImpactSummary(payload.impactSummary ?? null);
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2637,6 +2741,34 @@ function App() {
       setGameCreatorCanonDocsStatus(payload.status ?? []);
       await loadGameCreatorGate2Status();
       pushToast(`${fileName} marked ${decision}.`, decision === "approved" ? "ok" : decision === "rejected" ? "warn" : "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorReviewBusyKey(null);
+    }
+  }
+
+  async function updateGameCreatorCanonDocSectionDecision(fileName: string, section: string, decision: "approved" | "rejected" | "pending") {
+    const key = `${fileName}:section:${section}:${decision}`;
+    setGameCreatorReviewBusyKey(key);
+    try {
+      const response = await fetch(`/api/tools/game-creator/canon-docs/${encodeURIComponent(fileName)}/sections/${encodeURIComponent(section)}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          decision,
+          reviewedBy: "user",
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to update section review status.");
+      }
+      const payload = (await response.json()) as { ok: boolean; status: GameCreatorCanonDocStatusItem[] };
+      setGameCreatorCanonDocsStatus(payload.status ?? []);
+      await loadGameCreatorGate2Status();
+      pushToast(`${fileName} / ${section} marked ${decision}.`, decision === "approved" ? "ok" : decision === "rejected" ? "warn" : "ok");
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -2722,6 +2854,95 @@ function App() {
       pushToast(String(error), "err");
     } finally {
       setGameCreatorReviewBusyKey(null);
+    }
+  }
+
+  async function generateGameCreatorSpriteSheet() {
+    if (gameCreatorSpriteAbortRef.current) {
+      gameCreatorSpriteAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    gameCreatorSpriteAbortRef.current = controller;
+    setGameCreatorSpriteBusy(true);
+    setGameCreatorSpriteTrace("Starting sprite generation...\n");
+
+    const params = new URLSearchParams({
+      prompt: gameCreatorSpritePrompt,
+      model: gameCreatorSpriteModel,
+      frameWidth: String(gameCreatorSpriteFrameWidth),
+      frameHeight: String(gameCreatorSpriteFrameHeight),
+      frames: String(gameCreatorSpriteFrames),
+      workspaceId: boot?.activeWorkspaceId ?? "default",
+    });
+
+    try {
+      const response = await fetch(`/api/tools/game-creator/sprites/stream?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        const payload = (await response.json()) as { error?: string };
+        throw new Error(payload.error ?? "Sprite generation failed.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        while (true) {
+          const split = buffer.indexOf("\n\n");
+          if (split === -1) {
+            break;
+          }
+          const frame = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+          if (!dataLine) {
+            continue;
+          }
+          const raw = dataLine.slice(5).trim();
+          let envelope: GameCreatorSpriteStreamEnvelope;
+          try {
+            envelope = JSON.parse(raw) as GameCreatorSpriteStreamEnvelope;
+          } catch {
+            continue;
+          }
+
+          if (envelope.type === "status") {
+            setGameCreatorSpriteTrace((current) => `${current}${envelope.message}\n`.slice(-12000));
+            continue;
+          }
+
+          if (envelope.type === "error") {
+            setGameCreatorSpriteTrace((current) => `${current}[error] ${envelope.message}\n`.slice(-12000));
+            setStatusMessage(envelope.message);
+            pushToast(envelope.message, "err");
+            continue;
+          }
+
+          if (envelope.type === "done") {
+            setGameCreatorSpriteResult(envelope.result);
+            setStatusMessage(`Sprite sheet saved to ${envelope.result.relativePath}`);
+            pushToast("Sprite sheet generated and saved.", "ok");
+            await refreshActiveWorkspaceTree(envelope.result.workspaceId);
+          }
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setStatusMessage(String(error));
+        pushToast(String(error), "err");
+      }
+    } finally {
+      if (gameCreatorSpriteAbortRef.current === controller) {
+        gameCreatorSpriteAbortRef.current = null;
+      }
+      setGameCreatorSpriteBusy(false);
     }
   }
 
@@ -6366,23 +6587,74 @@ function App() {
               {renderMediaCenterTabs()}
 
               <section className="tool-section">
-                <h3>Sprite Sheets (Planned Integration)</h3>
-                <small>Planned engine: 0x0funky/agent-sprite-forge</small>
-                <small>Use case: character sprite sheets, UI elements, maps, transparent PNG frames, and animated GIF previews.</small>
-                <small>Runtime: codex-based flow (compatible with your current environment).</small>
-                <div className="tool-action-row">
-                  <a href="https://github.com/0x0funky/agent-sprite-forge" target="_blank" rel="noreferrer">Open Repository</a>
+                <h3>Generate Sprite Sheet</h3>
+                <div className="stable-audio-form">
+                  <label>
+                    <span>Prompt</span>
+                    <textarea
+                      rows={3}
+                      value={gameCreatorSpritePrompt}
+                      onChange={(event) => setGameCreatorSpritePrompt(event.target.value)}
+                      placeholder="pixel-art hero run cycle, transparent background"
+                    />
+                  </label>
+                  <div className="image-size-grid">
+                    <label>
+                      <span>Model</span>
+                      <select value={gameCreatorSpriteModel} onChange={(event) => setGameCreatorSpriteModel(event.target.value)}>
+                        <option value="sd15">sd15</option>
+                        <option value="dreamshaper-8">dreamshaper-8</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Frames</span>
+                      <input type="number" min={1} max={16} value={gameCreatorSpriteFrames} onChange={(event) => setGameCreatorSpriteFrames(Math.max(1, Math.min(16, Number(event.target.value || 1))))} />
+                    </label>
+                  </div>
+                  <div className="image-size-grid">
+                    <label>
+                      <span>Frame Width</span>
+                      <input type="number" min={32} max={512} value={gameCreatorSpriteFrameWidth} onChange={(event) => setGameCreatorSpriteFrameWidth(Math.max(32, Math.min(512, Number(event.target.value || 128))))} />
+                    </label>
+                    <label>
+                      <span>Frame Height</span>
+                      <input type="number" min={32} max={512} value={gameCreatorSpriteFrameHeight} onChange={(event) => setGameCreatorSpriteFrameHeight(Math.max(32, Math.min(512, Number(event.target.value || 128))))} />
+                    </label>
+                  </div>
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => void generateGameCreatorSpriteSheet()} disabled={gameCreatorSpriteBusy || !gameCreatorSpritePrompt.trim()}>
+                      {gameCreatorSpriteBusy ? "Generating..." : "Generate Sprite Sheet"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => gameCreatorSpriteAbortRef.current?.abort()}
+                      disabled={!gameCreatorSpriteBusy}
+                    >
+                      Stop
+                    </button>
+                  </div>
+                  <small>Outputs save under Assets/sprites with a JSON descriptor for frame metadata.</small>
                 </div>
               </section>
 
               <section className="tool-section">
-                <h3>Planned Controls</h3>
-                <ul className="tool-list">
-                  <li><small>Prompt + style + frame-count preset</small></li>
-                  <li><small>Sprite dimensions, atlas packing, and transparent background enforcement</small></li>
-                  <li><small>Export targets: sprite sheet PNG, frame folder, animated GIF</small></li>
-                  <li><small>Save path under active workspace Assets/sprites</small></li>
-                </ul>
+                <h3>Preview</h3>
+                {gameCreatorSpriteResult ? (
+                  <div className="image-preview-panel">
+                    <img src={gameCreatorSpriteResult.imageUrl} alt="Generated sprite sheet" />
+                    <small>{gameCreatorSpriteResult.relativePath}</small>
+                    <small>{gameCreatorSpriteResult.frameWidth}x{gameCreatorSpriteResult.frameHeight} · {gameCreatorSpriteResult.frames} frames</small>
+                    <small>Descriptor: {gameCreatorSpriteResult.descriptorRelativePath}</small>
+                  </div>
+                ) : (
+                  <small>No sprite sheet generated yet.</small>
+                )}
+              </section>
+
+              <section className="tool-section">
+                <h3>Status Stream</h3>
+                <pre className="image-status-stream">{gameCreatorSpriteTrace || "No status yet."}</pre>
               </section>
             </div>
           ) : null}
@@ -6832,6 +7104,44 @@ function App() {
               </section>
 
               <section className="tool-section">
+                <div className="tool-header-row">
+                  <h3>Step 1.5: Concept Swarm Briefs</h3>
+                  <button type="button" onClick={() => void generateGameCreatorConceptSwarm()} disabled={gameCreatorConceptSwarmBusy}>
+                    {gameCreatorConceptSwarmBusy ? "Generating..." : "Generate Concept Swarm"}
+                  </button>
+                </div>
+                <small>Four focused briefs feed Step 2 prompts: story, gameplay, visuals, and technical constraints.</small>
+                {gameCreatorConceptSwarm?.generatedAt ? (
+                  <small>
+                    Last generated: {new Date(gameCreatorConceptSwarm.generatedAt).toLocaleString()}
+                    {gameCreatorConceptSwarm.harnessId ? ` · harness ${gameCreatorConceptSwarm.harnessId}` : " · deterministic fallback"}
+                  </small>
+                ) : (
+                  <small>No concept swarm briefs generated yet.</small>
+                )}
+                {gameCreatorConceptSwarm ? (
+                  <div className="tool-list">
+                    <details className="tool-details">
+                      <summary>Story Brief</summary>
+                      <pre className="image-status-stream">{gameCreatorConceptSwarm.briefs.story}</pre>
+                    </details>
+                    <details className="tool-details">
+                      <summary>Gameplay Brief</summary>
+                      <pre className="image-status-stream">{gameCreatorConceptSwarm.briefs.gameplay}</pre>
+                    </details>
+                    <details className="tool-details">
+                      <summary>Visual Brief</summary>
+                      <pre className="image-status-stream">{gameCreatorConceptSwarm.briefs.visuals}</pre>
+                    </details>
+                    <details className="tool-details">
+                      <summary>Tech Brief</summary>
+                      <pre className="image-status-stream">{gameCreatorConceptSwarm.briefs.tech}</pre>
+                    </details>
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="tool-section">
                 <h3>Step 2: Generate Canon Docs</h3>
                 <div className="stable-audio-form">
                   <small>Default mode uses selected harnesses from Step 1 and keeps complexity low.</small>
@@ -6934,6 +7244,53 @@ function App() {
                               {entry.quality.missingSections.length ? ` · missing: ${entry.quality.missingSections.join(", ")}` : ""}
                             </small>
                           ) : null}
+                          {entry.record.lastDiffSummary ? (
+                            <small>
+                              Diff: {entry.record.lastDiffSummary.changed ? "changed" : "no change"} · Δ words {entry.record.lastDiffSummary.deltaWords}
+                              {entry.record.lastDiffSummary.changedSections.length ? ` · changed sections: ${entry.record.lastDiffSummary.changedSections.join(", ")}` : ""}
+                            </small>
+                          ) : null}
+                          {entry.sectionStatuses?.length ? (
+                            <div className="tool-list">
+                              {entry.sectionStatuses.map((sectionStatus) => {
+                                const sectionBusyPrefix = `${entry.fileName}:section:${sectionStatus.section}:`;
+                                const sectionBusy = Boolean(gameCreatorReviewBusyKey && gameCreatorReviewBusyKey.startsWith(sectionBusyPrefix));
+                                return (
+                                  <div key={`${entry.fileName}:${sectionStatus.section}`}>
+                                    <small>
+                                      Section: {sectionStatus.section} · {sectionStatus.status}
+                                    </small>
+                                    <div className="tool-action-row">
+                                      <button
+                                        type="button"
+                                        className="ghost"
+                                        onClick={() => void updateGameCreatorCanonDocSectionDecision(entry.fileName, sectionStatus.section, "approved")}
+                                        disabled={sectionBusy}
+                                      >
+                                        Approve Section
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="ghost"
+                                        onClick={() => void updateGameCreatorCanonDocSectionDecision(entry.fileName, sectionStatus.section, "rejected")}
+                                        disabled={sectionBusy}
+                                      >
+                                        Reject Section
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="ghost"
+                                        onClick={() => void updateGameCreatorCanonDocSectionDecision(entry.fileName, sectionStatus.section, "pending")}
+                                        disabled={sectionBusy}
+                                      >
+                                        Reset Section
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
                           {entry.record.reviewNote ? <small>Note: {entry.record.reviewNote}</small> : null}
                           <div className="tool-action-row">
                             <button type="button" className="ghost" onClick={() => void updateGameCreatorCanonDocDecision(entry.fileName, "approved")} disabled={busy}>Approve</button>
@@ -6968,6 +7325,11 @@ function App() {
                 {gameCreatorQueueSummary ? (
                   <small>
                     Total {gameCreatorQueueSummary.total} · Ready {gameCreatorQueueSummary.ready} · In Progress {gameCreatorQueueSummary.inProgress} · Blocked {gameCreatorQueueSummary.blocked} · Done {gameCreatorQueueSummary.done}
+                  </small>
+                ) : null}
+                {gameCreatorQueueImpactSummary ? (
+                  <small>
+                    Impact: {gameCreatorQueueImpactSummary.changedDocs.length} changed doc(s) affecting {gameCreatorQueueImpactSummary.impactedQueueItems} queue item(s)
                   </small>
                 ) : null}
                 {gameCreatorQueueBlockers.length > 0 ? (

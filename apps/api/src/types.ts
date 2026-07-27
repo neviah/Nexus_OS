@@ -47,6 +47,16 @@ export type GameCreatorSetupWizardDraft = {
 
 export type GameCreatorState = {
   setupWizardDraft?: Partial<GameCreatorSetupWizardDraft>;
+  conceptSwarm?: {
+    generatedAt?: string;
+    harnessId?: string;
+    briefs?: {
+      story?: string;
+      gameplay?: string;
+      visuals?: string;
+      tech?: string;
+    };
+  };
   canonDocs?: {
     records?: Record<string, {
       fileName: string;
@@ -54,6 +64,7 @@ export type GameCreatorState = {
       version: number;
       locked: boolean;
       reviewStatus: "pending" | "approved" | "rejected";
+      sectionApprovals?: Record<string, "pending" | "approved" | "rejected">;
       reviewNote?: string;
       reviewedAt?: string;
       reviewedBy?: string;
@@ -62,6 +73,15 @@ export type GameCreatorState = {
       lastGenerationStrategy?: "template-only" | "single-harness" | "selected-harnesses" | "all-online-harnesses";
       lastHarnessIds?: string[];
       snapshotCount?: number;
+      lastDiffSummary?: {
+        changed: boolean;
+        oldWordCount: number;
+        newWordCount: number;
+        deltaWords: number;
+        addedSections: string[];
+        removedSections: string[];
+        changedSections: string[];
+      };
     }>;
     snapshots?: Array<{
       id: string;

@@ -372,6 +372,29 @@ function writeGameCreatorDraft(state: SystemState, draft: GameCreatorSetupWizard
   };
 }
 
+function getGameCreatorConceptSwarm(state: SystemState): {
+  generatedAt?: string;
+  harnessId?: string;
+  briefs?: Partial<ConceptSwarmBriefs>;
+} {
+  return state.gameCreator?.conceptSwarm ?? {};
+}
+
+function writeGameCreatorConceptSwarm(state: SystemState, input: {
+  generatedAt: string;
+  harnessId?: string;
+  briefs: ConceptSwarmBriefs;
+}): void {
+  state.gameCreator = {
+    ...(state.gameCreator ?? {}),
+    conceptSwarm: {
+      generatedAt: input.generatedAt,
+      harnessId: input.harnessId,
+      briefs: input.briefs,
+    },
+  };
+}
+
 type GameCreatorDocGenerationStrategy = "template-only" | "single-harness" | "selected-harnesses" | "all-online-harnesses";
 
 type CanonDocFile = {
@@ -387,6 +410,7 @@ type GameCreatorCanonDocRecord = {
   version: number;
   locked: boolean;
   reviewStatus: "pending" | "approved" | "rejected";
+  sectionApprovals?: Record<string, "pending" | "approved" | "rejected">;
   reviewNote?: string;
   reviewedAt?: string;
   reviewedBy?: string;
@@ -395,6 +419,15 @@ type GameCreatorCanonDocRecord = {
   lastGenerationStrategy?: GameCreatorDocGenerationStrategy;
   lastHarnessIds?: string[];
   snapshotCount?: number;
+  lastDiffSummary?: {
+    changed: boolean;
+    oldWordCount: number;
+    newWordCount: number;
+    deltaWords: number;
+    addedSections: string[];
+    removedSections: string[];
+    changedSections: string[];
+  };
 };
 
 type GameCreatorCanonDocSnapshot = {
@@ -443,11 +476,28 @@ type CanonDocQualityReport = {
   missingSections: string[];
 };
 
+type CanonDocSectionStatus = {
+  section: string;
+  status: "pending" | "approved" | "rejected";
+};
+
 type CanonDocPromptProfile = {
   requiredSections: string[];
   minWords: number;
   emphasis: string[];
   forbidden: string[];
+};
+
+type ConceptSwarmBriefs = {
+  story: string;
+  gameplay: string;
+  visuals: string;
+  tech: string;
+};
+
+type ConsistencyIssue = {
+  severity: "warning" | "blocking";
+  message: string;
 };
 
 const GAME_CREATOR_CANON_DOC_ROOT = "docs/game-creator";
@@ -583,6 +633,26 @@ function getCanonDocPromptProfile(fileName: string): CanonDocPromptProfile {
   };
 }
 
+function getScopeTierQualityMultiplier(scopeTier?: string): number {
+  switch ((scopeTier ?? "").trim()) {
+    case "small-prototype":
+      return 1.25;
+    case "medium-prototype":
+      return 1.5;
+    default:
+      return 1;
+  }
+}
+
+function getScopedPromptProfile(fileName: string, scopeTier?: string): CanonDocPromptProfile {
+  const base = getCanonDocPromptProfile(fileName);
+  const multiplier = getScopeTierQualityMultiplier(scopeTier);
+  return {
+    ...base,
+    minWords: Math.round(base.minWords * multiplier),
+  };
+}
+
 function extractMarkdownH2Headings(markdown: string): string[] {
   return markdown
     .split("\n")
@@ -591,12 +661,45 @@ function extractMarkdownH2Headings(markdown: string): string[] {
     .map((line) => line.replace(/^##\s+/, "").trim());
 }
 
+function normalizeSectionKey(section: string): string {
+  return section.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function extractSectionBodyMap(markdown: string): Record<string, string> {
+  const lines = markdown.split("\n");
+  const sectionMap: Record<string, string> = {};
+  let current = "";
+  const buffer: string[] = [];
+
+  const flush = () => {
+    if (!current) {
+      return;
+    }
+    sectionMap[current] = buffer.join("\n").trim();
+    buffer.length = 0;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("## ")) {
+      flush();
+      current = trimmed.replace(/^##\s+/, "").trim();
+      continue;
+    }
+    if (current) {
+      buffer.push(line);
+    }
+  }
+  flush();
+  return sectionMap;
+}
+
 function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
-function evaluateCanonDocQuality(fileName: string, content: string): CanonDocQualityReport {
-  const profile = getCanonDocPromptProfile(fileName);
+function evaluateCanonDocQuality(fileName: string, content: string, scopeTier?: string): CanonDocQualityReport {
+  const profile = getScopedPromptProfile(fileName, scopeTier);
   const presentSections = extractMarkdownH2Headings(content).map((entry) => entry.toLowerCase());
   const missingSections = profile.requiredSections.filter((section) => {
     const normalized = section.toLowerCase();
@@ -614,30 +717,239 @@ function evaluateCanonDocQuality(fileName: string, content: string): CanonDocQua
   };
 }
 
+function summarizeMarkdownDiff(previousContent: string, nextContent: string): {
+  changed: boolean;
+  oldWordCount: number;
+  newWordCount: number;
+  deltaWords: number;
+  addedSections: string[];
+  removedSections: string[];
+  changedSections: string[];
+} {
+  const oldSections = extractSectionBodyMap(previousContent);
+  const newSections = extractSectionBodyMap(nextContent);
+  const oldKeys = Object.keys(oldSections);
+  const newKeys = Object.keys(newSections);
+  const oldKeySet = new Set(oldKeys.map(normalizeSectionKey));
+  const newKeySet = new Set(newKeys.map(normalizeSectionKey));
+
+  const addedSections = newKeys.filter((section) => !oldKeySet.has(normalizeSectionKey(section)));
+  const removedSections = oldKeys.filter((section) => !newKeySet.has(normalizeSectionKey(section)));
+  const changedSections = newKeys.filter((section) => {
+    const normalized = normalizeSectionKey(section);
+    const oldMatch = oldKeys.find((candidate) => normalizeSectionKey(candidate) === normalized);
+    if (!oldMatch) {
+      return false;
+    }
+    return oldSections[oldMatch] !== newSections[section];
+  });
+
+  const oldWordCount = countWords(previousContent);
+  const newWordCount = countWords(nextContent);
+  const changed = previousContent.trim() !== nextContent.trim();
+  return {
+    changed,
+    oldWordCount,
+    newWordCount,
+    deltaWords: newWordCount - oldWordCount,
+    addedSections,
+    removedSections,
+    changedSections,
+  };
+}
+
+function buildSectionStatuses(input: {
+  quality: CanonDocQualityReport;
+  sectionApprovals?: Record<string, "pending" | "approved" | "rejected">;
+}): CanonDocSectionStatus[] {
+  const approvals = input.sectionApprovals ?? {};
+  return input.quality.requiredSections.map((section) => ({
+    section,
+    status: approvals[section] ?? approvals[normalizeSectionKey(section)] ?? "pending",
+  }));
+}
+
+function deriveReviewStatusFromSections(sectionStatuses: CanonDocSectionStatus[]): "pending" | "approved" | "rejected" {
+  if (sectionStatuses.some((entry) => entry.status === "rejected")) {
+    return "rejected";
+  }
+  if (sectionStatuses.length > 0 && sectionStatuses.every((entry) => entry.status === "approved")) {
+    return "approved";
+  }
+  return "pending";
+}
+
 function detectCanonDocContradictions(input: {
   spec: GameCreatorSpecPackage;
   docsByFile: Record<string, string>;
 }): string[] {
   const warnings: string[] = [];
+  const issues = detectCanonDocConsistency(input);
+  for (const issue of issues) {
+    warnings.push(issue.message);
+  }
+  return warnings;
+}
+
+function detectCanonDocConsistency(input: {
+  spec: GameCreatorSpecPackage;
+  docsByFile: Record<string, string>;
+}): ConsistencyIssue[] {
+  const issues: ConsistencyIssue[] = [];
   const target = input.spec.setupWizard.target.toLowerCase();
   const perspective = input.spec.setupWizard.perspective.toLowerCase();
   const controls = input.spec.setupWizard.controls.toLowerCase();
   const files = Object.entries(input.docsByFile);
 
+  const perspectiveConflicts: Record<string, string[]> = {
+    "2d-side-scroller": ["isometric", "first-person", "third-person", "top-down"],
+    "2d-top-down": ["first-person", "third-person", "side-scroller"],
+    "3d-first-person": ["top-down", "side-scroller", "2d-only"],
+    "3d-third-person": ["top-down", "side-scroller", "2d-only"],
+    isometric: ["first-person", "side-scroller"],
+  };
+
+  const controlsConflicts: Record<string, string[]> = {
+    "keyboard-mouse": ["touch-only", "motion-only"],
+    gamepad: ["touch-only"],
+    touch: ["keyboard-only", "gamepad-only"],
+    hybrid: [],
+  };
+
   for (const [fileName, content] of files) {
     const lower = content.toLowerCase();
     if (!lower.includes(target)) {
-      warnings.push(`${fileName} does not explicitly reference target ${target}.`);
+      issues.push({ severity: "warning", message: `${fileName} does not explicitly reference target ${target}.` });
     }
     if (!lower.includes(perspective)) {
-      warnings.push(`${fileName} does not explicitly reference perspective ${perspective}.`);
+      issues.push({ severity: "warning", message: `${fileName} does not explicitly reference perspective ${perspective}.` });
     }
     if (!lower.includes(controls)) {
-      warnings.push(`${fileName} does not explicitly reference controls profile ${controls}.`);
+      issues.push({ severity: "warning", message: `${fileName} does not explicitly reference controls profile ${controls}.` });
+    }
+
+    const conflictingPerspectiveTerms = perspectiveConflicts[perspective] ?? [];
+    for (const term of conflictingPerspectiveTerms) {
+      if (lower.includes(term)) {
+        issues.push({
+          severity: "blocking",
+          message: `${fileName} references conflicting perspective term "${term}" while setup is ${perspective}.`,
+        });
+      }
+    }
+
+    const conflictingControlTerms = controlsConflicts[controls] ?? [];
+    for (const term of conflictingControlTerms) {
+      if (lower.includes(term)) {
+        issues.push({
+          severity: "blocking",
+          message: `${fileName} references conflicting control term "${term}" while controls profile is ${controls}.`,
+        });
+      }
     }
   }
 
-  return warnings;
+  return issues;
+}
+
+function summarizeConceptSwarmForPrompt(briefs?: Partial<ConceptSwarmBriefs>): string {
+  if (!briefs) {
+    return "No concept swarm briefs available yet.";
+  }
+
+  const blocks: string[] = [];
+  if (briefs.story?.trim()) {
+    blocks.push(`Story Brief:\n${briefs.story.trim()}`);
+  }
+  if (briefs.gameplay?.trim()) {
+    blocks.push(`Gameplay Brief:\n${briefs.gameplay.trim()}`);
+  }
+  if (briefs.visuals?.trim()) {
+    blocks.push(`Visual Brief:\n${briefs.visuals.trim()}`);
+  }
+  if (briefs.tech?.trim()) {
+    blocks.push(`Tech Brief:\n${briefs.tech.trim()}`);
+  }
+
+  return blocks.length ? blocks.join("\n\n") : "No concept swarm briefs available yet.";
+}
+
+function buildConceptSwarmSeedBriefs(spec: GameCreatorSpecPackage): ConceptSwarmBriefs {
+  const setup = spec.setupWizard;
+  return {
+    story: `Player fantasy: ${setup.genre} in a ${setup.artStyle} world with ${setup.narrativeDepth} narrative depth. The campaign escalates across ${setup.biomes} biomes toward ${setup.bosses} boss encounters with stakes tied to ${setup.coreLoopPriority}.`,
+    gameplay: `Core loop priority is ${setup.coreLoopPriority} with ${setup.perspective} readability. Controls profile is ${setup.controls}. Encounters must support ${setup.difficultyTarget} difficulty and at least ${setup.enemyFamilies} enemy families with distinct roles.`,
+    visuals: `Visual language anchors to ${setup.artStyle}. Scene composition should reinforce ${setup.perspective} clarity, telegraph enemy states, and preserve silhouette readability for all ${setup.enemyFamilies} families across ${setup.biomes} biomes.`,
+    tech: `Build target is ${setup.target} and scope tier is ${setup.scopeTier}. Production must prioritize deterministic tooling, asset pipelines for ${setup.biomes} biome sets, and scalable behavior trees for ${setup.enemyFamilies} families plus ${setup.bosses} bosses.`,
+  };
+}
+
+function buildConceptSwarmPrompt(spec: GameCreatorSpecPackage): string {
+  const setup = JSON.stringify(spec.setupWizard, null, 2);
+  return [
+    "Produce four concise but concrete game concept briefs from this setup.",
+    "Return markdown with exactly these H2 headings: ## Story Brief, ## Gameplay Brief, ## Visual Brief, ## Tech Brief.",
+    "Each section must be 120-220 words with actionable constraints, not vague prose.",
+    "Preserve setup constraints exactly (target, perspective, controls, scope tier, enemy families, biomes, bosses).",
+    "Setup:",
+    setup,
+  ].join("\n\n");
+}
+
+function parseConceptSwarmMarkdown(markdown: string, fallback: ConceptSwarmBriefs): ConceptSwarmBriefs {
+  const sections = extractSectionBodyMap(markdown);
+  const findSection = (aliases: string[]): string | undefined => {
+    const normalizedAliases = aliases.map(normalizeSectionKey);
+    const keys = Object.keys(sections);
+    for (const key of keys) {
+      if (normalizedAliases.includes(normalizeSectionKey(key))) {
+        return sections[key].trim();
+      }
+    }
+    return undefined;
+  };
+
+  return {
+    story: findSection(["Story Brief"]) || fallback.story,
+    gameplay: findSection(["Gameplay Brief"]) || fallback.gameplay,
+    visuals: findSection(["Visual Brief", "Visuals Brief"]) || fallback.visuals,
+    tech: findSection(["Tech Brief", "Technical Brief"]) || fallback.tech,
+  };
+}
+
+function autoReviseCanonDocContent(input: {
+  content: string;
+  fileName: string;
+  spec: GameCreatorSpecPackage;
+  scopeTier?: string;
+}): { content: string; quality: CanonDocQualityReport; revisionsApplied: string[] } {
+  let next = input.content;
+  const revisionsApplied: string[] = [];
+  let quality = evaluateCanonDocQuality(input.fileName, next, input.scopeTier);
+
+  for (const missingSection of quality.missingSections) {
+    revisionsApplied.push(`Added missing section: ${missingSection}`);
+    next = `${next.trim()}\n\n## ${missingSection}\n\n- Constraint: aligned with target ${input.spec.setupWizard.target}.\n- Implementation notes: define concrete behaviors, data contracts, and validation checks for this section.\n- QA checks: enumerate pass/fail criteria and telemetry hooks.`;
+  }
+
+  quality = evaluateCanonDocQuality(input.fileName, next, input.scopeTier);
+  if (quality.wordCount < quality.minWords) {
+    const deficit = quality.minWords - quality.wordCount;
+    revisionsApplied.push(`Expanded content for word-count deficit: +${deficit} words target`);
+    const filler = [
+      "",
+      "## Implementation Deep Dive",
+      "",
+      `This section expands execution-level details to meet the scope tier ${input.spec.setupWizard.scopeTier}.`,
+      "Define data ownership, failure modes, rollback behavior, and monitoring triggers for each subsystem.",
+      "Document tooling assumptions, validation scripts, and explicit acceptance tests for each milestone.",
+      "Include edge-case handling for low-content, high-load, and degraded runtime scenarios.",
+    ].join("\n");
+    next = `${next.trim()}\n${filler}`;
+  }
+
+  quality = evaluateCanonDocQuality(input.fileName, next, input.scopeTier);
+  return { content: next.trim(), quality, revisionsApplied };
 }
 
 function buildCanonDocTemplateFiles(spec: GameCreatorSpecPackage): CanonDocFile[] {
@@ -852,7 +1164,8 @@ async function generateCanonDocContent(input: {
   const variants: Array<{ harnessId: string; content: string }> = [];
   const warnings: string[] = [];
   const templates = buildCanonDocTemplateFiles(input.specPackage);
-  const profile = getCanonDocPromptProfile(input.file.fileName);
+  const profile = getScopedPromptProfile(input.file.fileName, input.specPackage.setupWizard.scopeTier);
+  const conceptSwarm = getGameCreatorConceptSwarm(input.state).briefs;
 
   for (const harness of harnesses) {
     try {
@@ -861,6 +1174,7 @@ async function generateCanonDocContent(input: {
         templates,
         fileName: input.file.fileName,
         title: input.file.title,
+        conceptSwarm,
       });
       const outline = await generateCanonDocWithHarness({
         harness,
@@ -875,6 +1189,7 @@ async function generateCanonDocContent(input: {
         fileName: input.file.fileName,
         title: input.file.title,
         outline,
+        conceptSwarm,
       });
       const harnessContent = await generateCanonDocWithHarness({
         harness,
@@ -883,7 +1198,7 @@ async function generateCanonDocContent(input: {
         prompt,
       });
       if (harnessContent.trim()) {
-        const quality = evaluateCanonDocQuality(input.file.fileName, harnessContent);
+        const quality = evaluateCanonDocQuality(input.file.fileName, harnessContent, input.specPackage.setupWizard.scopeTier);
         if (!quality.passed) {
           warnings.push(`Harness ${harness.id} draft for ${input.file.fileName} missed quality bar (${quality.wordCount}/${profile.minWords} words, missing: ${quality.missingSections.join(", ") || "none"}).`);
         }
@@ -894,8 +1209,17 @@ async function generateCanonDocContent(input: {
     }
   }
 
+  const merged = mergeCanonDocVariants(input.file.content, variants);
+  const revised = autoReviseCanonDocContent({
+    content: merged,
+    fileName: input.file.fileName,
+    spec: input.specPackage,
+    scopeTier: input.specPackage.setupWizard.scopeTier,
+  });
+  revised.revisionsApplied.forEach((entry) => warnings.push(`Auto-revision: ${entry}`));
+
   return {
-    content: mergeCanonDocVariants(input.file.content, variants),
+    content: revised.content,
     harnessesUsed: harnesses.map((entry) => ({ id: entry.id, name: entry.name })),
     warnings,
   };
@@ -907,6 +1231,7 @@ async function readCanonDocStatus(input: {
   records: Record<string, GameCreatorCanonDocRecord>;
   snapshots: GameCreatorCanonDocSnapshot[];
   includeContent?: boolean;
+  scopeTier?: string;
 }): Promise<Array<{
   fileName: string;
   title: string;
@@ -914,6 +1239,7 @@ async function readCanonDocStatus(input: {
   exists: boolean;
   content: string;
   quality: CanonDocQualityReport;
+  sectionStatuses: CanonDocSectionStatus[];
   record: GameCreatorCanonDocRecord;
   snapshots: GameCreatorCanonDocSnapshot[];
 }>> {
@@ -924,6 +1250,7 @@ async function readCanonDocStatus(input: {
     exists: boolean;
     content: string;
     quality: CanonDocQualityReport;
+    sectionStatuses: CanonDocSectionStatus[];
     record: GameCreatorCanonDocRecord;
     snapshots: GameCreatorCanonDocSnapshot[];
   }> = [];
@@ -932,8 +1259,9 @@ async function readCanonDocStatus(input: {
     const absolutePath = safeWorkspaceJoin(input.workspacePath, file.relativePath);
     const exists = await fileExists(absolutePath);
     const content = exists ? await fs.readFile(absolutePath, "utf-8") : "";
-    const quality = evaluateCanonDocQuality(file.fileName, content);
+    const quality = evaluateCanonDocQuality(file.fileName, content, input.scopeTier);
     const record = input.records[file.fileName] ?? createDefaultCanonDocRecord(file);
+    const sectionStatuses = buildSectionStatuses({ quality, sectionApprovals: record.sectionApprovals });
     const rowSnapshots = input.snapshots.filter((entry) => entry.fileName === file.fileName);
     rows.push({
       fileName: file.fileName,
@@ -942,6 +1270,7 @@ async function readCanonDocStatus(input: {
       exists,
       content: input.includeContent ? content : "",
       quality,
+      sectionStatuses,
       record,
       snapshots: rowSnapshots,
     });
@@ -973,6 +1302,7 @@ async function evaluateGate2Readiness(input: {
     records: store.records,
     snapshots: store.snapshots,
     includeContent: true,
+    scopeTier: spec.setupWizard.scopeTier,
   });
 
   const blockers: string[] = [];
@@ -997,6 +1327,13 @@ async function evaluateGate2Readiness(input: {
       blockers.push(`${entry.fileName} is not approved.`);
     }
 
+    const sectionBlockers = entry.sectionStatuses
+      .filter((section) => section.status !== "approved")
+      .map((section) => section.section);
+    if (sectionBlockers.length > 0) {
+      blockers.push(`${entry.fileName} has unapproved sections: ${sectionBlockers.join(", ")}.`);
+    }
+
     if (entry.record.locked) {
       lockedDocs += 1;
     } else if (input.requireLocked) {
@@ -1010,8 +1347,10 @@ async function evaluateGate2Readiness(input: {
       docsByFile[entry.fileName] = entry.content;
     }
   }
-  const contradictions = detectCanonDocContradictions({ spec, docsByFile });
-  contradictions.forEach((warning) => blockers.push(`Consistency check: ${warning}`));
+  const consistencyIssues = detectCanonDocConsistency({ spec, docsByFile });
+  consistencyIssues
+    .filter((issue) => issue.severity === "blocking")
+    .forEach((issue) => blockers.push(`Consistency check: ${issue.message}`));
 
   return {
     ready: blockers.length === 0,
@@ -1030,11 +1369,13 @@ function buildCanonDocOutlinePrompt(input: {
   templates: CanonDocFile[];
   fileName: string;
   title: string;
+  conceptSwarm?: Partial<ConceptSwarmBriefs>;
 }): string {
   const { spec, templates, fileName, title } = input;
-  const profile = getCanonDocPromptProfile(fileName);
+  const profile = getScopedPromptProfile(fileName, spec.setupWizard.scopeTier);
   const setup = JSON.stringify(spec.setupWizard, null, 2);
   const baseline = templates.find((entry) => entry.fileName === fileName)?.content ?? "";
+  const conceptContext = summarizeConceptSwarmForPrompt(input.conceptSwarm);
   return [
     `You are preparing a production-grade outline for canon document ${fileName} (${title}).`,
     "Return only markdown content. Do not wrap in code fences.",
@@ -1042,6 +1383,8 @@ function buildCanonDocOutlinePrompt(input: {
     `Required top-level sections: ${profile.requiredSections.join(", ")}.`,
     `The final expanded document must exceed ${profile.minWords} words, so design the outline for depth.`,
     `Emphasis: ${profile.emphasis.join(" ")}.`,
+    "Concept swarm briefs:",
+    conceptContext,
     "Project setup:",
     setup,
     "Baseline draft (improve and expand while preserving constraints):",
@@ -1055,12 +1398,14 @@ function buildCanonDocExpansionPrompt(input: {
   fileName: string;
   title: string;
   outline: string;
+  conceptSwarm?: Partial<ConceptSwarmBriefs>;
 }): string {
   const { spec, templates, fileName, title, outline } = input;
-  const profile = getCanonDocPromptProfile(fileName);
+  const profile = getScopedPromptProfile(fileName, spec.setupWizard.scopeTier);
   const setup = JSON.stringify(spec.setupWizard, null, 2);
   const baseline = templates.find((entry) => entry.fileName === fileName)?.content ?? "";
   const forbidden = profile.forbidden.length ? profile.forbidden.join(", ") : "none";
+  const conceptContext = summarizeConceptSwarmForPrompt(input.conceptSwarm);
   return [
     `Expand canon game-design document ${fileName} (${title}) into implementation-ready detail.`,
     "Return only markdown content. Do not wrap in code fences.",
@@ -1070,6 +1415,8 @@ function buildCanonDocExpansionPrompt(input: {
     `Avoid weak filler terms: ${forbidden}.`,
     `Emphasis: ${profile.emphasis.join(" ")}.`,
     "Include a final section named ## Validation Checklist with concrete pass/fail checks.",
+    "Concept swarm briefs:",
+    conceptContext,
     "Project setup:",
     setup,
     "Baseline draft:",
@@ -1495,7 +1842,7 @@ async function ensureWorkspaceAgentsScaffold(workspacePath: string): Promise<voi
 
 async function saveBufferToWorkspaceAssets(input: {
   workspaceId?: string;
-  category: "images" | "videos" | "voice" | "music" | "models";
+  category: "images" | "videos" | "voice" | "music" | "models" | "sprites";
   baseName: string;
   extension: string;
   bytes: Buffer;
@@ -2952,6 +3299,79 @@ app.post("/api/tools/game-creator/setup-wizard/reset", async (_req, res) => {
   res.json({ ok: true, draft, specPackage });
 });
 
+app.get("/api/tools/game-creator/concept-swarm", async (_req, res) => {
+  const state = await readSystemState();
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const conceptSwarm = getGameCreatorConceptSwarm(state);
+  const briefs = {
+    ...buildConceptSwarmSeedBriefs(specPackage),
+    ...(conceptSwarm.briefs ?? {}),
+  };
+  res.json({
+    ok: true,
+    generatedAt: conceptSwarm.generatedAt ?? null,
+    harnessId: conceptSwarm.harnessId ?? null,
+    briefs,
+    specPackage,
+  });
+});
+
+app.post("/api/tools/game-creator/concept-swarm/generate", async (req, res) => {
+  const body = req.body as { workspaceId?: string; harnessId?: string };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const seed = buildConceptSwarmSeedBriefs(specPackage);
+  let harnessId = "";
+  let briefs = seed;
+  const warnings: string[] = [];
+
+  const harnesses = await resolveHarnessesForDocGeneration({
+    strategy: "selected-harnesses",
+    state,
+    primaryHarnessId: body.harnessId,
+    preferredHarnessIds: draft.preferredDocHarnesses,
+  });
+  const harness = harnesses[0];
+
+  if (harness) {
+    try {
+      const prompt = buildConceptSwarmPrompt(specPackage);
+      const generated = await generateCanonDocWithHarness({
+        harness,
+        state,
+        workspace,
+        prompt,
+      });
+      briefs = parseConceptSwarmMarkdown(generated, seed);
+      harnessId = harness.id;
+    } catch (error) {
+      warnings.push(`Harness generation failed, using deterministic briefs: ${String(error)}`);
+    }
+  } else {
+    warnings.push("No online harness found for concept swarm. Using deterministic briefs.");
+  }
+
+  const generatedAt = new Date().toISOString();
+  writeGameCreatorConceptSwarm(state, {
+    generatedAt,
+    harnessId: harnessId || undefined,
+    briefs,
+  });
+  await writeSystemState(state);
+
+  return res.json({
+    ok: true,
+    generatedAt,
+    harnessId: harnessId || null,
+    briefs,
+    warnings,
+    specPackage,
+  });
+});
+
 app.post("/api/tools/game-creator/canon-docs/generate", async (req, res) => {
   const body = req.body as {
     workspaceId?: string;
@@ -3019,18 +3439,27 @@ app.post("/api/tools/game-creator/canon-docs/generate", async (req, res) => {
 
       const mergedContent = generated.content;
       const targetPath = safeWorkspaceJoin(workspace.path, file.relativePath);
+      const previousContent = await fileExists(targetPath) ? await fs.readFile(targetPath, "utf-8") : "";
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, mergedContent, "utf-8");
+      const diffSummary = summarizeMarkdownDiff(previousContent, mergedContent);
+      const requiredSections = getScopedPromptProfile(file.fileName, specPackage.setupWizard.scopeTier).requiredSections;
+      const sectionApprovals: Record<string, "pending"> = {};
+      for (const section of requiredSections) {
+        sectionApprovals[section] = "pending";
+      }
 
       records[file.fileName] = {
         ...existingRecord,
         fileName: file.fileName,
         relativePath: file.relativePath,
         reviewStatus: "pending",
+        sectionApprovals,
         updatedAt: new Date().toISOString(),
         lastGeneratedAt: new Date().toISOString(),
         lastGenerationStrategy: strategy,
         lastHarnessIds: generated.harnessesUsed.map((entry) => entry.id),
+        lastDiffSummary: diffSummary,
       };
 
       generatedFiles.push({ fileName: file.fileName, relativePath: file.relativePath });
@@ -3058,6 +3487,7 @@ app.post("/api/tools/game-creator/canon-docs/generate", async (req, res) => {
     files: templates,
     records,
     snapshots,
+    scopeTier: specPackage.setupWizard.scopeTier,
   });
 
   const statusWithContent = await readCanonDocStatus({
@@ -3066,6 +3496,7 @@ app.post("/api/tools/game-creator/canon-docs/generate", async (req, res) => {
     records,
     snapshots,
     includeContent: true,
+    scopeTier: specPackage.setupWizard.scopeTier,
   });
   const docsByFile: Record<string, string> = {};
   for (const entry of statusWithContent) {
@@ -3073,10 +3504,10 @@ app.post("/api/tools/game-creator/canon-docs/generate", async (req, res) => {
       docsByFile[entry.fileName] = entry.content;
     }
   }
-  const consistencyWarnings = detectCanonDocContradictions({ spec: specPackage, docsByFile });
-  consistencyWarnings.forEach((warning) => {
-    warnings.push(`Consistency check: ${warning}`);
-    pushGameCreatorGenerationEvent(progress, "warn", warning);
+  const consistencyIssues = detectCanonDocConsistency({ spec: specPackage, docsByFile });
+  consistencyIssues.forEach((issue) => {
+    warnings.push(`Consistency ${issue.severity}: ${issue.message}`);
+    pushGameCreatorGenerationEvent(progress, issue.severity === "blocking" ? "error" : "warn", issue.message);
   });
 
   res.json({
@@ -3105,6 +3536,7 @@ app.get("/api/tools/game-creator/canon-docs/status", async (req, res) => {
     files,
     records: canonStore.records,
     snapshots: canonStore.snapshots,
+    scopeTier: specPackage.setupWizard.scopeTier,
   });
 
   res.json({
@@ -3169,9 +3601,18 @@ app.post("/api/tools/game-creator/canon-docs/:fileName/decision", async (req, re
   const records = { ...store.records };
   const record = records[file.fileName] ?? createDefaultCanonDocRecord(file);
   const decision = pickEnumValue(body.decision, ["approved", "rejected", "pending"] as const, "pending");
+  const requiredSections = getScopedPromptProfile(file.fileName, specPackage.setupWizard.scopeTier).requiredSections;
+  const sectionApprovals = { ...(record.sectionApprovals ?? {}) };
+  if (decision === "approved" || decision === "rejected") {
+    for (const section of requiredSections) {
+      sectionApprovals[section] = decision;
+      sectionApprovals[normalizeSectionKey(section)] = decision;
+    }
+  }
   records[file.fileName] = {
     ...record,
     reviewStatus: decision,
+    sectionApprovals,
     reviewNote: typeof body.note === "string" ? body.note.trim().slice(0, 2000) : "",
     reviewedBy: typeof body.reviewedBy === "string" && body.reviewedBy.trim() ? body.reviewedBy.trim().slice(0, 120) : "user",
     reviewedAt: new Date().toISOString(),
@@ -3185,6 +3626,74 @@ app.post("/api/tools/game-creator/canon-docs/:fileName/decision", async (req, re
     files: buildCanonDocTemplateFiles(specPackage),
     records,
     snapshots: store.snapshots,
+    scopeTier: specPackage.setupWizard.scopeTier,
+  });
+  return res.json({ ok: true, status });
+});
+
+app.post("/api/tools/game-creator/canon-docs/:fileName/sections/:section/decision", async (req, res) => {
+  const body = req.body as {
+    workspaceId?: string;
+    decision?: "approved" | "rejected" | "pending";
+    note?: string;
+    reviewedBy?: string;
+  };
+
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const file = findTemplateCanonDoc(specPackage, req.params.fileName);
+  if (!file) {
+    return res.status(404).json({ error: "Unknown canon doc file." });
+  }
+
+  const requestedSection = decodeURIComponent(String(req.params.section ?? "")).trim();
+  const qualityProfile = getScopedPromptProfile(file.fileName, specPackage.setupWizard.scopeTier);
+  const allowedSection = qualityProfile.requiredSections.find((section) => normalizeSectionKey(section) === normalizeSectionKey(requestedSection));
+  if (!allowedSection) {
+    return res.status(404).json({ error: "Unknown required section." });
+  }
+
+  const store = getGameCreatorCanonDocsStore(state);
+  const records = { ...store.records };
+  const record = records[file.fileName] ?? createDefaultCanonDocRecord(file);
+  const decision = pickEnumValue(body.decision, ["approved", "rejected", "pending"] as const, "pending");
+  const sectionApprovals = { ...(record.sectionApprovals ?? {}) };
+  sectionApprovals[allowedSection] = decision;
+  sectionApprovals[normalizeSectionKey(allowedSection)] = decision;
+
+  const sectionStatuses = buildSectionStatuses({
+    quality: {
+      passed: true,
+      minWords: 0,
+      wordCount: 0,
+      requiredSections: qualityProfile.requiredSections,
+      presentSections: qualityProfile.requiredSections,
+      missingSections: [],
+    },
+    sectionApprovals,
+  });
+
+  records[file.fileName] = {
+    ...record,
+    sectionApprovals,
+    reviewStatus: deriveReviewStatusFromSections(sectionStatuses),
+    reviewNote: typeof body.note === "string" ? body.note.trim().slice(0, 2000) : record.reviewNote,
+    reviewedBy: typeof body.reviewedBy === "string" && body.reviewedBy.trim() ? body.reviewedBy.trim().slice(0, 120) : (record.reviewedBy ?? "user"),
+    reviewedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  writeGameCreatorCanonDocsStore(state, { records, snapshots: store.snapshots });
+  await writeSystemState(state);
+
+  const status = await readCanonDocStatus({
+    workspacePath: workspace.path,
+    files: buildCanonDocTemplateFiles(specPackage),
+    records,
+    snapshots: store.snapshots,
+    scopeTier: specPackage.setupWizard.scopeTier,
   });
   return res.json({ ok: true, status });
 });
@@ -3216,6 +3725,7 @@ app.post("/api/tools/game-creator/canon-docs/:fileName/lock", async (req, res) =
     files: buildCanonDocTemplateFiles(specPackage),
     records,
     snapshots: store.snapshots,
+    scopeTier: specPackage.setupWizard.scopeTier,
   });
   return res.json({ ok: true, status });
 });
@@ -3248,6 +3758,7 @@ app.post("/api/tools/game-creator/canon-docs/:fileName/snapshot", async (req, re
     files: buildCanonDocTemplateFiles(specPackage),
     records,
     snapshots,
+    scopeTier: specPackage.setupWizard.scopeTier,
   });
   return res.json({ ok: true, snapshot: snapshot.snapshot, status });
 });
@@ -3292,18 +3803,27 @@ app.post("/api/tools/game-creator/canon-docs/:fileName/regenerate", async (req, 
   });
 
   const targetPath = safeWorkspaceJoin(workspace.path, file.relativePath);
+  const previousContent = await fileExists(targetPath) ? await fs.readFile(targetPath, "utf-8") : "";
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   await fs.writeFile(targetPath, generated.content, "utf-8");
+  const diffSummary = summarizeMarkdownDiff(previousContent, generated.content);
+  const requiredSections = getScopedPromptProfile(file.fileName, specPackage.setupWizard.scopeTier).requiredSections;
+  const sectionApprovals: Record<string, "pending"> = {};
+  for (const section of requiredSections) {
+    sectionApprovals[section] = "pending";
+  }
 
   records[file.fileName] = {
     ...existingRecord,
     fileName: file.fileName,
     relativePath: file.relativePath,
     reviewStatus: "pending",
+    sectionApprovals,
     updatedAt: new Date().toISOString(),
     lastGeneratedAt: new Date().toISOString(),
     lastGenerationStrategy: strategy,
     lastHarnessIds: generated.harnessesUsed.map((entry) => entry.id),
+    lastDiffSummary: diffSummary,
   };
 
   writeGameCreatorCanonDocsStore(state, { records, snapshots });
@@ -3314,6 +3834,7 @@ app.post("/api/tools/game-creator/canon-docs/:fileName/regenerate", async (req, 
     files: buildCanonDocTemplateFiles(specPackage),
     records,
     snapshots,
+    scopeTier: specPackage.setupWizard.scopeTier,
   });
   return res.json({
     ok: true,
@@ -3414,6 +3935,7 @@ app.post("/api/tools/game-creator/queue/build", async (req, res) => {
     files,
     records: store.records,
     snapshots: store.snapshots,
+    scopeTier: spec.setupWizard.scopeTier,
   });
   const readiness = await evaluateGate2Readiness({
     state,
@@ -3422,6 +3944,10 @@ app.post("/api/tools/game-creator/queue/build", async (req, res) => {
   });
   const items = buildGameCreatorExecutionQueueFromStatus(status);
   const builtAt = new Date().toISOString();
+  const changedDocs = Object.values(store.records)
+    .filter((record) => record.lastDiffSummary?.changed)
+    .map((record) => record.fileName);
+  const impactedItems = items.filter((entry) => changedDocs.includes(entry.sourceDocFile));
   writeGameCreatorExecutionQueueStore(state, { builtAt, items });
   await writeSystemState(state);
 
@@ -3431,6 +3957,10 @@ app.post("/api/tools/game-creator/queue/build", async (req, res) => {
     builtAt,
     readyForExecution: readiness.ready,
     blockers: readiness.blockers,
+    impactSummary: {
+      changedDocs,
+      impactedQueueItems: impactedItems.length,
+    },
     items,
     summary: {
       total: items.length,
@@ -3487,6 +4017,112 @@ app.post("/api/tools/game-creator/queue/:itemId/status", async (req, res) => {
     items,
     summary,
   });
+});
+
+app.get("/api/tools/game-creator/sprites/stream", async (req, res) => {
+  const prompt = String(req.query.prompt ?? "").trim();
+  const model = String(req.query.model ?? "dreamshaper-8").trim();
+  const negativePrompt = String(req.query.negativePrompt ?? "blurry, text watermark, signature, background clutter").trim();
+  const frameWidth = Number(req.query.frameWidth ?? 128);
+  const frameHeight = Number(req.query.frameHeight ?? 128);
+  const frames = Number(req.query.frames ?? 6);
+  const steps = Number(req.query.steps ?? 24);
+  const guidanceScale = Number(req.query.guidanceScale ?? 7.5);
+  const seed = Number(req.query.seed ?? Date.now() % 2147483647);
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+
+  if (!prompt) {
+    return res.status(400).json({ error: "prompt is required" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const send = (payload: unknown) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const controller = new AbortController();
+  const onClientDisconnect = () => {
+    controller.abort();
+  };
+  req.on("close", onClientDisconnect);
+
+  try {
+    const state = await readSystemState();
+    const workspace = await resolveWorkspaceContext(state, workspaceId ?? state.activeWorkspaceId);
+    const sheetWidth = Math.max(128, Math.min(768, Math.round(frameWidth) * Math.max(1, Math.min(8, Math.round(frames)))));
+    const sheetHeight = Math.max(128, Math.min(768, Math.round(frameHeight)));
+    send({ type: "status", message: "Generating sprite sheet image..." });
+
+    const generated = await generateLocalImageStreaming(
+      {
+        model,
+        prompt: `${prompt}, sprite sheet, transparent background, evenly spaced animation frames`,
+        negativePrompt,
+        width: sheetWidth,
+        height: sheetHeight,
+        steps,
+        guidanceScale,
+        seed,
+      },
+      (message) => send({ type: "status", message }),
+      controller.signal,
+    );
+
+    send({ type: "status", message: "Saving sprite sheet into workspace assets..." });
+    const bytes = await fs.readFile(generated.outputPath);
+    const saved = await saveBufferToWorkspaceAssets({
+      workspaceId,
+      category: "sprites",
+      baseName: "sprite-sheet",
+      extension: "png",
+      bytes,
+    });
+
+    const descriptor = {
+      image: saved.relativePath,
+      frameWidth: Math.max(32, Math.round(frameWidth)),
+      frameHeight: Math.max(32, Math.round(frameHeight)),
+      frames: Math.max(1, Math.min(32, Math.round(frames))),
+      generatedAt: new Date().toISOString(),
+      prompt,
+      model: generated.model,
+      seed: generated.seed,
+    };
+    const descriptorPath = safeWorkspaceJoin(
+      workspace.path,
+      `Assets/sprites/${path.basename(saved.relativePath, ".png")}.json`,
+    );
+    await fs.mkdir(path.dirname(descriptorPath), { recursive: true });
+    await fs.writeFile(descriptorPath, JSON.stringify(descriptor, null, 2), "utf-8");
+
+    send({
+      type: "done",
+      result: {
+        imageUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(saved.workspaceId)}&relativePath=${encodeURIComponent(saved.relativePath)}`,
+        relativePath: saved.relativePath,
+        descriptorRelativePath: `Assets/sprites/${path.basename(saved.relativePath, ".png")}.json`,
+        workspaceId: saved.workspaceId,
+        prompt,
+        frameWidth: descriptor.frameWidth,
+        frameHeight: descriptor.frameHeight,
+        frames: descriptor.frames,
+        model: generated.model,
+        seed: generated.seed,
+      },
+    });
+    return res.end();
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      send({ type: "error", message: String(error) });
+    }
+    return res.end();
+  } finally {
+    req.off("close", onClientDisconnect);
+  }
 });
 
 app.get("/api/tools/runtimes/status", async (_req, res) => {
