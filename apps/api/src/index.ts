@@ -565,6 +565,120 @@ const GAME_CREATOR_CANON_DOC_VERSION_ROOT = "docs/game-creator/.versions";
 const gameCreatorGenerationProgressByWorkspace = new Map<string, GameCreatorGenerationProgress>();
 const gameCreatorExecutionRunnerByWorkspace = new Map<string, GameCreatorExecutionRunnerControl>();
 
+type UnityCliStatus = {
+  selectedPath: string | null;
+  candidates: string[];
+  available: boolean;
+};
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter((value) => Boolean(value && value.trim()))));
+}
+
+function getUnityCliCandidates(): string[] {
+  const envCandidate = process.env.UNITY_EDITOR_PATH?.trim() ?? "";
+  const commonRoots = [
+    "C:/Program Files/Unity/Hub/Editor",
+    "C:/Program Files/Unity",
+  ];
+
+  const guessedExecutables = [
+    "C:/Program Files/Unity/Hub/Editor/2023.2.20f1/Editor/Unity.exe",
+    "C:/Program Files/Unity/Hub/Editor/2022.3.44f1/Editor/Unity.exe",
+    "C:/Program Files/Unity/Hub/Editor/2021.3.43f1/Editor/Unity.exe",
+  ];
+
+  return uniqueStrings([
+    envCandidate,
+    ...commonRoots,
+    ...guessedExecutables,
+  ]);
+}
+
+async function detectUnityCliStatus(): Promise<UnityCliStatus> {
+  const candidates = getUnityCliCandidates();
+  const resolvedExecutables: string[] = [];
+
+  for (const candidate of candidates) {
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isFile() && /unity\.exe$/i.test(candidate)) {
+        resolvedExecutables.push(candidate.replace(/\\/g, "/"));
+        continue;
+      }
+      if (stat.isDirectory()) {
+        const children = await fs.readdir(candidate, { withFileTypes: true });
+        for (const child of children) {
+          if (!child.isDirectory()) {
+            continue;
+          }
+          const editorExe = path.join(candidate, child.name, "Editor", "Unity.exe");
+          try {
+            const editorStat = await fs.stat(editorExe);
+            if (editorStat.isFile()) {
+              resolvedExecutables.push(editorExe.replace(/\\/g, "/"));
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  const unique = uniqueStrings(resolvedExecutables);
+  const selectedPath = unique[0] ?? null;
+  return {
+    selectedPath,
+    candidates: unique,
+    available: Boolean(selectedPath),
+  };
+}
+
+async function runUnityBatchMethod(input: {
+  unityPath: string;
+  projectPath: string;
+  method: string;
+  logPath: string;
+  extraArgs?: string[];
+}): Promise<{ ok: boolean; stdout: string; stderr: string; command: string[] }> {
+  const args = [
+    "-batchmode",
+    "-quit",
+    "-nographics",
+    "-projectPath",
+    input.projectPath,
+    "-logFile",
+    input.logPath,
+    "-executeMethod",
+    input.method,
+    ...(input.extraArgs ?? []),
+  ];
+
+  try {
+    const result = await execFileAsync(input.unityPath, args, {
+      windowsHide: true,
+      maxBuffer: 1024 * 1024 * 8,
+    });
+    return {
+      ok: true,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      command: [input.unityPath, ...args],
+    };
+  } catch (error) {
+    const stderr = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      stdout: "",
+      stderr,
+      command: [input.unityPath, ...args],
+    };
+  }
+}
+
 const CANON_DOC_PROMPT_PROFILES: Record<string, CanonDocPromptProfile> = {
   "GAME_BIBLE.md": {
     requiredSections: ["Vision Statement", "Player Fantasy", "Core Loop", "Target Audience", "Success Criteria", "Progression Milestones", "Risk Assumptions"],
@@ -1681,6 +1795,205 @@ function buildGameCreatorScaffoldFiles(input: {
   } else {
     files.push(
       {
+        relativePath: `${root}/unity/ProjectSettings/NexusGameSpec.json`,
+        content: JSON.stringify({
+          generatedAt: stamp,
+          target: setup.target,
+          genre: setup.genre,
+          perspective: setup.perspective,
+          scopeTier: setup.scopeTier,
+          controls: setup.controls,
+          coreLoopPriority: setup.coreLoopPriority,
+          difficultyTarget: setup.difficultyTarget,
+          contentBaseline: {
+            enemyFamilies: setup.enemyFamilies,
+            biomes: setup.biomes,
+            bosses: setup.bosses,
+          },
+        }, null, 2),
+      },
+      {
+        relativePath: `${root}/unity/Assets/NexusGenerated/Contracts/scene.contract.json`,
+        content: JSON.stringify({
+          sceneName: "VerticalSlice",
+          camera: {
+            mode: setup.perspective,
+            fov: setup.target === "unity-3d" ? 60 : 40,
+          },
+          player: {
+            movement: setup.controls,
+            speed: 4.5,
+            maxHealth: 10,
+          },
+          enemies: {
+            families: setup.enemyFamilies,
+            spawnBudget: setup.enemyFamilies * 8,
+          },
+        }, null, 2),
+      },
+      {
+        relativePath: `${root}/unity/Assets/NexusGenerated/Contracts/prefabs.contract.json`,
+        content: JSON.stringify({
+          requiredPrefabs: ["Player", "EnemyArchetype", "LootPickup", "SpawnPoint"],
+          namingConvention: "PascalCase",
+          componentRules: {
+            Player: ["PlayerState", "CombatSystem", "InventorySystem"],
+            EnemyArchetype: ["EnemyDirector"],
+          },
+        }, null, 2),
+      },
+      {
+        relativePath: `${root}/unity/Assets/NexusGenerated/Contracts/input.contract.json`,
+        content: JSON.stringify({
+          schemaVersion: 1,
+          controlMode: setup.controls,
+          actions: [
+            { name: "Move", type: "Vector2", bindings: ["WASD", "LeftStick"] },
+            { name: "Primary", type: "Button", bindings: ["Mouse0", "RightTrigger"] },
+            { name: "Secondary", type: "Button", bindings: ["Mouse1", "LeftTrigger"] },
+            { name: "Interact", type: "Button", bindings: ["E", "SouthButton"] },
+            { name: "Pause", type: "Button", bindings: ["Escape", "StartButton"] },
+          ],
+        }, null, 2),
+      },
+      {
+        relativePath: `${root}/unity/Assets/NexusGenerated/Contracts/build.contract.json`,
+        content: JSON.stringify({
+          schemaVersion: 1,
+          scenes: ["Assets/Scenes/VerticalSlice.unity"],
+          target: "StandaloneWindows64",
+          qualityGate: {
+            maxWarnings: 50,
+            maxFrameMs: 16.7,
+          },
+        }, null, 2),
+      },
+      {
+        relativePath: `${root}/unity/Assets/Editor/NexusGenerated/ProjectAutomation.cs`,
+        content: [
+          "using System;",
+          "using System.IO;",
+          "using UnityEditor;",
+          "using UnityEditor.SceneManagement;",
+          "using UnityEngine;",
+          "using UnityEngine.SceneManagement;",
+          "",
+          "namespace NexusGenerated",
+          "{",
+          "    [Serializable]",
+          "    public class NexusSpec",
+          "    {",
+          "        public string target = \"unity-3d\";",
+          "        public string genre = \"action-adventure\";",
+          "        public string perspective = \"third-person\";",
+          "    }",
+          "",
+          "    public static class ProjectAutomation",
+          "    {",
+          "        private static string ProjectRoot => Directory.GetParent(Application.dataPath)?.FullName ?? string.Empty;",
+          "        private static string SpecPath => Path.Combine(ProjectRoot, \"ProjectSettings\", \"NexusGameSpec.json\");",
+          "",
+          "        [MenuItem(\"Nexus/Generate From Spec\")]",
+          "        public static void GenerateFromSpec()",
+          "        {",
+          "            EnsureFolders();",
+          "            var spec = LoadSpec();",
+          "            GenerateScene(spec);",
+          "            AssetDatabase.SaveAssets();",
+          "            AssetDatabase.Refresh();",
+          "            Debug.Log(\"[NexusGenerated] GenerateFromSpec complete.\");",
+          "        }",
+          "",
+          "        [MenuItem(\"Nexus/Build Vertical Slice\")]",
+          "        public static void BuildVerticalSlice()",
+          "        {",
+          "            GenerateFromSpec();",
+          "            var buildOutput = Path.Combine(ProjectRoot, \"Builds\", \"NexusVerticalSlice.exe\");",
+          "            Directory.CreateDirectory(Path.GetDirectoryName(buildOutput) ?? ProjectRoot);",
+          "",
+          "            var options = new BuildPlayerOptions",
+          "            {",
+          "                scenes = new[] { \"Assets/Scenes/VerticalSlice.unity\" },",
+          "                locationPathName = buildOutput,",
+          "                target = BuildTarget.StandaloneWindows64,",
+          "                options = BuildOptions.StrictMode,",
+          "            };",
+          "",
+          "            var report = BuildPipeline.BuildPlayer(options);",
+          "            if (report.summary.result != UnityEditor.Build.Reporting.BuildResult.Succeeded)",
+          "            {",
+          "                throw new Exception(\"BuildVerticalSlice failed.\");",
+          "            }",
+          "            Debug.Log($\"[NexusGenerated] Build complete: {buildOutput}\");",
+          "        }",
+          "",
+          "        [MenuItem(\"Nexus/Run Determinism Smoke\")]",
+          "        public static void RunDeterminismSmoke()",
+          "        {",
+          "            if (!CoreLoopController.SmokeDeterminismCheck())",
+          "            {",
+          "                throw new Exception(\"Determinism smoke check failed.\");",
+          "            }",
+          "            Debug.Log(\"[NexusGenerated] Determinism smoke check passed.\");",
+          "        }",
+          "",
+          "        private static NexusSpec LoadSpec()",
+          "        {",
+          "            if (!File.Exists(SpecPath))",
+          "            {",
+          "                return new NexusSpec();",
+          "            }",
+          "            var json = File.ReadAllText(SpecPath);",
+          "            return JsonUtility.FromJson<NexusSpec>(json) ?? new NexusSpec();",
+          "        }",
+          "",
+          "        private static void EnsureFolders()",
+          "        {",
+          "            Directory.CreateDirectory(Path.Combine(ProjectRoot, \"Assets\", \"Scenes\"));",
+          "            Directory.CreateDirectory(Path.Combine(ProjectRoot, \"Assets\", \"Scripts\", \"Runtime\"));",
+          "            Directory.CreateDirectory(Path.Combine(ProjectRoot, \"Assets\", \"StreamingAssets\"));",
+          "        }",
+          "",
+          "        private static void GenerateScene(NexusSpec spec)",
+          "        {",
+          "            var scene = EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);",
+          "            scene.name = \"VerticalSlice\";",
+          "",
+          "            var bootstrap = new GameObject(\"NexusGameBootstrap\");",
+          "            bootstrap.AddComponent<CoreLoopController>();",
+          "            bootstrap.AddComponent<PlayerState>();",
+          "            bootstrap.AddComponent<CombatSystem>();",
+          "            bootstrap.AddComponent<InventorySystem>();",
+          "            bootstrap.AddComponent<QuestSystem>();",
+          "            bootstrap.AddComponent<EnemyDirector>();",
+          "            bootstrap.AddComponent<SaveSystem>();",
+          "",
+          "            var camera = Camera.main;",
+          "            if (camera != null)",
+          "            {",
+          "                if (string.Equals(spec.target, \"unity-2d\", StringComparison.OrdinalIgnoreCase))",
+          "                {",
+          "                    camera.orthographic = true;",
+          "                    camera.orthographicSize = 7f;",
+          "                    camera.transform.position = new Vector3(0f, 0f, -10f);",
+          "                }",
+          "                else",
+          "                {",
+          "                    camera.orthographic = false;",
+          "                    camera.fieldOfView = 60f;",
+          "                    camera.transform.position = new Vector3(0f, 8f, -10f);",
+          "                    camera.transform.rotation = Quaternion.Euler(28f, 0f, 0f);",
+          "                }",
+          "            }",
+          "",
+          "            var scenePath = \"Assets/Scenes/VerticalSlice.unity\";",
+          "            EditorSceneManager.SaveScene(scene, scenePath);",
+          "        }",
+          "    }",
+          "}",
+        ].join("\n"),
+      },
+      {
         relativePath: `${root}/unity/Assets/Scripts/GameBootstrap.cs`,
         content: [
           "using UnityEngine;",
@@ -1714,15 +2027,351 @@ function buildGameCreatorScaffoldFiles(input: {
         ].join("\n"),
       },
       {
+        relativePath: `${root}/unity/Assets/Scripts/Runtime/CoreLoopController.cs`,
+        content: [
+          "using UnityEngine;",
+          "",
+          "public class CoreLoopController : MonoBehaviour",
+          "{",
+          "    [SerializeField] private int deterministicSeed = 1337;",
+          "    [SerializeField] private float fixedTickRate = 60f;",
+          "    private float accumulator;",
+          "    private float fixedDelta;",
+          "",
+          "    private PlayerState playerState;",
+          "    private EnemyDirector enemyDirector;",
+          "    private CombatSystem combatSystem;",
+          "    private QuestSystem questSystem;",
+          "",
+          "    private void Awake()",
+          "    {",
+          "        fixedDelta = 1f / Mathf.Max(1f, fixedTickRate);",
+          "        playerState = GetComponent<PlayerState>();",
+          "        enemyDirector = GetComponent<EnemyDirector>();",
+          "        combatSystem = GetComponent<CombatSystem>();",
+          "        questSystem = GetComponent<QuestSystem>();",
+          "        enemyDirector.Initialize(deterministicSeed);",
+          "        playerState.Initialize();",
+          "    }",
+          "",
+          "    private void Update()",
+          "    {",
+          "        accumulator += Time.deltaTime;",
+          "        while (accumulator >= fixedDelta)",
+          "        {",
+          "            Tick(fixedDelta);",
+          "            accumulator -= fixedDelta;",
+          "        }",
+          "    }",
+          "",
+          "    private void Tick(float dt)",
+          "    {",
+          "        enemyDirector.Tick(dt, playerState);",
+          "        combatSystem.Tick(dt, playerState, enemyDirector);",
+          "        questSystem.Tick(playerState, enemyDirector);",
+          "    }",
+          "",
+          "    public static bool SmokeDeterminismCheck()",
+          "    {",
+          "        var simA = DeterministicSim(1337, 720);",
+          "        var simB = DeterministicSim(1337, 720);",
+          "        return simA.hp == simB.hp && simA.score == simB.score && simA.enemyCount == simB.enemyCount && simA.score >= 3;",
+          "    }",
+          "",
+          "    private static (int hp, int score, int enemyCount) DeterministicSim(int seed, int ticks)",
+          "    {",
+          "        uint state = (uint)seed;",
+          "        int hp = 10;",
+          "        int score = 0;",
+          "        int enemies = 0;",
+          "        for (int i = 0; i < ticks; i++)",
+          "        {",
+          "            if (i % 120 == 0) enemies++;",
+          "            state = 1664525u * state + 1013904223u;",
+          "            if (enemies > 0 && (state % 1000u) > 980u) { enemies--; score += 3; }",
+          "            state = 1664525u * state + 1013904223u;",
+          "            if (enemies > 0 && (state % 1000u) > 995u) hp -= 1;",
+          "            if (hp <= 0) return (0, score, enemies);",
+          "        }",
+          "        return (hp, score, enemies);",
+          "    }",
+          "}",
+        ].join("\n"),
+      },
+      {
+        relativePath: `${root}/unity/Assets/Scripts/Runtime/PlayerState.cs`,
+        content: [
+          "using UnityEngine;",
+          "",
+          "public class PlayerState : MonoBehaviour",
+          "{",
+          "    public int MaxHp { get; private set; } = 10;",
+          "    public int Hp { get; private set; }",
+          "    public int Score { get; private set; }",
+          "    public int Level { get; private set; } = 1;",
+          "",
+          "    public void Initialize()",
+          "    {",
+          "        Hp = MaxHp;",
+          "        Score = 0;",
+          "        Level = 1;",
+          "    }",
+          "",
+          "    public void AddScore(int delta)",
+          "    {",
+          "        Score += Mathf.Max(0, delta);",
+          "        if (Score > Level * 20)",
+          "        {",
+          "            Level += 1;",
+          "            MaxHp += 1;",
+          "            Hp = Mathf.Min(MaxHp, Hp + 1);",
+          "        }",
+          "    }",
+          "",
+          "    public void ApplyDamage(int amount)",
+          "    {",
+          "        Hp = Mathf.Max(0, Hp - Mathf.Max(0, amount));",
+          "    }",
+          "}",
+        ].join("\n"),
+      },
+      {
+        relativePath: `${root}/unity/Assets/Scripts/Runtime/EnemyDirector.cs`,
+        content: [
+          "using UnityEngine;",
+          "",
+          "public class EnemyDirector : MonoBehaviour",
+          "{",
+          "    [SerializeField] private int maxActiveEnemies = 12;",
+          "    [SerializeField] private float spawnInterval = 2.2f;",
+          "    [SerializeField] private int damagePerContact = 1;",
+          "",
+          "    private float spawnTimer;",
+          "    private int activeEnemies;",
+          "    private uint rngState;",
+          "",
+          "    public int ActiveEnemies => activeEnemies;",
+          "    public int DamagePerContact => damagePerContact;",
+          "",
+          "    public void Initialize(int seed)",
+          "    {",
+          "        spawnTimer = 0f;",
+          "        activeEnemies = 0;",
+          "        rngState = (uint)seed;",
+          "    }",
+          "",
+          "    public void Tick(float dt, PlayerState player)",
+          "    {",
+          "        spawnTimer += dt;",
+          "        if (spawnTimer >= spawnInterval && activeEnemies < maxActiveEnemies)",
+          "        {",
+          "            spawnTimer = 0f;",
+          "            activeEnemies += 1;",
+          "        }",
+          "",
+          "        if (activeEnemies > 0 && Roll(0.03f))",
+          "        {",
+          "            activeEnemies -= 1;",
+          "            player.AddScore(2);",
+          "        }",
+          "    }",
+          "",
+          "    public bool Roll(float chance)",
+          "    {",
+          "        rngState = 1664525u * rngState + 1013904223u;",
+          "        float value = (rngState % 100000u) / 100000f;",
+          "        return value < Mathf.Clamp01(chance);",
+          "    }",
+          "",
+          "    public void RegisterContactDamage(PlayerState player)",
+          "    {",
+          "        if (activeEnemies <= 0)",
+          "        {",
+          "            return;",
+          "        }",
+          "        if (Roll(0.015f))",
+          "        {",
+          "            player.ApplyDamage(damagePerContact);",
+          "        }",
+          "    }",
+          "}",
+        ].join("\n"),
+      },
+      {
+        relativePath: `${root}/unity/Assets/Scripts/Runtime/CombatSystem.cs`,
+        content: [
+          "using UnityEngine;",
+          "",
+          "public class CombatSystem : MonoBehaviour",
+          "{",
+          "    [SerializeField] private float contactCheckInterval = 0.5f;",
+          "    private float contactTimer;",
+          "",
+          "    public void Tick(float dt, PlayerState player, EnemyDirector enemies)",
+          "    {",
+          "        contactTimer += dt;",
+          "        if (contactTimer < contactCheckInterval)",
+          "        {",
+          "            return;",
+          "        }",
+          "        contactTimer = 0f;",
+          "        enemies.RegisterContactDamage(player);",
+          "    }",
+          "}",
+        ].join("\n"),
+      },
+      {
+        relativePath: `${root}/unity/Assets/Scripts/Runtime/InventorySystem.cs`,
+        content: [
+          "using System.Collections.Generic;",
+          "using UnityEngine;",
+          "",
+          "public class InventorySystem : MonoBehaviour",
+          "{",
+          "    private readonly Dictionary<string, int> itemCounts = new Dictionary<string, int>();",
+          "",
+          "    public int GetCount(string id)",
+          "    {",
+          "        if (itemCounts.TryGetValue(id, out var count))",
+          "        {",
+          "            return count;",
+          "        }",
+          "        return 0;",
+          "    }",
+          "",
+          "    public void Add(string id, int amount)",
+          "    {",
+          "        if (!itemCounts.ContainsKey(id))",
+          "        {",
+          "            itemCounts[id] = 0;",
+          "        }",
+          "        itemCounts[id] += Mathf.Max(0, amount);",
+          "    }",
+          "",
+          "    public bool Spend(string id, int amount)",
+          "    {",
+          "        var current = GetCount(id);",
+          "        if (current < amount)",
+          "        {",
+          "            return false;",
+          "        }",
+          "        itemCounts[id] = current - Mathf.Max(0, amount);",
+          "        return true;",
+          "    }",
+          "}",
+        ].join("\n"),
+      },
+      {
+        relativePath: `${root}/unity/Assets/Scripts/Runtime/QuestSystem.cs`,
+        content: [
+          "using UnityEngine;",
+          "",
+          "public class QuestSystem : MonoBehaviour",
+          "{",
+          "    [SerializeField] private int scoreObjective = 30;",
+          "    private bool completed;",
+          "",
+          "    public bool Completed => completed;",
+          "",
+          "    public void Tick(PlayerState player, EnemyDirector enemies)",
+          "    {",
+          "        if (completed)",
+          "        {",
+          "            return;",
+          "        }",
+          "        if (player.Score >= scoreObjective && enemies.ActiveEnemies <= 4)",
+          "        {",
+          "            completed = true;",
+          "            Debug.Log(\"Quest objective complete.\");",
+          "        }",
+          "    }",
+          "}",
+        ].join("\n"),
+      },
+      {
+        relativePath: `${root}/unity/Assets/Scripts/Runtime/SaveSystem.cs`,
+        content: [
+          "using System;",
+          "using System.IO;",
+          "using UnityEngine;",
+          "",
+          "[Serializable]",
+          "public class RuntimeSnapshot",
+          "{",
+          "    public int hp;",
+          "    public int score;",
+          "    public int level;",
+          "    public string savedAt = string.Empty;",
+          "}",
+          "",
+          "public class SaveSystem : MonoBehaviour",
+          "{",
+          "    [SerializeField] private string fileName = \"nexus-save.json\";",
+          "    private PlayerState player;",
+          "",
+          "    private void Awake()",
+          "    {",
+          "        player = GetComponent<PlayerState>();",
+          "    }",
+          "",
+          "    public void Save()",
+          "    {",
+          "        if (player == null)",
+          "        {",
+          "            return;",
+          "        }",
+          "        var snapshot = new RuntimeSnapshot",
+          "        {",
+          "            hp = player.Hp,",
+          "            score = player.Score,",
+          "            level = player.Level,",
+          "            savedAt = DateTime.UtcNow.ToString(\"O\"),",
+          "        };",
+          "        var output = JsonUtility.ToJson(snapshot, true);",
+          "        File.WriteAllText(Path.Combine(Application.persistentDataPath, fileName), output);",
+          "    }",
+          "}",
+        ].join("\n"),
+      },
+      {
+        relativePath: `${root}/unity/Assets/StreamingAssets/NexusGameplayConfig.json`,
+        content: JSON.stringify({
+          schemaVersion: 1,
+          deterministicSeed: 1337,
+          simulationHz: 60,
+          tuning: {
+            playerSpeed: 4.5,
+            enemySpawnInterval: 2.2,
+            maxEnemies: 12,
+          },
+          systems: [
+            "CoreLoopController",
+            "CombatSystem",
+            "EnemyDirector",
+            "InventorySystem",
+            "QuestSystem",
+            "SaveSystem",
+          ],
+        }, null, 2),
+      },
+      {
         relativePath: `${root}/unity/README.md`,
         content: [
-          "# Unity Starter Scaffold",
+          "# Unity Generated Vertical Slice",
           "",
           `Target: ${setup.target}`,
           `Perspective: ${setup.perspective}`,
           `Controls: ${setup.controls}`,
           "",
-          "Import this folder into your Unity project and attach scripts to starter scene objects.",
+          "## CLI Setup",
+          "- Set UNITY_EDITOR_PATH to Unity.exe or place Unity Hub editors under C:/Program Files/Unity/Hub/Editor.",
+          "",
+          "## Generated Automation",
+          "- Unity Editor method: NexusGenerated.ProjectAutomation.GenerateFromSpec",
+          "- Unity Editor method: NexusGenerated.ProjectAutomation.RunDeterminismSmoke",
+          "- Unity Editor method: NexusGenerated.ProjectAutomation.BuildVerticalSlice",
+          "",
+          "Run from API endpoints or manually through Unity batch mode to generate and build.",
         ].join("\n"),
       },
     );
@@ -1897,6 +2546,55 @@ async function executeGameCreatorQueueItem(input: {
       kind: "code",
       relativePath: reportRelativePath,
     });
+  }
+
+  if (!input.item.regenerateArtifact && input.spec.setupWizard.target !== "web-2d" && (input.item.lane === "engineering" || input.item.lane === "qa")) {
+    const unityStatus = await detectUnityCliStatus();
+    if (!unityStatus.available || !unityStatus.selectedPath) {
+      warnings.push("Unity CLI not found. Skipped Unity scene generation/build smoke. Set UNITY_EDITOR_PATH to enable full Unity automation.");
+    } else {
+      const unityRoot = safeWorkspaceJoin(input.workspacePath, "GameBuild/unity");
+      const logDir = safeWorkspaceJoin(input.workspacePath, "GameBuild/unity/Logs");
+      await fs.mkdir(logDir, { recursive: true });
+
+      const runGenerate = await runUnityBatchMethod({
+        unityPath: unityStatus.selectedPath,
+        projectPath: unityRoot,
+        method: "NexusGenerated.ProjectAutomation.GenerateFromSpec",
+        logPath: safeWorkspaceJoin(input.workspacePath, "GameBuild/unity/Logs/generate.log"),
+      });
+      outputs.push("GameBuild/unity/Logs/generate.log");
+      createArtifact({ kind: "code", relativePath: "GameBuild/unity/Logs/generate.log" });
+      if (!runGenerate.ok) {
+        warnings.push(`Unity GenerateFromSpec failed: ${runGenerate.stderr}`);
+      }
+
+      if (input.item.lane === "qa") {
+        const runSmoke = await runUnityBatchMethod({
+          unityPath: unityStatus.selectedPath,
+          projectPath: unityRoot,
+          method: "NexusGenerated.ProjectAutomation.RunDeterminismSmoke",
+          logPath: safeWorkspaceJoin(input.workspacePath, "GameBuild/unity/Logs/smoke.log"),
+        });
+        outputs.push("GameBuild/unity/Logs/smoke.log");
+        createArtifact({ kind: "code", relativePath: "GameBuild/unity/Logs/smoke.log" });
+        if (!runSmoke.ok) {
+          warnings.push(`Unity determinism smoke failed: ${runSmoke.stderr}`);
+        }
+
+        const runBuild = await runUnityBatchMethod({
+          unityPath: unityStatus.selectedPath,
+          projectPath: unityRoot,
+          method: "NexusGenerated.ProjectAutomation.BuildVerticalSlice",
+          logPath: safeWorkspaceJoin(input.workspacePath, "GameBuild/unity/Logs/build.log"),
+        });
+        outputs.push("GameBuild/unity/Logs/build.log");
+        createArtifact({ kind: "code", relativePath: "GameBuild/unity/Logs/build.log" });
+        if (!runBuild.ok) {
+          warnings.push(`Unity build failed: ${runBuild.stderr}`);
+        }
+      }
+    }
   }
 
   const generateArtifactByKind = async (kind: GameCreatorArtifactKind): Promise<void> => {
@@ -5735,6 +6433,68 @@ app.post("/api/tools/game-creator/execution/artifacts/:artifactId/regenerate", a
     await writeSystemState(nextState);
     return res.status(500).json({ error: String(error) });
   }
+});
+
+app.get("/api/tools/game-creator/unity/status", async (_req, res) => {
+  const unity = await detectUnityCliStatus();
+  return res.json({
+    ok: true,
+    available: unity.available,
+    selectedPath: unity.selectedPath,
+    candidates: unity.candidates,
+    guidance: unity.available
+      ? "Unity CLI available for Game Creator automation."
+      : "Unity CLI not found. Set UNITY_EDITOR_PATH to Unity.exe or install Unity under C:/Program Files/Unity/Hub/Editor.",
+  });
+});
+
+app.post("/api/tools/game-creator/unity/run", async (req, res) => {
+  const body = req.body as {
+    workspaceId?: string;
+    action?: "generate" | "smoke" | "build";
+    unityPath?: string;
+  };
+  const action = pickEnumValue(body.action, ["generate", "smoke", "build"] as const, "generate");
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const unity = await detectUnityCliStatus();
+  const unityPath = body.unityPath?.trim() || unity.selectedPath;
+  if (!unityPath) {
+    return res.status(409).json({
+      error: "Unity CLI is unavailable. Set UNITY_EDITOR_PATH or install Unity Editor.",
+      candidates: unity.candidates,
+    });
+  }
+
+  const unityRoot = safeWorkspaceJoin(workspace.path, "GameBuild/unity");
+  const logsDir = safeWorkspaceJoin(workspace.path, "GameBuild/unity/Logs");
+  await fs.mkdir(logsDir, { recursive: true });
+
+  const method = action === "build"
+    ? "NexusGenerated.ProjectAutomation.BuildVerticalSlice"
+    : action === "smoke"
+      ? "NexusGenerated.ProjectAutomation.RunDeterminismSmoke"
+      : "NexusGenerated.ProjectAutomation.GenerateFromSpec";
+  const logRelativePath = `GameBuild/unity/Logs/${action}-${Date.now()}.log`;
+  const logPath = safeWorkspaceJoin(workspace.path, logRelativePath);
+  const result = await runUnityBatchMethod({
+    unityPath,
+    projectPath: unityRoot,
+    method,
+    logPath,
+  });
+
+  return res.status(result.ok ? 200 : 500).json({
+    ok: result.ok,
+    workspaceId: workspace.id,
+    action,
+    method,
+    unityPath,
+    command: result.command,
+    logRelativePath,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  });
 });
 
 app.post("/api/tools/game-creator/queue/:itemId/status", async (req, res) => {
