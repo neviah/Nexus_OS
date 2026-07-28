@@ -169,7 +169,7 @@ body {
 
 :root[data-background-visual="matrix-rain"] .app-shell::before,
 body[data-background-visual="matrix-rain"] .app-shell::before {
-  opacity: 0.22;
+  opacity: 0.32;
   background:
     repeating-linear-gradient(90deg, rgba(78, 255, 161, 0.35) 0, rgba(78, 255, 161, 0.35) 1px, transparent 1px, transparent 12px),
     repeating-linear-gradient(180deg, rgba(78, 255, 161, 0.18) 0, rgba(78, 255, 161, 0.18) 2px, transparent 2px, transparent 26px);
@@ -178,14 +178,14 @@ body[data-background-visual="matrix-rain"] .app-shell::before {
 
 :root[data-background-visual="prism-gradient"] .app-shell::before,
 body[data-background-visual="prism-gradient"] .app-shell::before {
-  opacity: 0.22;
+  opacity: 0.34;
   background: conic-gradient(from 130deg at 35% 40%, rgba(255, 180, 81, 0.4), rgba(76, 212, 255, 0.34), rgba(255, 133, 169, 0.3), rgba(255, 180, 81, 0.4));
   animation: nexusPrismSpin 14s linear infinite;
 }
 
 :root[data-background-visual="liquid-chrome"] .app-shell::before,
 body[data-background-visual="liquid-chrome"] .app-shell::before {
-  opacity: 0.2;
+  opacity: 0.3;
   background:
     radial-gradient(120% 90% at 15% 20%, rgba(255, 255, 255, 0.34), transparent 55%),
     radial-gradient(120% 90% at 85% 85%, rgba(150, 196, 224, 0.3), transparent 58%),
@@ -195,7 +195,7 @@ body[data-background-visual="liquid-chrome"] .app-shell::before {
 
 :root[data-background-visual="animated-gradient"] .app-shell::before,
 body[data-background-visual="animated-gradient"] .app-shell::before {
-  opacity: 0.21;
+  opacity: 0.33;
   background: linear-gradient(120deg, rgba(255, 122, 24, 0.38), rgba(85, 215, 255, 0.3), rgba(125, 230, 154, 0.28), rgba(255, 122, 24, 0.38));
   background-size: 260% 260%;
   animation: nexusGradientFlow 9.5s ease infinite;
@@ -203,7 +203,7 @@ body[data-background-visual="animated-gradient"] .app-shell::before {
 
 :root[data-background-visual="closing-plasma"] .app-shell::before,
 body[data-background-visual="closing-plasma"] .app-shell::before {
-  opacity: 0.23;
+  opacity: 0.34;
   background:
     radial-gradient(100% 70% at 50% 100%, rgba(255, 120, 90, 0.45), rgba(255, 120, 90, 0.05) 58%),
     radial-gradient(80% 60% at 45% 0%, rgba(122, 246, 215, 0.33), rgba(122, 246, 215, 0.04) 56%);
@@ -218,8 +218,13 @@ body[data-background-visual="closing-plasma"] .app-shell::before {
 .orb {
   position: absolute;
   border-radius: 999px;
-  filter: blur(28px);
+  filter: blur(14px);
   pointer-events: none;
+}
+
+:root[data-background-visual]:not([data-background-visual="none"]) .orb,
+body[data-background-visual]:not([data-background-visual="none"]) .orb {
+  display: none;
 }
 
 .orb-left {
@@ -400,6 +405,19 @@ h3 {
 :root[data-background-visual]:not([data-background-visual="none"]) .tool-section,
 :root[data-background-visual]:not([data-background-visual="none"]) .recommendation-list li {
   background: rgba(18, 29, 35, 0.3);
+}
+
+:root[data-background-visual]:not([data-background-visual="none"]) .pane {
+  background: rgba(12, 22, 28, 0.2);
+}
+
+:root[data-background-visual]:not([data-background-visual="none"]) .pane-left,
+:root[data-background-visual]:not([data-background-visual="none"]) .pane-right {
+  background: rgba(12, 22, 28, 0.2);
+}
+
+:root[data-background-visual]:not([data-background-visual="none"]) .pane-middle {
+  background: rgba(8, 16, 22, 0.52);
 }
 
 .pane-left,
@@ -2235,6 +2253,12 @@ textarea {
 
 .tree-panel-head h3 {
   margin: 0;
+}
+
+.tree-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .tree-root {

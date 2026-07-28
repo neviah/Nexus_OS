@@ -904,6 +904,43 @@ type GameCreatorExecutionArtifact = {
   note?: string;
 };
 
+type GameCreatorReleaseSummary = {
+  workspacePath: string;
+  readyForPackaging: boolean;
+  blockers: string[];
+  suggestedNextActions: string[];
+  releaseNotes: string;
+  packageRelativePath: string;
+  createdAt: string;
+};
+
+type GameCreatorTelemetrySummary = {
+  workspaceId: string;
+  totalEvents: number;
+  bySeverity: { info: number; warn: number; error: number };
+  recentEvents: Array<{ id: string; kind: string; message: string; severity: "info" | "warn" | "error"; createdAt: string }>;
+};
+
+type GameCreatorComplianceCheck = {
+  id: string;
+  title: string;
+  passed: boolean;
+  details: string;
+};
+
+type GameCreatorComplianceSummary = {
+  overallStatus: "ready" | "needs-attention";
+  policyChecks: GameCreatorComplianceCheck[];
+  warnings: string[];
+};
+
+type GameCreatorWorkflowSummary = {
+  status: "setup" | "docs" | "queue" | "execution" | "ready-to-release";
+  progressPercent: number;
+  nextAction: string;
+  summary: string;
+};
+
 type GameCreatorExecutionRunState = {
   id: string;
   status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
@@ -1504,6 +1541,11 @@ function App() {
   const [gameCreatorExecutionJobs, setGameCreatorExecutionJobs] = useState<GameCreatorExecutionJob[]>([]);
   const [gameCreatorExecutionArtifacts, setGameCreatorExecutionArtifacts] = useState<GameCreatorExecutionArtifact[]>([]);
   const [gameCreatorExecutionRun, setGameCreatorExecutionRun] = useState<GameCreatorExecutionRunState | null>(null);
+  const [gameCreatorReleaseSummary, setGameCreatorReleaseSummary] = useState<GameCreatorReleaseSummary | null>(null);
+  const [gameCreatorTelemetrySummary, setGameCreatorTelemetrySummary] = useState<GameCreatorTelemetrySummary | null>(null);
+  const [gameCreatorComplianceSummary, setGameCreatorComplianceSummary] = useState<GameCreatorComplianceSummary | null>(null);
+  const [gameCreatorWorkflowSummary, setGameCreatorWorkflowSummary] = useState<GameCreatorWorkflowSummary | null>(null);
+  const [gameCreatorReleaseBusy, setGameCreatorReleaseBusy] = useState(false);
   const [gameCreatorArtifactFilter, setGameCreatorArtifactFilter] = useState<"all" | GameCreatorExecutionArtifact["status"]>("pending");
   const [gameCreatorExecutionBusyAction, setGameCreatorExecutionBusyAction] = useState<"mode" | "run-next" | "run-all" | "pause" | "resume" | "stop" | "artifact" | "refresh" | null>(null);
   const [gameCreatorActiveQueueItemId, setGameCreatorActiveQueueItemId] = useState<string | null>(null);
@@ -1549,6 +1591,7 @@ function App() {
   const [officePresetDraft, setOfficePresetDraft] = useState<{ harnessId: string; preset: "view" | "validate" | "create"; file: string; kind: "docx" | "xlsx" | "pptx" }>({ harnessId: "", preset: "view", file: "", kind: "docx" });
   const [officePresetBusy, setOfficePresetBusy] = useState(false);
   const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
+  const [workspaceSwitchBusy, setWorkspaceSwitchBusy] = useState(false);
   const [streamTrace, setStreamTrace] = useState("");
   const [streamTraceOpen, setStreamTraceOpen] = useState(false);
   const [autoSpeakHarnessReplies, setAutoSpeakHarnessReplies] = useState(true);
@@ -2684,6 +2727,7 @@ function App() {
       await loadGameCreatorGenerationProgress();
       await loadGameCreatorQueue();
       await loadGameCreatorExecutionStatus();
+      await loadGameCreatorReleaseStatus();
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -3069,6 +3113,54 @@ function App() {
     }
   }
 
+  async function loadGameCreatorReleaseStatus() {
+    try {
+      const response = await fetch(`/api/tools/game-creator/release/status?workspaceId=${encodeURIComponent(boot?.activeWorkspaceId ?? "")}`);
+      if (!response.ok) {
+        return;
+      }
+      const payload = (await response.json()) as { release?: GameCreatorReleaseSummary; telemetrySummary?: GameCreatorTelemetrySummary; complianceSummary?: GameCreatorComplianceSummary; workflowSummary?: GameCreatorWorkflowSummary };
+      setGameCreatorReleaseSummary(payload.release ?? null);
+      setGameCreatorTelemetrySummary(payload.telemetrySummary ?? null);
+      setGameCreatorComplianceSummary(payload.complianceSummary ?? null);
+      setGameCreatorWorkflowSummary(payload.workflowSummary ?? null);
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    }
+  }
+
+  async function createGameCreatorReleasePackage() {
+    setGameCreatorReleaseBusy(true);
+    try {
+      const response = await fetch("/api/tools/game-creator/release/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to create a Game Creator release package.");
+      }
+      const payload = (await response.json()) as { release?: GameCreatorReleaseSummary; telemetrySummary?: GameCreatorTelemetrySummary; complianceSummary?: GameCreatorComplianceSummary; workflowSummary?: GameCreatorWorkflowSummary };
+      setGameCreatorReleaseSummary(payload.release ?? null);
+      setGameCreatorTelemetrySummary(payload.telemetrySummary ?? null);
+      setGameCreatorComplianceSummary(payload.complianceSummary ?? null);
+      setGameCreatorWorkflowSummary(payload.workflowSummary ?? null);
+      if (payload.release?.readyForPackaging) {
+        setStatusMessage("Release package ready to share.");
+        pushToast("Release package created and is ready for distribution.", "ok");
+      } else {
+        setStatusMessage("Release package generated, but the workflow still has blockers.");
+        pushToast("Release package generated with remaining blockers.", "warn");
+      }
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorReleaseBusy(false);
+    }
+  }
+
   async function loadGameCreatorExecutionStatus() {
     setGameCreatorExecutionBusyAction("refresh");
     try {
@@ -3081,6 +3173,7 @@ function App() {
       setGameCreatorExecutionJobs(payload.jobs ?? []);
       setGameCreatorExecutionArtifacts(payload.artifacts ?? []);
       setGameCreatorExecutionRun(payload.run ?? null);
+      await loadGameCreatorReleaseStatus();
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -4968,6 +5061,24 @@ function App() {
     };
   }, [runtimeJobs]);
 
+  useEffect(() => {
+    if (rightTab !== "workspace") {
+      return;
+    }
+    const activeWorkspaceId = boot?.activeWorkspaceId;
+    if (!activeWorkspaceId) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refreshActiveWorkspaceTree(activeWorkspaceId);
+    }, 20000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [rightTab, boot?.activeWorkspaceId]);
+
   function getHarnessSubTab(harnessId: string): HarnessSubTab {
     return harnessSubTabByHarness[harnessId] ?? "chats";
   }
@@ -5683,26 +5794,52 @@ function App() {
       return;
     }
 
+    const payload = (await response.json()) as { workspace?: { id: string; path: string } };
+    const createdWorkspaceId = payload.workspace?.id;
+
     setCreateWorkspaceName("");
     setWorkspacePathDraft("");
     setWorkspaceBrowserOpen(false);
+    if (createdWorkspaceId) {
+      await onSwitchWorkspace(createdWorkspaceId);
+      setStatusMessage("Workspace created and activated.");
+      pushToast("Workspace created and activated.", "ok");
+      return;
+    }
     await loadBootstrap();
   }
 
   async function onSwitchWorkspace(workspaceId: string) {
-    await fetch("/api/workspaces/switch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: workspaceId }),
-    });
-    await loadBootstrap();
-    await loadWorkspaceTree(workspaceId);
-    if (selectedPane.type === "agent") {
-      await Promise.all([
-        loadHarnessThreads(selectedPane.id, workspaceId),
-        loadHarnessSchedules(selectedPane.id, workspaceId),
-        loadHarnessRuns(selectedPane.id, workspaceId),
-      ]);
+    if (!workspaceId || workspaceId === boot?.activeWorkspaceId) {
+      return;
+    }
+
+    setWorkspaceSwitchBusy(true);
+    try {
+      const response = await fetch("/api/workspaces/switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: workspaceId }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? "Failed to switch workspace.");
+      }
+
+      await loadBootstrap();
+      if (selectedPane.type === "agent") {
+        await Promise.all([
+          loadHarnessThreads(selectedPane.id, workspaceId),
+          loadHarnessSchedules(selectedPane.id, workspaceId),
+          loadHarnessRuns(selectedPane.id, workspaceId),
+        ]);
+      }
+      setStatusMessage("Workspace switched.");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setWorkspaceSwitchBusy(false);
     }
   }
 
@@ -7419,7 +7556,7 @@ function App() {
               <div className="tool-header-row">
                 <div>
                   <h2>Game Creator</h2>
-                  <p className="subtitle">Step 1: Setup Wizard contract. Capture direction once, then drive downstream docs and generation from a stable spec package.</p>
+                  <p className="subtitle">Guide the workflow from setup to release with a clear checklist, approvals, and a packaging step that is visible before shipping.</p>
                 </div>
                 <div className="tool-action-row">
                   <button
@@ -7462,6 +7599,68 @@ function App() {
                   </>
                 ) : (
                   <small>No gate status yet. Click Start Game Creator Process to validate Gate 2.</small>
+                )}
+              </section>
+
+              <section className="tool-section">
+                <div className="tool-header-row">
+                  <h3>Release Readiness</h3>
+                  <button type="button" onClick={() => void createGameCreatorReleasePackage()} disabled={gameCreatorReleaseBusy}>
+                    {gameCreatorReleaseBusy ? "Packaging..." : "Create Release Package"}
+                  </button>
+                </div>
+                <small className={gameCreatorReleaseSummary?.readyForPackaging ? "runtime-ready" : "runtime-warning"}>
+                  {gameCreatorReleaseSummary?.readyForPackaging
+                    ? "The workflow is ready to package and share."
+                    : "The workflow still needs some approvals, queue items, or artifact decisions before packaging."}
+                </small>
+                {gameCreatorWorkflowSummary ? (
+                  <div className="tool-list">
+                    <small className={gameCreatorWorkflowSummary.progressPercent >= 80 ? "runtime-ready" : "runtime-warning"}>
+                      Progress: {gameCreatorWorkflowSummary.progressPercent}% · {gameCreatorWorkflowSummary.summary}
+                    </small>
+                    <small>Next: {gameCreatorWorkflowSummary.nextAction}</small>
+                  </div>
+                ) : null}
+                {gameCreatorReleaseSummary ? (
+                  <div className="tool-list">
+                    <small>Package path: {gameCreatorReleaseSummary.packageRelativePath}</small>
+                    {gameCreatorTelemetrySummary ? (
+                      <small>Telemetry events: {gameCreatorTelemetrySummary.totalEvents} total ({gameCreatorTelemetrySummary.bySeverity.warn} warns / {gameCreatorTelemetrySummary.bySeverity.error} errors).</small>
+                    ) : null}
+                    {gameCreatorComplianceSummary ? (
+                      <div>
+                        <small className={gameCreatorComplianceSummary.overallStatus === "ready" ? "runtime-ready" : "runtime-warning"}>
+                          Compliance: {gameCreatorComplianceSummary.overallStatus === "ready" ? "ready to ship" : "needs attention"}
+                        </small>
+                        <ul>
+                          {gameCreatorComplianceSummary.policyChecks.map((check) => (
+                            <li key={check.id}><small className={check.passed ? "runtime-ready" : "runtime-warning"}>{check.title}: {check.details}</small></li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {gameCreatorReleaseSummary.blockers.length > 0 ? (
+                      <ul>
+                        {gameCreatorReleaseSummary.blockers.map((blocker: string) => (
+                          <li key={blocker}><small className="runtime-warning">{blocker}</small></li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {gameCreatorReleaseSummary.suggestedNextActions.length > 0 ? (
+                      <ul>
+                        {gameCreatorReleaseSummary.suggestedNextActions.map((action: string) => (
+                          <li key={action}><small>{action}</small></li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <details className="tool-details">
+                      <summary>Release notes preview</summary>
+                      <pre className="image-status-stream">{gameCreatorReleaseSummary.releaseNotes}</pre>
+                    </details>
+                  </div>
+                ) : (
+                  <small>Build the release package once the workflow has enough evidence to ship.</small>
                 )}
               </section>
 
@@ -9139,6 +9338,7 @@ function App() {
                 Active Workspace
                 <select
                   value={boot?.activeWorkspaceId ?? "default"}
+                  disabled={workspaceSwitchBusy}
                   onChange={(event) => void onSwitchWorkspace(event.target.value)}
                 >
                   {boot?.workspaces.map((workspace) => (
@@ -9191,6 +9391,15 @@ function App() {
                           type="button"
                           onClick={() => {
                             setWorkspacePathDraft(workspaceBrowsePath);
+                            if (!createWorkspaceName.trim()) {
+                              const inferredName = workspaceBrowsePath
+                                .split(/[\\/]/)
+                                .filter(Boolean)
+                                .at(-1) ?? "";
+                              setCreateWorkspaceName(inferredName);
+                            }
+                            setStatusMessage("Folder selected. Click Create to register and switch workspace.");
+                            pushToast("Folder selected. Click Create to register and switch.", "warn");
                             closeWorkspaceBrowser();
                           }}
                           disabled={workspaceBrowseBusy}
@@ -9242,9 +9451,14 @@ function App() {
               <section className="tree-panel">
                 <div className="tree-panel-head">
                   <h3>File Tree</h3>
-                  <button type="button" className="ghost" onClick={() => void openActiveWorkspaceFolder()}>
-                    Open Folder
-                  </button>
+                  <div className="tree-panel-actions">
+                    <button type="button" className="ghost" onClick={() => void refreshActiveWorkspaceTree()}>
+                      Refresh
+                    </button>
+                    <button type="button" className="ghost" onClick={() => void openActiveWorkspaceFolder()}>
+                      Open Folder
+                    </button>
+                  </div>
                 </div>
                 {workspaceTree ? <ul className="tree-root">{renderTree(workspaceTree)}</ul> : <p>Loading workspace tree...</p>}
               </section>
