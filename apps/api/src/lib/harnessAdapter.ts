@@ -582,6 +582,10 @@ function buildNexusSystemMessage(ctx: NexusInjectedContext): string {
   } else {
     lines.push("GitHub is not connected. Advise the user to connect GitHub in Nexus OS Settings > Connectors if they need repo access.");
   }
+  lines.push("When the user asks to create or edit workspace files, include explicit write actions in JSON so Nexus can apply them automatically.");
+  lines.push("Write action format: {\"action\":\"write_file\",\"path\":\"relative/path.ext\",\"content\":\"full file content\"}.");
+  lines.push("For multiple files, return a JSON array of write_file actions inside one fenced json block.");
+  lines.push("Also include a short human summary after the JSON actions.");
   if (ctx.capabilitySummary) {
     lines.push(ctx.capabilitySummary);
   }

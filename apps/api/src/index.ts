@@ -109,6 +109,11 @@ import {
 } from "./lib/wan2gpRuntime.js";
 import { listProviderCatalog, listRouterFallbackTemplates } from "./lib/providerCatalog.js";
 import { getHarnessCapabilities, updateHarnessCapabilities } from "./lib/harnessCapabilities.js";
+import { buildPrototype } from "./lib/prototypeGenerator.js";
+import { buildGameCreatorReleasePackage, writeGameCreatorReleasePackage } from "./lib/gameCreatorRelease.js";
+import { appendGameCreatorTelemetryEvent, buildGameCreatorTelemetrySummary } from "./lib/gameCreatorTelemetry.js";
+import { buildGameCreatorComplianceSummary } from "./lib/gameCreatorCompliance.js";
+import { buildGameCreatorWorkflowSummary } from "./lib/gameCreatorWorkflowSummary.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -150,6 +155,7 @@ const runtimeJobs = new Map<string, RuntimeJob>();
 const runtimeJobsPath = path.join(getRootDir(), "data", "runtime-jobs.local.json");
 const webCapabilitiesHistoryPath = path.join(getRootDir(), "data", "web-capabilities-history.local.json");
 const fableTelemetryPath = path.join(getRootDir(), "data", "fable-telemetry.local.json");
+const gameCreatorTelemetryStorageDir = path.join(getRootDir(), "data", "game-creator-telemetry");
 const piperAssignmentsPath = path.join(getRootDir(), "data", "piper-voice-assignments.local.json");
 const githubConnectorPath = path.join(getRootDir(), "data", "connectors.github.local.json");
 let runtimeJobsLoaded = false;
@@ -3857,6 +3863,21 @@ async function writeFableTelemetry(entries: FableTelemetryEntry[]): Promise<void
   await fs.writeFile(fableTelemetryPath, JSON.stringify(entries.slice(0, 400), null, 2), "utf-8");
 }
 
+async function appendGameCreatorWorkflowEvent(workspaceId: string, kind: string, message: string, severity: "info" | "warn" | "error" = "info", metadata?: Record<string, unknown>): Promise<void> {
+  try {
+    await appendGameCreatorTelemetryEvent({
+      workspaceId,
+      kind,
+      message,
+      severity,
+      metadata,
+      storageDir: gameCreatorTelemetryStorageDir,
+    });
+  } catch {
+    // Telemetry should never block the core workflow.
+  }
+}
+
 async function appendFableTelemetry(entry: FableTelemetryEntry): Promise<void> {
   const current = await readFableTelemetry();
   current.unshift(entry);
@@ -5100,6 +5121,8 @@ function extractWorkspaceWriteActions(output: string): WorkspaceWriteAction[] {
 
   // Fallback extractor for non-JSON tool payloads like single-quoted dicts.
   collectLooseWriteActions(output, actions);
+  // Additional fallback for chat-style file drops like "File: README.md" followed by content.
+  collectAnnotatedFileBlocks(output, actions);
 
   const unique = new Map<string, WorkspaceWriteAction>();
   for (const action of actions) {
@@ -5107,6 +5130,50 @@ function extractWorkspaceWriteActions(output: string): WorkspaceWriteAction[] {
     unique.set(key, action);
   }
   return Array.from(unique.values());
+}
+
+function collectAnnotatedFileBlocks(output: string, bucket: WorkspaceWriteAction[]): void {
+  const blockPattern = /(?:^|\n)(?:file|filename|path)\s*:\s*([^\n\r]+)\s*\n([\s\S]*?)(?=\n(?:file|filename|path)\s*:|$)/gi;
+  let block = blockPattern.exec(output);
+
+  while (block) {
+    const rawPath = (block[1] ?? "").trim();
+    const section = (block[2] ?? "").trim();
+    const cleanedPath = normalizeAnnotatedPath(rawPath);
+
+    if (cleanedPath && isLikelyWorkspaceRelativeFilePath(cleanedPath)) {
+      const fenced = /```(?:[a-zA-Z0-9_-]+)?\s*\n([\s\S]*?)```/m.exec(section);
+      const content = (fenced?.[1] ?? section).trim();
+      if (content.length > 0) {
+        bucket.push({ path: cleanedPath, content });
+      }
+    }
+
+    block = blockPattern.exec(output);
+  }
+}
+
+function normalizeAnnotatedPath(rawPath: string): string {
+  return rawPath
+    .replace(/^['"`\s]+|['"`\s]+$/g, "")
+    .replace(/^\.?[\\/]+/, "")
+    .trim();
+}
+
+function isLikelyWorkspaceRelativeFilePath(candidate: string): boolean {
+  if (!candidate || candidate.length > 260) {
+    return false;
+  }
+  if (/^[A-Za-z]:[\\/]/.test(candidate)) {
+    return false;
+  }
+  if (candidate.includes("..")) {
+    return false;
+  }
+  if (candidate.endsWith("/") || candidate.endsWith("\\")) {
+    return false;
+  }
+  return /\.[A-Za-z0-9_-]{1,16}$/.test(candidate);
 }
 
 function isWriteActionName(name: unknown): boolean {
@@ -5477,6 +5544,80 @@ app.get("/api/tools/cookbook/scan", async (_req, res) => {
   res.json(snapshot);
 });
 
+app.get("/api/tools/game-creator/release/status", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim();
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const canonStore = getGameCreatorCanonDocsStore(state);
+  const queueStore = getGameCreatorExecutionQueueStore(state);
+  const release = buildGameCreatorReleasePackage({
+    workspacePath: workspace.path,
+    specPackage,
+    canonDocs: Object.values(canonStore.records),
+    queueItems: queueStore.items,
+    artifacts: getGameCreatorExecutionArtifacts(state),
+    jobs: getGameCreatorExecutionJobs(state),
+    run: getGameCreatorExecutionRunState(state),
+  });
+  const telemetrySummary = buildGameCreatorTelemetrySummary({ workspaceId: workspace.id, storageDir: gameCreatorTelemetryStorageDir });
+  const complianceSummary = buildGameCreatorComplianceSummary({
+    workspacePath: workspace.path,
+    artifacts: getGameCreatorExecutionArtifacts(state),
+    canonDocs: Object.values(canonStore.records),
+    telemetryEntries: telemetrySummary.recentEvents,
+  });
+  const workflowSummary = buildGameCreatorWorkflowSummary({
+    hasSetupDraft: Boolean(draft && draft.target),
+    canonDocCount: Object.keys(canonStore.records).length,
+    approvedLockedDocs: Object.values(canonStore.records).filter((record) => record.reviewStatus === "approved" && record.locked).length,
+    queueItemCount: queueStore.items.length,
+    releaseReady: release.readyForPackaging,
+    complianceStatus: complianceSummary.overallStatus,
+  });
+
+  res.json({ ok: true, workspaceId: workspace.id, workspacePath: workspace.path, release, telemetrySummary, complianceSummary, workflowSummary });
+});
+
+app.post("/api/tools/game-creator/release/build", async (req, res) => {
+  const body = req.body as { workspaceId?: string };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const canonStore = getGameCreatorCanonDocsStore(state);
+  const queueStore = getGameCreatorExecutionQueueStore(state);
+  const release = await writeGameCreatorReleasePackage({
+    workspacePath: workspace.path,
+    specPackage,
+    canonDocs: Object.values(canonStore.records),
+    queueItems: queueStore.items,
+    artifacts: getGameCreatorExecutionArtifacts(state),
+    jobs: getGameCreatorExecutionJobs(state),
+    run: getGameCreatorExecutionRunState(state),
+  });
+  const telemetrySummary = buildGameCreatorTelemetrySummary({ workspaceId: workspace.id, storageDir: gameCreatorTelemetryStorageDir });
+  const complianceSummary = buildGameCreatorComplianceSummary({
+    workspacePath: workspace.path,
+    artifacts: getGameCreatorExecutionArtifacts(state),
+    canonDocs: Object.values(canonStore.records),
+    telemetryEntries: telemetrySummary.recentEvents,
+  });
+  const workflowSummary = buildGameCreatorWorkflowSummary({
+    hasSetupDraft: Boolean(draft && draft.target),
+    canonDocCount: Object.keys(canonStore.records).length,
+    approvedLockedDocs: Object.values(canonStore.records).filter((record) => record.reviewStatus === "approved" && record.locked).length,
+    queueItemCount: queueStore.items.length,
+    releaseReady: release.readyForPackaging,
+    complianceStatus: complianceSummary.overallStatus,
+  });
+
+  await appendGameCreatorWorkflowEvent(workspace.id, "release-build", release.readyForPackaging ? "Release package produced successfully." : "Release package built with blockers.", release.readyForPackaging ? "info" : "warn", { packageRelativePath: release.packageRelativePath, blockers: release.blockers });
+
+  res.json({ ok: true, workspaceId: workspace.id, workspacePath: workspace.path, release, telemetrySummary, complianceSummary, workflowSummary });
+});
+
 app.get("/api/tools/game-creator/setup-wizard", async (_req, res) => {
   const state = await readSystemState();
   const draft = readGameCreatorDraft(state);
@@ -5502,6 +5643,55 @@ app.post("/api/tools/game-creator/setup-wizard/reset", async (_req, res) => {
   await writeSystemState(state);
   const specPackage = buildGameCreatorSpecPackage(draft);
   res.json({ ok: true, draft, specPackage });
+});
+
+app.post("/api/tools/game-creator/prototype/generate", async (req, res) => {
+  const body = req.body as {
+    workspaceId?: string;
+    title?: string;
+    genre?: string;
+    target?: "browser" | "desktop";
+    loop?: string;
+    mechanics?: string[];
+    mood?: string;
+  };
+
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const target: "browser" | "desktop" = body.target === "desktop" ? "desktop" : "browser";
+  const spec = {
+    title: typeof body.title === "string" && body.title.trim() ? body.title.trim() : "Nexus Prototype",
+    genre: typeof body.genre === "string" && body.genre.trim() ? body.genre.trim() : "arcade",
+    target,
+    loop: typeof body.loop === "string" && body.loop.trim() ? body.loop.trim() : "survive, score, improve",
+    mechanics: Array.isArray(body.mechanics)
+      ? body.mechanics.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()).slice(0, 6)
+      : ["movement", "enemy swarms"],
+    mood: typeof body.mood === "string" && body.mood.trim() ? body.mood.trim() : "bright and energetic",
+  };
+
+  const project = buildPrototype(spec);
+  const slug = spec.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "prototype";
+  const projectRoot = safeWorkspaceJoin(workspace.path, path.join("GameBuild", "prototypes", slug));
+  await fs.mkdir(projectRoot, { recursive: true });
+
+  const writtenFiles: string[] = [];
+  for (const file of project.files) {
+    const relativePath = file.path.replace(/^projects\/[^/]+\//, "");
+    const targetPath = safeWorkspaceJoin(projectRoot, relativePath);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, file.content, "utf-8");
+    writtenFiles.push(relativePath);
+  }
+
+  res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    rootRelativePath: path.posix.join("GameBuild", "prototypes", slug),
+    spec,
+    project,
+    writtenFiles,
+  });
 });
 
 app.get("/api/tools/game-creator/concept-swarm", async (_req, res) => {
@@ -6090,6 +6280,7 @@ app.post("/api/tools/game-creator/process/start", async (req, res) => {
   await writeSystemState(state);
 
   if (!readiness.ready) {
+    await appendGameCreatorWorkflowEvent(workspace.id, "process-start", "Game Creator process start was blocked by Gate 2.", "warn", { mode: requestedMode, blockers: readiness.blockers });
     return res.status(412).json({
       error: "Gate 2 is blocked. Resolve blockers before starting the Game Creator pipeline.",
       gateId: "gate-2-preproduction-docs",
@@ -6099,6 +6290,8 @@ app.post("/api/tools/game-creator/process/start", async (req, res) => {
       mode: requestedMode,
     });
   }
+
+  await appendGameCreatorWorkflowEvent(workspace.id, "process-start", "Game Creator process start was approved.", "info", { mode: requestedMode, requiredDocs: readiness.summary.requiredDocs, approvedDocs: readiness.summary.approvedDocs, lockedDocs: readiness.summary.lockedDocs });
 
   return res.json({
     ok: true,
@@ -6184,6 +6377,7 @@ app.post("/api/tools/game-creator/queue/build", async (req, res) => {
   const impactedItems = items.filter((entry) => changedDocs.includes(entry.sourceDocFile));
   writeGameCreatorExecutionQueueStore(state, { builtAt, items });
   await writeSystemState(state);
+  await appendGameCreatorWorkflowEvent(workspace.id, "queue-built", `Queue built with ${items.length} item(s).`, readiness.ready ? "info" : "warn", { itemCount: items.length, blockers: readiness.blockers, mode });
 
   return res.json({
     ok: true,
@@ -6549,6 +6743,7 @@ app.post("/api/tools/game-creator/execution/artifacts/:artifactId/decision", asy
   writeGameCreatorExecutionArtifacts(state, nextArtifacts);
 
   const selectedArtifact = nextArtifacts.find((entry) => entry.id === req.params.artifactId) ?? target;
+  await appendGameCreatorWorkflowEvent(workspace.id, "artifact-decision", `Artifact ${selectedArtifact.id} marked ${decision}.`, decision === "approved" ? "info" : "warn", { artifactId: selectedArtifact.id, decision, queueItemId: selectedArtifact.queueItemId });
   let followUpQueueItem: GameCreatorQueueItem | null = null;
   if (decision === "rejected") {
     followUpQueueItem = enqueueArtifactRegenerationTask({
