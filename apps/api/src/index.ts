@@ -5133,7 +5133,7 @@ function extractWorkspaceWriteActions(output: string): WorkspaceWriteAction[] {
 }
 
 function collectAnnotatedFileBlocks(output: string, bucket: WorkspaceWriteAction[]): void {
-  const blockPattern = /(?:^|\n)(?:file|filename|path)\s*:\s*([^\n\r]+)\s*\n([\s\S]*?)(?=\n(?:file|filename|path)\s*:|$)/gi;
+  const blockPattern = /(?:^|\n)\s*(?:\*\*\s*)?(?:file(?:\s+created)?|filename|path)(?:\s*\*\*)?\s*:\s*([^\n\r]+)\s*\n([\s\S]*?)(?=\n\s*(?:\*\*\s*)?(?:file(?:\s+created)?|filename|path)(?:\s*\*\*)?\s*:|$)/gi;
   let block = blockPattern.exec(output);
 
   while (block) {
@@ -5156,6 +5156,7 @@ function collectAnnotatedFileBlocks(output: string, bucket: WorkspaceWriteAction
 function normalizeAnnotatedPath(rawPath: string): string {
   return rawPath
     .replace(/^['"`\s]+|['"`\s]+$/g, "")
+    .replace(/^\*\*|\*\*$/g, "")
     .replace(/^\.?[\\/]+/, "")
     .trim();
 }
