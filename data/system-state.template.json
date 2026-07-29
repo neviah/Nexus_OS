@@ -12,7 +12,10 @@
     "unityHarnessAllowlist": [],
     "unityAllowDynamicCode": false,
     "unityMaxActionsPerTurn": 2,
-    "unityMaxDynamicCodeChars": 2000
+    "unityMaxDynamicCodeChars": 2000,
+    "unityApprovalChangedAt": null,
+    "unityApprovalChangedBy": null,
+    "unityApprovalExpiresAt": null
   },
   "activeWorkspaceId": "default",
   "selectedPane": {

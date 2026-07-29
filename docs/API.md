@@ -124,3 +124,47 @@ and aborts the matching in-flight stream.
 `GET /api/chat/tasks/resumable` returns failed tasks that can be resumed.
 
 `POST /api/chat/tasks/:requestId/resume` replays a failed task using the task resume engine and returns resumed output.
+
+## Unity Tool Bridge
+
+- `GET /api/tools/unity/status?workspaceId=<optional>`
+  - Returns Unity Editor discovery, Unity CLI Loop availability, and active Unity policy state.
+- `GET /api/tools/unity/approval`
+  - Returns enable/disable state plus approval metadata (changedBy/changedAt/expiresAt).
+- `POST /api/tools/unity/approval`
+  - Enables or disables Unity tool execution. Supports optional timed approvals.
+- `GET /api/tools/unity/policy`
+  - Returns full Unity policy.
+- `POST /api/tools/unity/policy`
+  - Updates policy fields (allowed actions, dynamic code toggle, harness allowlist, per-turn limits).
+- `POST /api/tools/unity/:action`
+  - Executes one Unity CLI Loop action (`unity_compile`, `unity_run_tests`, `unity_get_logs`, `unity_screenshot`, `unity_execute_dynamic_code`).
+- `GET /api/tools/unity/audit?limit=<1..500>`
+  - Returns recent Unity action audit records (blocked/executed/failed).
+- `GET /api/tools/unity/approval/audit?limit=<1..500>`
+  - Returns recent Unity approval/provenance records.
+
+Example timed approval request:
+
+```json
+{
+  "enabled": true,
+  "durationMinutes": 30,
+  "actor": "ui:settings",
+  "reason": "temporary compile and test pass"
+}
+```
+
+Example policy update request:
+
+```json
+{
+  "allowedActions": ["unity_compile", "unity_run_tests", "unity_get_logs", "unity_screenshot"],
+  "allowDynamicCode": false,
+  "harnessAllowlist": ["hermes", "grok4"],
+  "maxActionsPerTurn": 2,
+  "maxDynamicCodeChars": 2000,
+  "actor": "ui:settings",
+  "reason": "tighten policy"
+}
+```

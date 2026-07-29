@@ -3,6 +3,7 @@ import cors from "cors";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
@@ -159,8 +160,11 @@ const fableTelemetryPath = path.join(getRootDir(), "data", "fable-telemetry.loca
 const gameCreatorTelemetryStorageDir = path.join(getRootDir(), "data", "game-creator-telemetry");
 const piperAssignmentsPath = path.join(getRootDir(), "data", "piper-voice-assignments.local.json");
 const githubConnectorPath = path.join(getRootDir(), "data", "connectors.github.local.json");
+const unityAuditLogPath = path.join(getRootDir(), "data", "unity-tool-audit.local.jsonl");
+const unityApprovalAuditLogPath = path.join(getRootDir(), "data", "unity-approval-audit.local.jsonl");
 let runtimeJobsLoaded = false;
 let runtimeJobPersistQueue: Promise<void> = Promise.resolve();
+let unityAuditWriteQueue: Promise<void> = Promise.resolve();
 const pendingGitHubDeviceFlows = new Map<string, GitHubDeviceFlowSession>();
 
 type CrawlRunHistoryEntry = {
@@ -287,6 +291,49 @@ type UnityExecutionPolicy = {
   harnessAllowlist: string[];
   maxActionsPerTurn: number;
   maxDynamicCodeChars: number;
+  approvalChangedAt?: string;
+  approvalChangedBy?: string;
+  approvalExpiresAt?: string;
+  approvalExpired: boolean;
+};
+
+type UnityAuditSource = "harness" | "api";
+
+type UnityActionAuditRecord = {
+  id: string;
+  at: string;
+  source: UnityAuditSource;
+  actor: string;
+  harnessId?: string;
+  workspaceId?: string;
+  workspacePath?: string;
+  unityProjectPath?: string;
+  action: UnityToolActionName;
+  status: "executed" | "blocked" | "failed";
+  reason?: string;
+  command?: string[];
+  stdoutChars?: number;
+  stderrChars?: number;
+  argsHash: string;
+  argsPreview?: Record<string, unknown>;
+  policy: {
+    enabled: boolean;
+    allowedActions: UnityToolActionName[];
+    allowDynamicCode: boolean;
+    harnessAllowlist: string[];
+    maxActionsPerTurn: number;
+    maxDynamicCodeChars: number;
+    approvalExpiresAt?: string;
+  };
+};
+
+type UnityApprovalAuditRecord = {
+  id: string;
+  at: string;
+  actor: string;
+  enabled: boolean;
+  expiresAt?: string;
+  reason?: string;
 };
 
 const GAME_CREATOR_TARGETS = ["unity-3d", "unity-2d", "web-2d"] as const;
@@ -769,11 +816,123 @@ function isUnityExecutionEnabled(state: SystemState): boolean {
   return Boolean(state.toolPermissions?.unityExecutionEnabled);
 }
 
-function setUnityExecutionEnabled(state: SystemState, enabled: boolean): void {
+function setUnityExecutionEnabled(state: SystemState, enabled: boolean, options?: { actor?: string; expiresAt?: string }): void {
+  const nowIso = new Date().toISOString();
   state.toolPermissions = {
     ...(state.toolPermissions ?? {}),
     unityExecutionEnabled: enabled,
+    unityApprovalChangedAt: nowIso,
+    unityApprovalChangedBy: options?.actor?.trim() || "system",
+    unityApprovalExpiresAt: enabled ? options?.expiresAt : undefined,
   };
+}
+
+function isIsoDateString(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(new Date(value).getTime());
+}
+
+function toUnityPolicyAuditSnapshot(policy: UnityExecutionPolicy): UnityActionAuditRecord["policy"] {
+  return {
+    enabled: policy.enabled,
+    allowedActions: policy.allowedActions,
+    allowDynamicCode: policy.allowDynamicCode,
+    harnessAllowlist: policy.harnessAllowlist,
+    maxActionsPerTurn: policy.maxActionsPerTurn,
+    maxDynamicCodeChars: policy.maxDynamicCodeChars,
+    approvalExpiresAt: policy.approvalExpiresAt,
+  };
+}
+
+function hashUnityArgs(args: Record<string, unknown> | undefined): string {
+  const stable = JSON.stringify(args ?? {});
+  return createHash("sha256").update(stable, "utf-8").digest("hex");
+}
+
+function sanitizeUnityArgsPreview(action: UnityToolAction): Record<string, unknown> | undefined {
+  if (action.action === "unity_screenshot") {
+    const windowName = typeof action.args?.windowName === "string" ? action.args.windowName : "Game";
+    return { windowName };
+  }
+  if (action.action === "unity_execute_dynamic_code") {
+    const code = typeof action.args?.code === "string" ? action.args.code : "";
+    return { codeChars: code.length };
+  }
+  return undefined;
+}
+
+async function appendJsonLine(filePath: string, payload: unknown): Promise<void> {
+  unityAuditWriteQueue = unityAuditWriteQueue.then(async () => {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.appendFile(filePath, `${JSON.stringify(payload)}\n`, "utf-8");
+  });
+  await unityAuditWriteQueue;
+}
+
+async function appendUnityActionAudit(entry: UnityActionAuditRecord): Promise<void> {
+  await appendJsonLine(unityAuditLogPath, entry);
+}
+
+async function appendUnityApprovalAudit(entry: UnityApprovalAuditRecord): Promise<void> {
+  await appendJsonLine(unityApprovalAuditLogPath, entry);
+}
+
+async function readTailJsonLines<T>(filePath: string, limit: number): Promise<T[]> {
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+    const selected = lines.slice(Math.max(0, lines.length - Math.max(1, Math.floor(limit))));
+    const parsed: T[] = [];
+    for (const line of selected) {
+      try {
+        parsed.push(JSON.parse(line) as T);
+      } catch {
+        continue;
+      }
+    }
+    return parsed.reverse();
+  } catch {
+    return [];
+  }
+}
+
+function resolveUnityAuditActor(input: { actorHint?: unknown; fallback: string }): string {
+  const raw = typeof input.actorHint === "string" ? input.actorHint.trim() : "";
+  if (!raw) {
+    return input.fallback;
+  }
+  return raw.slice(0, 120);
+}
+
+function applyUnityApprovalExpiry(state: SystemState): { changed: boolean; reason?: string } {
+  const expiresAt = state.toolPermissions?.unityApprovalExpiresAt;
+  if (!state.toolPermissions?.unityExecutionEnabled || !isIsoDateString(expiresAt)) {
+    return { changed: false };
+  }
+
+  if (new Date(expiresAt).getTime() > Date.now()) {
+    return { changed: false };
+  }
+
+  setUnityExecutionEnabled(state, false, { actor: "system:expiry" });
+  return {
+    changed: true,
+    reason: `Approval expired at ${expiresAt}`,
+  };
+}
+
+async function reconcileUnityApprovalExpiryAndPersist(state: SystemState): Promise<void> {
+  const expiry = applyUnityApprovalExpiry(state);
+  if (!expiry.changed) {
+    return;
+  }
+  await writeSystemState(state);
+  await appendUnityApprovalAudit({
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    actor: "system:expiry",
+    enabled: false,
+    reason: expiry.reason,
+  }).catch(() => undefined);
 }
 
 function getUnityExecutionPolicy(state: SystemState): UnityExecutionPolicy {
@@ -801,13 +960,28 @@ function getUnityExecutionPolicy(state: SystemState): UnityExecutionPolicy {
     ? Math.min(20000, Math.max(256, Math.floor(maxCodeCharsRaw)))
     : DEFAULT_UNITY_MAX_DYNAMIC_CODE_CHARS;
 
+  const approvalExpiresAt = isIsoDateString(state.toolPermissions?.unityApprovalExpiresAt)
+    ? state.toolPermissions?.unityApprovalExpiresAt
+    : undefined;
+  const approvalChangedAt = isIsoDateString(state.toolPermissions?.unityApprovalChangedAt)
+    ? state.toolPermissions?.unityApprovalChangedAt
+    : undefined;
+  const approvalChangedBy = typeof state.toolPermissions?.unityApprovalChangedBy === "string"
+    ? state.toolPermissions?.unityApprovalChangedBy
+    : undefined;
+  const approvalExpired = Boolean(approvalExpiresAt && new Date(approvalExpiresAt).getTime() <= Date.now());
+
   return {
-    enabled: isUnityExecutionEnabled(state),
+    enabled: isUnityExecutionEnabled(state) && !approvalExpired,
     allowedActions: normalizedAllowed,
     allowDynamicCode: Boolean(state.toolPermissions?.unityAllowDynamicCode),
     harnessAllowlist,
     maxActionsPerTurn,
     maxDynamicCodeChars,
+    approvalChangedAt,
+    approvalChangedBy,
+    approvalExpiresAt,
+    approvalExpired,
   };
 }
 
@@ -831,6 +1005,9 @@ function setUnityExecutionPolicy(state: SystemState, input: Partial<UnityExecuti
     unityAllowDynamicCode: input.allowDynamicCode ?? current.allowDynamicCode,
     unityMaxActionsPerTurn: Number.isFinite(maxActionsRaw) ? Math.min(5, Math.max(1, Math.floor(maxActionsRaw))) : current.maxActionsPerTurn,
     unityMaxDynamicCodeChars: Number.isFinite(maxDynamicCodeRaw) ? Math.min(20000, Math.max(256, Math.floor(maxDynamicCodeRaw))) : current.maxDynamicCodeChars,
+    unityApprovalChangedAt: state.toolPermissions?.unityApprovalChangedAt,
+    unityApprovalChangedBy: state.toolPermissions?.unityApprovalChangedBy,
+    unityApprovalExpiresAt: state.toolPermissions?.unityApprovalExpiresAt,
   };
 
   return getUnityExecutionPolicy(state);
@@ -5486,6 +5663,7 @@ async function executeWorkspaceReadActions(workspacePath: string, reads: Workspa
 
 async function executeUnityToolActions(input: {
   workspacePath: string;
+  workspaceId?: string;
   actions: UnityToolAction[];
   state: SystemState;
   harnessId?: string;
@@ -5496,6 +5674,23 @@ async function executeUnityToolActions(input: {
 
   const policy = getUnityExecutionPolicy(input.state);
   if (!policy.enabled) {
+    for (const action of input.actions.slice(0, Math.max(1, Math.min(input.actions.length, 3)))) {
+      void appendUnityActionAudit({
+        id: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        source: "harness",
+        actor: input.harnessId ? `harness:${input.harnessId}` : "harness:unknown",
+        harnessId: input.harnessId,
+        workspaceId: input.workspaceId,
+        workspacePath: input.workspacePath,
+        action: action.action,
+        status: "blocked",
+        reason: "Unity tool execution is disabled.",
+        argsHash: hashUnityArgs(action.args),
+        argsPreview: sanitizeUnityArgsPreview(action),
+        policy: toUnityPolicyAuditSnapshot(policy),
+      }).catch(() => undefined);
+    }
     return [
       "UNITY TOOL EXECUTION BLOCKED",
       "Enable Unity tool execution in Settings > Automation before running compile/tests/logs/screenshot/dynamic-code from harness output.",
@@ -5504,6 +5699,23 @@ async function executeUnityToolActions(input: {
 
   const cli = await detectUnityCliLoopStatus();
   if (!cli.available || !cli.executable) {
+    for (const action of input.actions.slice(0, Math.max(1, Math.min(input.actions.length, 3)))) {
+      void appendUnityActionAudit({
+        id: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        source: "harness",
+        actor: input.harnessId ? `harness:${input.harnessId}` : "harness:unknown",
+        harnessId: input.harnessId,
+        workspaceId: input.workspaceId,
+        workspacePath: input.workspacePath,
+        action: action.action,
+        status: "failed",
+        reason: cli.error ?? "Unity CLI Loop not found.",
+        argsHash: hashUnityArgs(action.args),
+        argsPreview: sanitizeUnityArgsPreview(action),
+        policy: toUnityPolicyAuditSnapshot(policy),
+      }).catch(() => undefined);
+    }
     return [
       "UNITY TOOL EXECUTION UNAVAILABLE",
       cli.error ?? "Unity CLI Loop not found.",
@@ -5519,6 +5731,8 @@ async function executeUnityToolActions(input: {
     outputs.push(`UNITY POLICY NOTICE\nOnly the first ${selectedActions.length} Unity action(s) were executed this turn.`);
   }
 
+  const auditActor = input.harnessId ? `harness:${input.harnessId}` : "harness:unknown";
+
   for (const action of selectedActions) {
     const validation = validateUnityActionAgainstPolicy({
       action,
@@ -5527,6 +5741,22 @@ async function executeUnityToolActions(input: {
       harnessId: input.harnessId,
     });
     if (!validation.ok) {
+      void appendUnityActionAudit({
+        id: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        source: "harness",
+        actor: auditActor,
+        harnessId: input.harnessId,
+        workspaceId: input.workspaceId,
+        workspacePath: input.workspacePath,
+        unityProjectPath,
+        action: action.action,
+        status: "blocked",
+        reason: validation.reason,
+        argsHash: hashUnityArgs(action.args),
+        argsPreview: sanitizeUnityArgsPreview(action),
+        policy: toUnityPolicyAuditSnapshot(policy),
+      }).catch(() => undefined);
       outputs.push([
         `UNITY ${action.action}`,
         "ok=false",
@@ -5541,6 +5771,27 @@ async function executeUnityToolActions(input: {
       workspacePath: unityProjectPath,
       args: validation.args,
     });
+
+    void appendUnityActionAudit({
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      source: "harness",
+      actor: auditActor,
+      harnessId: input.harnessId,
+      workspaceId: input.workspaceId,
+      workspacePath: input.workspacePath,
+      unityProjectPath,
+      action: action.action,
+      status: result.ok ? "executed" : "failed",
+      reason: result.ok ? undefined : "Unity CLI Loop command failed",
+      command: result.command,
+      stdoutChars: result.stdout.length,
+      stderrChars: result.stderr.length,
+      argsHash: hashUnityArgs(validation.args),
+      argsPreview: sanitizeUnityArgsPreview({ action: action.action, args: validation.args }),
+      policy: toUnityPolicyAuditSnapshot(policy),
+    }).catch(() => undefined);
+
     outputs.push([
       `UNITY ${action.action}`,
       `ok=${result.ok}`,
@@ -5804,7 +6055,7 @@ async function runHarnessWorkspaceConversation(input: {
     if (input.workspace.path && (actions.reads.length > 0 || actions.lists.length > 0 || actions.unity.length > 0)) {
       const workspaceToolResults = await executeWorkspaceReadActions(input.workspace.path, actions.reads, actions.lists);
       const unityToolResults = actions.unity.length > 0
-        ? await executeUnityToolActions({ workspacePath: input.workspace.path, actions: actions.unity, state: input.state, harnessId: input.harness.id })
+        ? await executeUnityToolActions({ workspacePath: input.workspace.path, workspaceId: input.workspace.id, actions: actions.unity, state: input.state, harnessId: input.harness.id })
         : "";
       const toolResults = [workspaceToolResults, unityToolResults].filter(Boolean).join("\n\n");
       nextHistory = [
@@ -7764,6 +8015,7 @@ async function resolveUnityProjectPathForWorkspace(workspacePath: string): Promi
 app.get("/api/tools/unity/status", async (req, res) => {
   const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
   const state = await readSystemState();
+  await reconcileUnityApprovalExpiryAndPersist(state);
   const workspace = await resolveWorkspaceContext(state, workspaceId ?? state.activeWorkspaceId);
   const unity = await detectUnityCliStatus();
   const uloop = await detectUnityCliLoopStatus();
@@ -7782,12 +8034,17 @@ app.get("/api/tools/unity/status", async (req, res) => {
       harnessAllowlist: policy.harnessAllowlist,
       maxActionsPerTurn: policy.maxActionsPerTurn,
       maxDynamicCodeChars: policy.maxDynamicCodeChars,
+      approvalChangedAt: policy.approvalChangedAt,
+      approvalChangedBy: policy.approvalChangedBy,
+      approvalExpiresAt: policy.approvalExpiresAt,
+      approvalExpired: policy.approvalExpired,
     },
   });
 });
 
 app.get("/api/tools/unity/approval", async (_req, res) => {
   const state = await readSystemState();
+  await reconcileUnityApprovalExpiryAndPersist(state);
   const policy = getUnityExecutionPolicy(state);
   return res.json({
     unityExecutionEnabled: policy.enabled,
@@ -7797,16 +8054,37 @@ app.get("/api/tools/unity/approval", async (_req, res) => {
       harnessAllowlist: policy.harnessAllowlist,
       maxActionsPerTurn: policy.maxActionsPerTurn,
       maxDynamicCodeChars: policy.maxDynamicCodeChars,
+      approvalChangedAt: policy.approvalChangedAt,
+      approvalChangedBy: policy.approvalChangedBy,
+      approvalExpiresAt: policy.approvalExpiresAt,
+      approvalExpired: policy.approvalExpired,
     },
   });
 });
 
 app.post("/api/tools/unity/approval", async (req, res) => {
-  const body = req.body as { enabled?: boolean };
+  const body = req.body as { enabled?: boolean; durationMinutes?: number; actor?: string; reason?: string };
   const state = await readSystemState();
-  setUnityExecutionEnabled(state, Boolean(body.enabled));
+  const actor = resolveUnityAuditActor({
+    actorHint: body.actor ?? req.header("x-nexus-actor"),
+    fallback: "ui",
+  });
+  const durationMinutes = Number(body.durationMinutes);
+  const hasDuration = Number.isFinite(durationMinutes) && durationMinutes > 0;
+  const expiresAt = Boolean(body.enabled) && hasDuration
+    ? new Date(Date.now() + Math.min(1440, Math.max(1, Math.floor(durationMinutes))) * 60_000).toISOString()
+    : undefined;
+  setUnityExecutionEnabled(state, Boolean(body.enabled), { actor, expiresAt });
   await writeSystemState(state);
   const policy = getUnityExecutionPolicy(state);
+  await appendUnityApprovalAudit({
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    actor,
+    enabled: policy.enabled,
+    expiresAt: policy.approvalExpiresAt,
+    reason: typeof body.reason === "string" ? body.reason.slice(0, 240) : (body.enabled ? "manual-enable" : "manual-disable"),
+  }).catch(() => undefined);
   return res.json({
     ok: true,
     unityExecutionEnabled: policy.enabled,
@@ -7816,12 +8094,17 @@ app.post("/api/tools/unity/approval", async (req, res) => {
       harnessAllowlist: policy.harnessAllowlist,
       maxActionsPerTurn: policy.maxActionsPerTurn,
       maxDynamicCodeChars: policy.maxDynamicCodeChars,
+      approvalChangedAt: policy.approvalChangedAt,
+      approvalChangedBy: policy.approvalChangedBy,
+      approvalExpiresAt: policy.approvalExpiresAt,
+      approvalExpired: policy.approvalExpired,
     },
   });
 });
 
 app.get("/api/tools/unity/policy", async (_req, res) => {
   const state = await readSystemState();
+  await reconcileUnityApprovalExpiryAndPersist(state);
   const policy = getUnityExecutionPolicy(state);
   return res.json({
     ok: true,
@@ -7837,8 +8120,15 @@ app.post("/api/tools/unity/policy", async (req, res) => {
     harnessAllowlist?: string[];
     maxActionsPerTurn?: number;
     maxDynamicCodeChars?: number;
+    actor?: string;
+    reason?: string;
   };
   const state = await readSystemState();
+  await reconcileUnityApprovalExpiryAndPersist(state);
+  const actor = resolveUnityAuditActor({
+    actorHint: body.actor ?? req.header("x-nexus-actor"),
+    fallback: "ui",
+  });
   const policy = setUnityExecutionPolicy(state, {
     enabled: body.enabled,
     allowedActions: Array.isArray(body.allowedActions) ? body.allowedActions.filter((entry): entry is UnityToolActionName => UNITY_ACTION_NAMES.includes(entry)) : undefined,
@@ -7848,10 +8138,30 @@ app.post("/api/tools/unity/policy", async (req, res) => {
     maxDynamicCodeChars: typeof body.maxDynamicCodeChars === "number" ? body.maxDynamicCodeChars : undefined,
   });
   await writeSystemState(state);
+  await appendUnityApprovalAudit({
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    actor,
+    enabled: policy.enabled,
+    expiresAt: policy.approvalExpiresAt,
+    reason: typeof body.reason === "string" ? body.reason.slice(0, 240) : "policy-update",
+  }).catch(() => undefined);
   return res.json({
     ok: true,
     unityPolicy: policy,
   });
+});
+
+app.get("/api/tools/unity/audit", async (req, res) => {
+  const limit = Number(req.query.limit ?? 120);
+  const records = await readTailJsonLines<UnityActionAuditRecord>(unityAuditLogPath, Number.isFinite(limit) ? Math.min(500, Math.max(1, Math.floor(limit))) : 120);
+  return res.json({ ok: true, records });
+});
+
+app.get("/api/tools/unity/approval/audit", async (req, res) => {
+  const limit = Number(req.query.limit ?? 120);
+  const records = await readTailJsonLines<UnityApprovalAuditRecord>(unityApprovalAuditLogPath, Number.isFinite(limit) ? Math.min(500, Math.max(1, Math.floor(limit))) : 120);
+  return res.json({ ok: true, records });
 });
 
 app.post("/api/tools/unity/:action", async (req, res) => {
@@ -7860,10 +8170,27 @@ app.post("/api/tools/unity/:action", async (req, res) => {
     ["unity_compile", "unity_run_tests", "unity_get_logs", "unity_screenshot", "unity_execute_dynamic_code"] as const,
     "unity_compile",
   );
-  const body = req.body as { workspaceId?: string; args?: Record<string, unknown> };
+  const body = req.body as { workspaceId?: string; args?: Record<string, unknown>; actor?: string };
   const state = await readSystemState();
+  await reconcileUnityApprovalExpiryAndPersist(state);
+  const actor = resolveUnityAuditActor({
+    actorHint: body.actor ?? req.header("x-nexus-actor"),
+    fallback: "ui",
+  });
   const policy = getUnityExecutionPolicy(state);
   if (!policy.enabled) {
+    void appendUnityActionAudit({
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      source: "api",
+      actor,
+      action,
+      status: "blocked",
+      reason: "Unity tool execution is disabled. Enable it in Settings > Automation first.",
+      argsHash: hashUnityArgs(body.args),
+      argsPreview: sanitizeUnityArgsPreview({ action, args: body.args }),
+      policy: toUnityPolicyAuditSnapshot(policy),
+    }).catch(() => undefined);
     return res.status(412).json({
       error: "Unity tool execution is disabled. Enable it in Settings > Automation first.",
     });
@@ -7872,6 +8199,20 @@ app.post("/api/tools/unity/:action", async (req, res) => {
   const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
   const uloop = await detectUnityCliLoopStatus();
   if (!uloop.available || !uloop.executable) {
+    void appendUnityActionAudit({
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      source: "api",
+      actor,
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      action,
+      status: "failed",
+      reason: uloop.error ?? "Unity CLI Loop (uloop) is not available.",
+      argsHash: hashUnityArgs(body.args),
+      argsPreview: sanitizeUnityArgsPreview({ action, args: body.args }),
+      policy: toUnityPolicyAuditSnapshot(policy),
+    }).catch(() => undefined);
     return res.status(409).json({
       error: uloop.error ?? "Unity CLI Loop (uloop) is not available.",
     });
@@ -7884,6 +8225,21 @@ app.post("/api/tools/unity/:action", async (req, res) => {
     source: "api",
   });
   if (!validation.ok) {
+    void appendUnityActionAudit({
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      source: "api",
+      actor,
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      unityProjectPath,
+      action,
+      status: "blocked",
+      reason: validation.reason,
+      argsHash: hashUnityArgs(body.args),
+      argsPreview: sanitizeUnityArgsPreview({ action, args: body.args }),
+      policy: toUnityPolicyAuditSnapshot(policy),
+    }).catch(() => undefined);
     return res.status(412).json({
       error: validation.reason,
     });
@@ -7895,6 +8251,25 @@ app.post("/api/tools/unity/:action", async (req, res) => {
     workspacePath: unityProjectPath,
     args: validation.args,
   });
+
+  void appendUnityActionAudit({
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    source: "api",
+    actor,
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    unityProjectPath,
+    action,
+    status: result.ok ? "executed" : "failed",
+    reason: result.ok ? undefined : "Unity CLI Loop command failed",
+    command: result.command,
+    stdoutChars: result.stdout.length,
+    stderrChars: result.stderr.length,
+    argsHash: hashUnityArgs(validation.args),
+    argsPreview: sanitizeUnityArgsPreview({ action, args: validation.args }),
+    policy: toUnityPolicyAuditSnapshot(policy),
+  }).catch(() => undefined);
 
   return res.status(result.ok ? 200 : 500).json({
     ok: result.ok,

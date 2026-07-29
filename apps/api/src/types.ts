@@ -169,6 +169,9 @@ export type SystemState = {
     unityAllowDynamicCode?: boolean;
     unityMaxActionsPerTurn?: number;
     unityMaxDynamicCodeChars?: number;
+    unityApprovalChangedAt?: string;
+    unityApprovalChangedBy?: string;
+    unityApprovalExpiresAt?: string;
   };
   activeWorkspaceId: string;
   selectedPane: {
