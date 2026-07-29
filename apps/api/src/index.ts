@@ -5667,12 +5667,12 @@ function collectLooseWriteActions(output: string, bucket: WorkspaceWriteAction[]
 }
 
 function collectShellWriteActions(output: string, bucket: WorkspaceWriteAction[]): void {
-  const echoOrPrintf = /(?:^|\n)\s*(?:echo|printf)\s+(["'])([\s\S]*?)\1\s*>\s*([^\s"'`]+\.[A-Za-z0-9_-]{1,12})/gi;
+  const echoOrPrintf = /(?:^|\n)\s*(?:echo|printf)\s+(["'])([\s\S]*?)\1\s*>\s*([^\s"'`]+)/gi;
   let match = echoOrPrintf.exec(output);
   while (match) {
     const rawContent = String(match[2] ?? "");
     const pathValue = String(match[3] ?? "").trim();
-    if (pathValue) {
+    if (pathValue && !pathValue.endsWith("/") && !pathValue.endsWith("\\")) {
       bucket.push({
         path: pathValue,
         content: rawContent
@@ -5710,11 +5710,22 @@ function hasWorkspaceFileWriteIntent(message: string): boolean {
 
   const verbs = [
     "create file",
+    "create a file",
+    "create document",
+    "create a document",
     "write file",
+    "write a file",
+    "write document",
+    "write a document",
     "save file",
     "make file",
+    "make a file",
+    "make document",
+    "make a document",
     "generate file",
     "update file",
+    "in the docs directory",
+    "inside docs",
     "put this in",
     "in this workspace",
   ];
