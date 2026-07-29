@@ -631,6 +631,39 @@ type GitStatusPayload = {
   rootDir: string;
 };
 
+type UnityPolicyPayload = {
+  allowedActions: string[];
+  allowDynamicCode: boolean;
+  harnessAllowlist: string[];
+  maxActionsPerTurn: number;
+  maxDynamicCodeChars: number;
+  approvalChangedAt?: string;
+  approvalChangedBy?: string;
+  approvalExpiresAt?: string;
+  approvalExpired?: boolean;
+};
+
+type UnityActionAuditRecord = {
+  id: string;
+  at: string;
+  source: "harness" | "api";
+  actor: string;
+  action: string;
+  status: "executed" | "blocked" | "failed";
+  reason?: string;
+  workspaceId?: string;
+  harnessId?: string;
+};
+
+type UnityApprovalAuditRecord = {
+  id: string;
+  at: string;
+  actor: string;
+  enabled: boolean;
+  expiresAt?: string;
+  reason?: string;
+};
+
 type GitHubConnectorStatus = {
   connected: boolean;
   login: string | null;
@@ -1584,6 +1617,11 @@ function App() {
   const [startupChecking, setStartupChecking] = useState(false);
   const [unityExecutionEnabled, setUnityExecutionEnabled] = useState(false);
   const [unityApprovalBusy, setUnityApprovalBusy] = useState(false);
+  const [unityEnableMinutes, setUnityEnableMinutes] = useState(30);
+  const [unityPolicy, setUnityPolicy] = useState<UnityPolicyPayload | null>(null);
+  const [unityActionAudit, setUnityActionAudit] = useState<UnityActionAuditRecord[]>([]);
+  const [unityApprovalAudit, setUnityApprovalAudit] = useState<UnityApprovalAuditRecord[]>([]);
+  const [unityAuditBusy, setUnityAuditBusy] = useState(false);
   const [startupStrictMode, setStartupStrictMode] = useState(false);
   const [startupStrictModeSaving, setStartupStrictModeSaving] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
@@ -4716,6 +4754,8 @@ function App() {
     await loadFailedTasks();
     await loadLastStartupCheck();
     await loadNxRouter();
+    await loadUnityApprovalState();
+    await loadUnityAudit();
     await loadOfficePresets();
     await loadVoiceAssignments();
     setStatusMessage(payload.onboardingRequired ? "First run: Add a provider in Nexus Router to get started." : "Ready");
@@ -5514,7 +5554,39 @@ function App() {
     setGitBusyAction(null);
   }
 
-  async function setUnityExecutionApproval(enabled: boolean) {
+  async function loadUnityApprovalState() {
+    const response = await fetch("/api/tools/unity/approval");
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as {
+      unityExecutionEnabled: boolean;
+      unityPolicy?: UnityPolicyPayload;
+    };
+    setUnityExecutionEnabled(Boolean(payload.unityExecutionEnabled));
+    setUnityPolicy(payload.unityPolicy ?? null);
+    setBoot((current) => current ? { ...current, unityExecutionEnabled: Boolean(payload.unityExecutionEnabled) } : current);
+  }
+
+  async function loadUnityAudit() {
+    setUnityAuditBusy(true);
+    const [actionRes, approvalRes] = await Promise.all([
+      fetch("/api/tools/unity/audit?limit=30"),
+      fetch("/api/tools/unity/approval/audit?limit=20"),
+    ]);
+
+    if (actionRes.ok) {
+      const payload = (await actionRes.json()) as { records?: UnityActionAuditRecord[] };
+      setUnityActionAudit(Array.isArray(payload.records) ? payload.records : []);
+    }
+    if (approvalRes.ok) {
+      const payload = (await approvalRes.json()) as { records?: UnityApprovalAuditRecord[] };
+      setUnityApprovalAudit(Array.isArray(payload.records) ? payload.records : []);
+    }
+    setUnityAuditBusy(false);
+  }
+
+  async function setUnityExecutionApproval(enabled: boolean, options?: { durationMinutes?: number; reason?: string }) {
     if (unityApprovalBusy) {
       return;
     }
@@ -5522,7 +5594,12 @@ function App() {
     const response = await fetch("/api/tools/unity/approval", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify({
+        enabled,
+        durationMinutes: options?.durationMinutes,
+        reason: options?.reason,
+        actor: "ui:settings",
+      }),
     });
 
     if (!response.ok) {
@@ -5532,12 +5609,14 @@ function App() {
       return;
     }
 
-    const payload = (await response.json()) as { unityExecutionEnabled: boolean };
+    const payload = (await response.json()) as { unityExecutionEnabled: boolean; unityPolicy?: UnityPolicyPayload };
     setUnityExecutionEnabled(Boolean(payload.unityExecutionEnabled));
+    setUnityPolicy(payload.unityPolicy ?? null);
     setBoot((current) => current ? { ...current, unityExecutionEnabled: Boolean(payload.unityExecutionEnabled) } : current);
     setStatusMessage(payload.unityExecutionEnabled
       ? "Unity tool execution enabled for harness actions."
       : "Unity tool execution disabled.");
+    await loadUnityAudit();
     setUnityApprovalBusy(false);
   }
 
@@ -5583,7 +5662,10 @@ function App() {
         setStatusMessage("Unity tool execution is disabled. Request canceled.");
         return;
       }
-      await setUnityExecutionApproval(true);
+      await setUnityExecutionApproval(true, {
+        durationMinutes: unityEnableMinutes,
+        reason: "chat-intent-unity",
+      });
     }
 
     const harnessId = activeHarness.id;
@@ -8537,14 +8619,31 @@ function App() {
                 <section className="tool-section">
                   <div className="tool-header-row">
                     <h3>Unity Tool Execution</h3>
+                    <button type="button" className="ghost" onClick={() => void loadUnityAudit()} disabled={unityAuditBusy || unityApprovalBusy}>
+                      {unityAuditBusy ? "Refreshing..." : "Refresh Audit"}
+                    </button>
                   </div>
                   <p className="subtitle">Controls whether harnesses can run Unity compile/test/log/screenshot/dynamic-code actions.</p>
                   <div className="tool-action-row" style={{ alignItems: "center", gap: 12 }}>
                     <span className={`status-dot ${unityExecutionEnabled ? "ok" : "warn"}`}>{unityExecutionEnabled ? "Enabled" : "Disabled"}</span>
+                    <label>
+                      <span>Enable for (minutes)</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={1440}
+                        value={unityEnableMinutes}
+                        onChange={(event) => setUnityEnableMinutes(Math.max(1, Math.min(1440, Number(event.target.value || 30))))}
+                        disabled={unityApprovalBusy}
+                      />
+                    </label>
                     <button
                       type="button"
                       className={unityExecutionEnabled ? "ghost" : ""}
-                      onClick={() => void setUnityExecutionApproval(!unityExecutionEnabled)}
+                      onClick={() => void setUnityExecutionApproval(!unityExecutionEnabled, {
+                        durationMinutes: !unityExecutionEnabled ? unityEnableMinutes : undefined,
+                        reason: !unityExecutionEnabled ? "manual-enable" : "manual-disable",
+                      })}
                       disabled={unityApprovalBusy}
                     >
                       {unityApprovalBusy
@@ -8554,6 +8653,50 @@ function App() {
                           : "Enable Unity Execution"}
                     </button>
                   </div>
+
+                  <div className="tool-list">
+                    <small>Allowed actions: {unityPolicy?.allowedActions?.join(", ") || "n/a"}</small>
+                    <small>Dynamic code: {unityPolicy?.allowDynamicCode ? "allowed" : "blocked"}</small>
+                    <small>Max actions per turn: {unityPolicy?.maxActionsPerTurn ?? "n/a"}</small>
+                    <small>Approval changed by: {unityPolicy?.approvalChangedBy || "n/a"}</small>
+                    <small>Approval changed at: {unityPolicy?.approvalChangedAt ? new Date(unityPolicy.approvalChangedAt).toLocaleString() : "n/a"}</small>
+                    <small>Approval expires at: {unityPolicy?.approvalExpiresAt ? new Date(unityPolicy.approvalExpiresAt).toLocaleString() : "none"}</small>
+                  </div>
+
+                  <details className="tool-details">
+                    <summary>Unity Action Audit ({unityActionAudit.length})</summary>
+                    {unityActionAudit.length === 0 ? (
+                      <small>No Unity action audit entries yet.</small>
+                    ) : (
+                      <ul className="tool-list">
+                        {unityActionAudit.map((entry) => (
+                          <li key={entry.id}>
+                            <strong>{entry.action}</strong>
+                            <small>{new Date(entry.at).toLocaleString()} · {entry.status} · {entry.source} · {entry.actor}</small>
+                            {entry.reason ? <small>{entry.reason}</small> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </details>
+
+                  <details className="tool-details">
+                    <summary>Unity Approval Audit ({unityApprovalAudit.length})</summary>
+                    {unityApprovalAudit.length === 0 ? (
+                      <small>No approval changes yet.</small>
+                    ) : (
+                      <ul className="tool-list">
+                        {unityApprovalAudit.map((entry) => (
+                          <li key={entry.id}>
+                            <strong>{entry.enabled ? "Enabled" : "Disabled"}</strong>
+                            <small>{new Date(entry.at).toLocaleString()} · {entry.actor}</small>
+                            {entry.expiresAt ? <small>Expires: {new Date(entry.expiresAt).toLocaleString()}</small> : null}
+                            {entry.reason ? <small>{entry.reason}</small> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </details>
 
                   <hr style={{ margin: "18px 0", opacity: 0.25 }} />
 

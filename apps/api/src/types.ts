@@ -172,6 +172,10 @@ export type SystemState = {
     unityApprovalChangedAt?: string;
     unityApprovalChangedBy?: string;
     unityApprovalExpiresAt?: string;
+    runtimeInstallEnabled?: boolean;
+    runtimeAllowDirectInstallApi?: boolean;
+    runtimeAllowedJobActions?: string[];
+    runtimePullModelAllowPattern?: string;
   };
   activeWorkspaceId: string;
   selectedPane: {

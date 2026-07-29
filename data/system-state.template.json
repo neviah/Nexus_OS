@@ -15,7 +15,25 @@
     "unityMaxDynamicCodeChars": 2000,
     "unityApprovalChangedAt": null,
     "unityApprovalChangedBy": null,
-    "unityApprovalExpiresAt": null
+    "unityApprovalExpiresAt": null,
+    "runtimeInstallEnabled": true,
+    "runtimeAllowDirectInstallApi": false,
+    "runtimeAllowedJobActions": [
+      "install-ollama",
+      "start-ollama",
+      "pull-ollama-model",
+      "install-piper",
+      "install-default-piper-voice",
+      "install-acejam",
+      "start-acejam",
+      "install-wan2gp",
+      "start-wan2gp",
+      "install-hunyuan3d",
+      "start-hunyuan3d",
+      "install-animato",
+      "start-animato"
+    ],
+    "runtimePullModelAllowPattern": "^[a-z0-9._:-]{1,120}$"
   },
   "activeWorkspaceId": "default",
   "selectedPane": {

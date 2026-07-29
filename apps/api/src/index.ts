@@ -138,6 +138,29 @@ type RuntimeJobAction =
   | "install-animato"
   | "start-animato";
 
+const ALL_RUNTIME_JOB_ACTIONS: readonly RuntimeJobAction[] = [
+  "install-ollama",
+  "start-ollama",
+  "pull-ollama-model",
+  "install-piper",
+  "install-default-piper-voice",
+  "install-acejam",
+  "start-acejam",
+  "install-wan2gp",
+  "start-wan2gp",
+  "install-hunyuan3d",
+  "start-hunyuan3d",
+  "install-animato",
+  "start-animato",
+];
+
+type RuntimeTrustPolicy = {
+  installEnabled: boolean;
+  allowDirectInstallApi: boolean;
+  allowedJobActions: RuntimeJobAction[];
+  pullModelAllowPattern: string;
+};
+
 type RuntimeJob = {
   id: string;
   action: RuntimeJobAction;
@@ -1081,6 +1104,130 @@ function validateUnityActionAgainstPolicy(input: {
   return { ok: true, args: { code } };
 }
 
+function getRuntimeTrustPolicy(state: SystemState): RuntimeTrustPolicy {
+  const allowed = Array.isArray(state.toolPermissions?.runtimeAllowedJobActions)
+    ? state.toolPermissions?.runtimeAllowedJobActions
+    : ALL_RUNTIME_JOB_ACTIONS;
+
+  const allowedJobActions = Array.from(new Set(allowed.filter((entry): entry is RuntimeJobAction => ALL_RUNTIME_JOB_ACTIONS.includes(entry as RuntimeJobAction))));
+
+  const pullModelAllowPatternRaw = typeof state.toolPermissions?.runtimePullModelAllowPattern === "string"
+    ? state.toolPermissions?.runtimePullModelAllowPattern.trim()
+    : "";
+  const pullModelAllowPattern = pullModelAllowPatternRaw || "^[a-z0-9._:-]{1,120}$";
+
+  return {
+    installEnabled: state.toolPermissions?.runtimeInstallEnabled !== false,
+    allowDirectInstallApi: Boolean(state.toolPermissions?.runtimeAllowDirectInstallApi),
+    allowedJobActions: allowedJobActions.length > 0 ? allowedJobActions : [...ALL_RUNTIME_JOB_ACTIONS],
+    pullModelAllowPattern,
+  };
+}
+
+function setRuntimeTrustPolicy(state: SystemState, input: Partial<RuntimeTrustPolicy>): RuntimeTrustPolicy {
+  const current = getRuntimeTrustPolicy(state);
+  const nextAllowed = Array.isArray(input.allowedJobActions)
+    ? Array.from(new Set(input.allowedJobActions.filter((entry) => ALL_RUNTIME_JOB_ACTIONS.includes(entry))))
+    : current.allowedJobActions;
+  const nextPattern = typeof input.pullModelAllowPattern === "string" && input.pullModelAllowPattern.trim().length > 0
+    ? input.pullModelAllowPattern.trim()
+    : current.pullModelAllowPattern;
+
+  state.toolPermissions = {
+    ...(state.toolPermissions ?? {}),
+    runtimeInstallEnabled: input.installEnabled ?? current.installEnabled,
+    runtimeAllowDirectInstallApi: input.allowDirectInstallApi ?? current.allowDirectInstallApi,
+    runtimeAllowedJobActions: nextAllowed.length > 0 ? nextAllowed : [...ALL_RUNTIME_JOB_ACTIONS],
+    runtimePullModelAllowPattern: nextPattern,
+  };
+
+  return getRuntimeTrustPolicy(state);
+}
+
+function validateRuntimeJobRequest(input: {
+  policy: RuntimeTrustPolicy;
+  action: RuntimeJobAction;
+  model?: string;
+}): { ok: true } | { ok: false; reason: string } {
+  if (!input.policy.installEnabled) {
+    return { ok: false, reason: "Runtime install/download actions are disabled by policy." };
+  }
+
+  if (!input.policy.allowedJobActions.includes(input.action)) {
+    return { ok: false, reason: `Runtime action ${input.action} is blocked by trust policy.` };
+  }
+
+  if (input.action === "pull-ollama-model") {
+    const model = String(input.model ?? "").trim();
+    if (!model) {
+      return { ok: false, reason: "pull-ollama-model requires model." };
+    }
+    try {
+      const regex = new RegExp(input.policy.pullModelAllowPattern);
+      if (!regex.test(model)) {
+        return { ok: false, reason: "Model name is blocked by runtime trust policy pattern." };
+      }
+    } catch {
+      return { ok: false, reason: "Runtime trust policy regex is invalid." };
+    }
+  }
+
+  return { ok: true };
+}
+
+type UnityRollbackSnapshotEntry = {
+  relativePath: string;
+  content: string | null;
+};
+
+type UnityRollbackSnapshot = {
+  createdAt: string;
+  action: UnityToolActionName;
+  entries: UnityRollbackSnapshotEntry[];
+};
+
+const UNITY_ROLLBACK_TARGETS = [
+  "Packages/manifest.json",
+  "Packages/packages-lock.json",
+  "ProjectSettings/ProjectSettings.asset",
+  "ProjectSettings/EditorBuildSettings.asset",
+] as const;
+
+function shouldCaptureUnityRollback(action: UnityToolActionName): boolean {
+  return action === "unity_compile" || action === "unity_execute_dynamic_code";
+}
+
+async function captureUnityRollbackSnapshot(unityProjectPath: string, action: UnityToolActionName): Promise<UnityRollbackSnapshot> {
+  const entries: UnityRollbackSnapshotEntry[] = [];
+  for (const relativePath of UNITY_ROLLBACK_TARGETS) {
+    const absolutePath = path.join(unityProjectPath, relativePath);
+    const content = await fs.readFile(absolutePath, "utf-8").catch(() => null);
+    entries.push({ relativePath, content });
+  }
+
+  return {
+    createdAt: new Date().toISOString(),
+    action,
+    entries,
+  };
+}
+
+async function restoreUnityRollbackSnapshot(unityProjectPath: string, snapshot: UnityRollbackSnapshot): Promise<string[]> {
+  const restored: string[] = [];
+  for (const entry of snapshot.entries) {
+    const absolutePath = path.join(unityProjectPath, entry.relativePath);
+    if (entry.content === null) {
+      await fs.rm(absolutePath, { force: true }).catch(() => undefined);
+      restored.push(entry.relativePath);
+      continue;
+    }
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.writeFile(absolutePath, entry.content, "utf-8");
+    restored.push(entry.relativePath);
+  }
+  return restored;
+}
+
 type UnityCliLoopStatus = {
   available: boolean;
   executable: string | null;
@@ -1169,6 +1316,49 @@ async function runUnityCliLoopCommand(input: {
       command: [input.executable, ...actionArgs],
       stdout: "",
       stderr,
+    };
+  }
+}
+
+async function runUnityCliLoopWithRollback(input: {
+  executable: string;
+  action: UnityToolActionName;
+  unityProjectPath: string;
+  args?: Record<string, unknown>;
+}): Promise<UnityCliLoopRunResult & { rollback?: { attempted: boolean; restored: string[]; error?: string } }> {
+  let snapshot: UnityRollbackSnapshot | null = null;
+  if (shouldCaptureUnityRollback(input.action)) {
+    snapshot = await captureUnityRollbackSnapshot(input.unityProjectPath, input.action);
+  }
+
+  const result = await runUnityCliLoopCommand({
+    executable: input.executable,
+    action: input.action,
+    workspacePath: input.unityProjectPath,
+    args: input.args,
+  });
+
+  if (result.ok || !snapshot) {
+    return result;
+  }
+
+  try {
+    const restored = await restoreUnityRollbackSnapshot(input.unityProjectPath, snapshot);
+    return {
+      ...result,
+      rollback: {
+        attempted: true,
+        restored,
+      },
+    };
+  } catch (error) {
+    return {
+      ...result,
+      rollback: {
+        attempted: true,
+        restored: [],
+        error: error instanceof Error ? error.message : String(error),
+      },
     };
   }
 }
@@ -5765,10 +5955,10 @@ async function executeUnityToolActions(input: {
       continue;
     }
 
-    const result = await runUnityCliLoopCommand({
+    const result = await runUnityCliLoopWithRollback({
       executable: cli.executable,
       action: action.action,
-      workspacePath: unityProjectPath,
+      unityProjectPath,
       args: validation.args,
     });
 
@@ -5783,7 +5973,11 @@ async function executeUnityToolActions(input: {
       unityProjectPath,
       action: action.action,
       status: result.ok ? "executed" : "failed",
-      reason: result.ok ? undefined : "Unity CLI Loop command failed",
+      reason: result.ok
+        ? undefined
+        : (result.rollback?.attempted
+          ? `Unity CLI Loop command failed; rollback attempted${result.rollback.error ? ` (${result.rollback.error})` : ""}`
+          : "Unity CLI Loop command failed"),
       command: result.command,
       stdoutChars: result.stdout.length,
       stderrChars: result.stderr.length,
@@ -5796,6 +5990,8 @@ async function executeUnityToolActions(input: {
       `UNITY ${action.action}`,
       `ok=${result.ok}`,
       `cmd=${result.command.join(" ")}`,
+      result.rollback?.attempted ? `rollback_restored=${result.rollback.restored.join(",") || "none"}` : "",
+      result.rollback?.error ? `rollback_error=${result.rollback.error}` : "",
       result.stdout ? `stdout:\n${result.stdout.slice(0, 4000)}` : "",
       result.stderr ? `stderr:\n${result.stderr.slice(0, 4000)}` : "",
     ].filter(Boolean).join("\n"));
@@ -8245,10 +8441,10 @@ app.post("/api/tools/unity/:action", async (req, res) => {
     });
   }
 
-  const result = await runUnityCliLoopCommand({
+  const result = await runUnityCliLoopWithRollback({
     executable: uloop.executable,
     action,
-    workspacePath: unityProjectPath,
+    unityProjectPath,
     args: validation.args,
   });
 
@@ -8262,7 +8458,11 @@ app.post("/api/tools/unity/:action", async (req, res) => {
     unityProjectPath,
     action,
     status: result.ok ? "executed" : "failed",
-    reason: result.ok ? undefined : "Unity CLI Loop command failed",
+    reason: result.ok
+      ? undefined
+      : (result.rollback?.attempted
+        ? `Unity CLI Loop command failed; rollback attempted${result.rollback.error ? ` (${result.rollback.error})` : ""}`
+        : "Unity CLI Loop command failed"),
     command: result.command,
     stdoutChars: result.stdout.length,
     stderrChars: result.stderr.length,
@@ -8276,6 +8476,7 @@ app.post("/api/tools/unity/:action", async (req, res) => {
     workspaceId: workspace.id,
     action,
     command: result.command,
+    rollback: result.rollback,
     stdout: result.stdout,
     stderr: result.stderr,
   });
@@ -8498,6 +8699,32 @@ app.get("/api/tools/runtimes/status", async (_req, res) => {
   res.json(status);
 });
 
+app.get("/api/tools/runtimes/policy", async (_req, res) => {
+  const state = await readSystemState();
+  const policy = getRuntimeTrustPolicy(state);
+  return res.json({ ok: true, policy });
+});
+
+app.post("/api/tools/runtimes/policy", async (req, res) => {
+  const body = req.body as {
+    installEnabled?: boolean;
+    allowDirectInstallApi?: boolean;
+    allowedJobActions?: RuntimeJobAction[];
+    pullModelAllowPattern?: string;
+  };
+  const state = await readSystemState();
+  const policy = setRuntimeTrustPolicy(state, {
+    installEnabled: body.installEnabled,
+    allowDirectInstallApi: body.allowDirectInstallApi,
+    allowedJobActions: Array.isArray(body.allowedJobActions)
+      ? body.allowedJobActions.filter((entry): entry is RuntimeJobAction => ALL_RUNTIME_JOB_ACTIONS.includes(entry))
+      : undefined,
+    pullModelAllowPattern: body.pullModelAllowPattern,
+  });
+  await writeSystemState(state);
+  return res.json({ ok: true, policy });
+});
+
 app.get("/api/tools/runtimes/jobs", async (_req, res) => {
   await loadRuntimeJobsFromDisk();
   const jobs = toRuntimeJobPayload();
@@ -8518,6 +8745,17 @@ app.post("/api/tools/runtimes/jobs", async (req, res) => {
   const body = req.body as { action?: RuntimeJobAction; model?: string };
   if (!body.action) {
     return res.status(400).json({ error: "action is required" });
+  }
+
+  const state = await readSystemState();
+  const policy = getRuntimeTrustPolicy(state);
+  const validation = validateRuntimeJobRequest({
+    policy,
+    action: body.action,
+    model: body.model,
+  });
+  if (!validation.ok) {
+    return res.status(412).json({ error: validation.reason });
   }
 
   const job = createRuntimeJob(body.action, body.model);
@@ -8552,6 +8790,17 @@ app.post("/api/tools/runtimes/jobs/:jobId/retry", async (req, res) => {
     return res.status(409).json({ error: "Only failed or canceled jobs can be retried", job });
   }
 
+  const state = await readSystemState();
+  const policy = getRuntimeTrustPolicy(state);
+  const validation = validateRuntimeJobRequest({
+    policy,
+    action: job.action,
+    model: job.model,
+  });
+  if (!validation.ok) {
+    return res.status(412).json({ error: validation.reason, job });
+  }
+
   const retryJob = createRuntimeJob(job.action, job.model, job.id);
   appendRuntimeJobLog(retryJob, `Retry created from job ${job.id}.`);
   startRuntimeJob(retryJob);
@@ -8561,6 +8810,40 @@ app.post("/api/tools/runtimes/jobs/:jobId/retry", async (req, res) => {
 app.post("/api/tools/runtimes/install", async (req, res) => {
   const body = req.body as { runtime?: "ollama" | "piper" | "default-piper-voice" | "acejam" | "wan2gp" | "hunyuan3d" | "animato" };
   try {
+    const state = await readSystemState();
+    const policy = getRuntimeTrustPolicy(state);
+    if (!policy.allowDirectInstallApi) {
+      return res.status(412).json({ error: "Direct runtime install API is disabled by trust policy. Use /api/tools/runtimes/jobs instead." });
+    }
+
+    const mappedAction: RuntimeJobAction | null = body.runtime === "ollama"
+      ? "install-ollama"
+      : body.runtime === "piper"
+        ? "install-piper"
+        : body.runtime === "default-piper-voice"
+          ? "install-default-piper-voice"
+          : body.runtime === "acejam"
+            ? "install-acejam"
+            : body.runtime === "wan2gp"
+              ? "install-wan2gp"
+              : body.runtime === "hunyuan3d"
+                ? "install-hunyuan3d"
+                : body.runtime === "animato"
+                  ? "install-animato"
+                  : null;
+
+    if (!mappedAction) {
+      return res.status(400).json({ error: "Unknown runtime target" });
+    }
+
+    const validation = validateRuntimeJobRequest({
+      policy,
+      action: mappedAction,
+    });
+    if (!validation.ok) {
+      return res.status(412).json({ error: validation.reason });
+    }
+
     if (body.runtime === "ollama") {
       await installOllama();
       await startOllamaIfNeeded();

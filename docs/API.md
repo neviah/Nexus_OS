@@ -168,3 +168,43 @@ Example policy update request:
   "reason": "tighten policy"
 }
 ```
+
+## Runtime Trust Policy
+
+- `GET /api/tools/runtimes/policy`
+  - Returns runtime install/download policy settings.
+- `POST /api/tools/runtimes/policy`
+  - Updates runtime policy (`installEnabled`, `allowDirectInstallApi`, `allowedJobActions`, `pullModelAllowPattern`).
+
+Runtime policy is enforced for:
+
+- `POST /api/tools/runtimes/jobs`
+- `POST /api/tools/runtimes/jobs/:jobId/retry`
+- `POST /api/tools/runtimes/install`
+
+When blocked by policy, endpoints return HTTP `412` with a descriptive error message.
+
+Example runtime policy update:
+
+```json
+{
+  "installEnabled": true,
+  "allowDirectInstallApi": false,
+  "allowedJobActions": [
+    "install-ollama",
+    "start-ollama",
+    "pull-ollama-model",
+    "install-piper",
+    "install-default-piper-voice",
+    "install-acejam",
+    "start-acejam",
+    "install-wan2gp",
+    "start-wan2gp",
+    "install-hunyuan3d",
+    "start-hunyuan3d",
+    "install-animato",
+    "start-animato"
+  ],
+  "pullModelAllowPattern": "^[a-z0-9._:-]{1,120}$"
+}
+```
