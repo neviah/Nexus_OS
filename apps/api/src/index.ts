@@ -25,7 +25,7 @@ import type {
   SystemState,
 } from "./types.js";
 import { invokeHarness, streamHarness } from "./lib/harnessAdapter.js";
-import type { AdapterResult } from "./lib/harnessAdapter.js";
+import type { AdapterMeta, AdapterResult } from "./lib/harnessAdapter.js";
 import { runHarnessConformance } from "./lib/conformance.js";
 import {
   appendTaskOutput,
@@ -237,6 +237,20 @@ type GitHubDeviceTokenResponse = {
 type WorkspaceWriteAction = {
   path: string;
   content: string;
+};
+
+type WorkspaceReadAction = {
+  path: string;
+};
+
+type WorkspaceListAction = {
+  path: string;
+};
+
+type WorkspaceActionSet = {
+  writes: WorkspaceWriteAction[];
+  reads: WorkspaceReadAction[];
+  lists: WorkspaceListAction[];
 };
 
 const GAME_CREATOR_TARGETS = ["unity-3d", "unity-2d", "web-2d"] as const;
@@ -5106,6 +5120,102 @@ async function applyWorkspaceActionsFromHarnessOutput(output: string, workspaceP
   };
 }
 
+async function executeWorkspaceReadActions(workspacePath: string, reads: WorkspaceReadAction[], lists: WorkspaceListAction[]): Promise<string> {
+  const entries: string[] = [];
+
+  for (const action of lists) {
+    const targetPath = resolveWorkspaceTargetPath(workspacePath, action.path);
+    const listing = await listWorkspaceDirectoryForTool(targetPath, workspacePath);
+    entries.push(`LIST ${action.path}\n${listing}`);
+  }
+
+  for (const action of reads) {
+    const targetPath = resolveWorkspaceTargetPath(workspacePath, action.path);
+    const content = await fs.readFile(targetPath, "utf-8").catch(() => null);
+    if (content === null) {
+      entries.push(`READ ${action.path}\n[missing file]`);
+      continue;
+    }
+    entries.push(`READ ${action.path}\n${content}`);
+  }
+
+  return entries.join("\n\n");
+}
+
+async function listWorkspaceDirectoryForTool(targetPath: string, workspacePath: string): Promise<string> {
+  const entries = await fs.readdir(targetPath, { withFileTypes: true });
+  const lines = entries
+    .filter((entry) => !entry.name.startsWith("."))
+    .map((entry) => `${entry.isDirectory() ? "[dir]" : "[file]"} ${entry.name}`)
+    .sort((a, b) => a.localeCompare(b));
+  return [`path: ${path.relative(workspacePath, targetPath).replace(/\\/g, "/") || "."}`, ...lines].join("\n");
+}
+
+function extractWorkspaceActions(output: string): WorkspaceActionSet {
+  const writes = extractWorkspaceWriteActions(output);
+  const reads: WorkspaceReadAction[] = [];
+  const lists: WorkspaceListAction[] = [];
+
+  const candidates = extractJsonCandidates(output);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      collectWorkspaceReadListActions(parsed, reads, lists);
+    } catch {
+      // Ignore malformed snippets.
+    }
+  }
+
+  return { writes, reads, lists };
+}
+
+function collectWorkspaceReadListActions(value: unknown, reads: WorkspaceReadAction[], lists: WorkspaceListAction[]): void {
+  if (!value) {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectWorkspaceReadListActions(entry, reads, lists);
+    }
+    return;
+  }
+
+  if (typeof value !== "object") {
+    return;
+  }
+
+  const obj = value as Record<string, unknown>;
+  const actionName = typeof obj.action === "string"
+    ? obj.action.trim().toLowerCase()
+    : (typeof obj.name === "string"
+      ? obj.name.trim().toLowerCase()
+      : (typeof obj.type === "string"
+        ? obj.type.trim().toLowerCase()
+        : (typeof obj.tool === "string" ? obj.tool.trim().toLowerCase() : "")));
+  const pathValue = typeof obj.path === "string" ? obj.path : undefined;
+  if (!pathValue) {
+    return;
+  }
+
+  if (actionName === "read_file" || actionName === "read" || actionName === "open_file") {
+    reads.push({ path: pathValue.trim() });
+  }
+  if (actionName === "list_dir" || actionName === "list" || actionName === "ls") {
+    lists.push({ path: pathValue.trim() });
+  }
+
+  if (Array.isArray(obj.actions)) {
+    collectWorkspaceReadListActions(obj.actions, reads, lists);
+  }
+  if (Array.isArray(obj.tool_calls)) {
+    collectWorkspaceReadListActions(obj.tool_calls, reads, lists);
+  }
+  if (obj.function && typeof obj.function === "object") {
+    collectWorkspaceReadListActions(obj.function, reads, lists);
+  }
+}
+
 async function ensureWorkspaceWritesForFileIntent(input: {
   output: string;
   userMessage: string;
@@ -5192,6 +5302,63 @@ async function ensureWorkspaceWritesForFileIntent(input: {
     applied: 0,
     recovered: true,
   };
+}
+
+async function runHarnessWorkspaceConversation(input: {
+  harness: Awaited<ReturnType<typeof readHarnessRegistry>>[number];
+  message: string;
+  history: ChatMessage[];
+  state: SystemState;
+  workspace: { id: string; path: string };
+  githubLogin?: string;
+}): Promise<{ content: string; meta: AdapterMeta }> {
+  const maxTurns = 4;
+  let nextMessage = input.message;
+  let nextHistory = [...input.history];
+  let finalContent = "";
+  let finalMeta: AdapterMeta | null = null;
+
+  for (let turn = 0; turn < maxTurns; turn += 1) {
+    const result = await invokeHarness({
+      harness: input.harness,
+      message: nextMessage,
+      history: nextHistory,
+      state: input.state,
+      workspace: input.workspace,
+      githubLogin: input.githubLogin,
+    });
+
+    finalContent = result.content;
+    finalMeta = result.meta;
+
+    const actions = extractWorkspaceActions(result.content);
+    if (input.workspace.path && actions.writes.length > 0) {
+      const writeResult = await applyWorkspaceActionsFromHarnessOutput(result.content, input.workspace.path);
+      if (writeResult.applied > 0) {
+        finalContent = writeResult.output;
+      }
+    }
+
+    if (input.workspace.path && (actions.reads.length > 0 || actions.lists.length > 0)) {
+      const toolResults = await executeWorkspaceReadActions(input.workspace.path, actions.reads, actions.lists);
+      nextHistory = [
+        ...nextHistory,
+        { id: crypto.randomUUID(), role: "user", content: nextMessage, createdAt: new Date().toISOString() },
+        { id: crypto.randomUUID(), role: "assistant", content: result.content, createdAt: new Date().toISOString() },
+        { id: crypto.randomUUID(), role: "user", content: `Workspace tool results:\n${toolResults}\n\nContinue by updating your answer or emit write actions if needed.`, createdAt: new Date().toISOString() },
+      ];
+      nextMessage = "Continue using the workspace tool results above. Return updated write actions or final answer.";
+      continue;
+    }
+
+    break;
+  }
+
+  if (!finalMeta) {
+    throw new Error("Harness returned no response metadata.");
+  }
+
+  return { content: finalContent, meta: finalMeta };
 }
 
 function extractWorkspaceWriteActions(output: string): WorkspaceWriteAction[] {
@@ -5548,7 +5715,7 @@ async function runScheduledHarnessTask(input: {
   }
 
   try {
-    const result = await invokeHarness({
+    const result = await runHarnessWorkspaceConversation({
       harness,
       message: input.prompt,
       history: [],
@@ -10107,7 +10274,7 @@ app.post("/api/chat", async (req, res) => {
 
   let adapterResult: AdapterResult;
   try {
-    adapterResult = await invokeHarness({
+    adapterResult = await runHarnessWorkspaceConversation({
       harness,
       message,
       history: safeHistory,
@@ -10115,23 +10282,6 @@ app.post("/api/chat", async (req, res) => {
       workspace,
       githubLogin: githubLoginForChat,
     });
-
-    if (workspace.path) {
-      const actionResult = await ensureWorkspaceWritesForFileIntent({
-        output: adapterResult.content,
-        userMessage: message,
-        workspacePath: workspace.path,
-        harness,
-        state,
-        workspace,
-        history: safeHistory,
-        githubLogin: githubLoginForChat,
-      });
-      adapterResult = {
-        ...adapterResult,
-        content: actionResult.output,
-      };
-    }
   } catch (error) {
     if (fableProfile !== "off") {
       await appendFableTelemetry({
@@ -10232,7 +10382,7 @@ app.post("/api/chat/tasks/:requestId/resume", async (req, res) => {
 
   const replayPrompt = buildReplayPrompt(task);
   const workspace = await resolveWorkspaceContext(state, task.workspaceId);
-  const resumed = await invokeHarness({
+  const resumed = await runHarnessWorkspaceConversation({
     harness,
     message: replayPrompt,
     history: task.history,
@@ -10240,9 +10390,7 @@ app.post("/api/chat/tasks/:requestId/resume", async (req, res) => {
     workspace,
   });
 
-  const resumedContent = workspace.path
-    ? (await applyWorkspaceActionsFromHarnessOutput(resumed.content, workspace.path)).output
-    : resumed.content;
+  const resumedContent = resumed.content;
 
   await updateTaskStatus(requestId, "completed", {
     finalOutput: `${task.partialOutput}${resumedContent}`,
@@ -10325,44 +10473,25 @@ app.post("/api/chat/stream", async (req, res) => {
   res.setHeader("Connection", "keep-alive");
 
   try {
-    let output = "";
-    let latestMeta:
-      | {
-          model: string;
-          provider: string;
-          fallbackUsed: boolean;
-          elapsedMs: number;
-          tokenUsage: { input: number; output: number };
-        }
-      | undefined;
-
-    for await (const chunk of streamHarness({
+    const conversation = await runHarnessWorkspaceConversation({
       harness,
       message,
       history: safeHistory,
       state,
       workspace,
-      signal: controller.signal,
       githubLogin: githubLoginForChat,
-    })) {
+    });
+
+    const output = conversation.content;
+    const latestMeta = conversation.meta;
+
+    res.write(`data: ${JSON.stringify({ type: "meta", meta: latestMeta })}\n\n`);
+    await appendTaskOutput(requestId, output);
+    for (const token of output.split(/(\s+)/)) {
       if (controller.signal.aborted) {
         break;
       }
-
-      if (chunk.type === "meta") {
-        latestMeta = chunk.meta;
-      }
-
-      if (chunk.type === "delta") {
-        output += chunk.text;
-        await appendTaskOutput(requestId, chunk.text);
-      }
-
-      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-
-      if (chunk.type === "done") {
-        break;
-      }
+      res.write(`data: ${JSON.stringify({ type: "delta", text: token })}\n\n`);
     }
 
     state.router9.logs.unshift({
@@ -10375,26 +10504,7 @@ app.post("/api/chat/stream", async (req, res) => {
     }
     await writeSystemState(state);
 
-    let finalOutput = output;
-    if (!controller.signal.aborted && workspace.path) {
-      const actionResult = await ensureWorkspaceWritesForFileIntent({
-        output,
-        userMessage: message,
-        workspacePath: workspace.path,
-        harness,
-        state,
-        workspace,
-        history: safeHistory,
-        githubLogin: githubLoginForChat,
-      });
-      finalOutput = actionResult.output;
-      if (actionResult.applied > 0 || actionResult.recovered) {
-        const suffix = finalOutput.slice(output.length);
-        if (suffix.trim()) {
-          res.write(`data: ${JSON.stringify({ type: "delta", text: suffix })}\n\n`);
-        }
-      }
-    }
+    const finalOutput = output;
 
     await updateTaskStatus(requestId, controller.signal.aborted ? "aborted" : "completed", {
       finalOutput,
@@ -10433,7 +10543,7 @@ app.post("/api/chat/stream", async (req, res) => {
     if (replayTask && !controller.signal.aborted) {
       const replayPrompt = buildReplayPrompt(replayTask);
       try {
-        const resumed = await invokeHarness({
+        const resumed = await runHarnessWorkspaceConversation({
           harness,
           message: replayPrompt,
           history: safeHistory,
@@ -10441,9 +10551,7 @@ app.post("/api/chat/stream", async (req, res) => {
           workspace,
         });
 
-        const resumedContent = workspace.path
-          ? (await applyWorkspaceActionsFromHarnessOutput(resumed.content, workspace.path)).output
-          : resumed.content;
+        const resumedContent = resumed.content;
 
         await appendTaskOutput(requestId, resumedContent);
         await updateTaskStatus(requestId, "completed", {
