@@ -5358,6 +5358,20 @@ async function runHarnessWorkspaceConversation(input: {
     throw new Error("Harness returned no response metadata.");
   }
 
+  if (input.workspace.path && hasWorkspaceFileWriteIntent(input.message)) {
+    const recovery = await ensureWorkspaceWritesForFileIntent({
+      output: finalContent,
+      userMessage: input.message,
+      workspacePath: input.workspace.path,
+      harness: input.harness,
+      state: input.state,
+      workspace: input.workspace,
+      history: input.history,
+      githubLogin: input.githubLogin,
+    });
+    finalContent = recovery.output;
+  }
+
   return { content: finalContent, meta: finalMeta };
 }
 
