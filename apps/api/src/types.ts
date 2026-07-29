@@ -164,6 +164,11 @@ export type SystemState = {
   startupStrictMode?: boolean;
   toolPermissions?: {
     unityExecutionEnabled?: boolean;
+    unityAllowedActions?: Array<"unity_compile" | "unity_run_tests" | "unity_get_logs" | "unity_screenshot" | "unity_execute_dynamic_code">;
+    unityHarnessAllowlist?: string[];
+    unityAllowDynamicCode?: boolean;
+    unityMaxActionsPerTurn?: number;
+    unityMaxDynamicCodeChars?: number;
   };
   activeWorkspaceId: string;
   selectedPane: {

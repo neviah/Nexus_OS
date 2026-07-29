@@ -1,6 +1,19 @@
 {
   "onboardingComplete": false,
   "startupStrictMode": false,
+  "toolPermissions": {
+    "unityExecutionEnabled": false,
+    "unityAllowedActions": [
+      "unity_compile",
+      "unity_run_tests",
+      "unity_get_logs",
+      "unity_screenshot"
+    ],
+    "unityHarnessAllowlist": [],
+    "unityAllowDynamicCode": false,
+    "unityMaxActionsPerTurn": 2,
+    "unityMaxDynamicCodeChars": 2000
+  },
   "activeWorkspaceId": "default",
   "selectedPane": {
     "type": "tool",
