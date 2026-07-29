@@ -19,3 +19,5 @@ vendor/wan2gp/
 
 .DS_Store
 Thumbs.db
+
+.nexus-launch-url

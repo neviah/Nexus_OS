@@ -37,7 +37,7 @@ module.exports = {
           default: true,
           icon: "fa-solid fa-rocket",
           text: "Open NEXUS OS",
-          href: local.url,
+          href: "open.js",
         }, {
           icon: "fa-solid fa-terminal",
           text: "Terminal",

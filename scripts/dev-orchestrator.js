@@ -1,5 +1,9 @@
 const net = require("node:net");
+const fs = require("node:fs");
+const path = require("node:path");
 const { spawn } = require("node:child_process");
+
+const launchUrlPath = path.resolve(process.cwd(), ".nexus-launch-url");
 
 function isPortFree(port) {
   return new Promise((resolve) => {
@@ -69,6 +73,7 @@ async function main() {
   const maybeAnnounceReady = () => {
     if (!announcedReadyUrl && apiReady && webUrl) {
       announcedReadyUrl = true;
+      fs.writeFileSync(launchUrlPath, `${webUrl}\n`, "utf-8");
       process.stdout.write(`[dev] NEXUS_WEB_URL=${webUrl}\n`);
     }
   };
