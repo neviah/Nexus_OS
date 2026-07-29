@@ -31,7 +31,8 @@ module.exports = {
 
     if (running.start) {
       const local = info.local("start.js")
-      if (local && local.url) {
+      const hasLaunchUrl = typeof local?.url === "string" && /^https?:\/\//i.test(local.url)
+      if (hasLaunchUrl) {
         return [{
           default: true,
           icon: "fa-solid fa-rocket",

@@ -13,7 +13,7 @@ function isPortFree(port) {
   });
 }
 
-async function pickApiPort(start = 8080, maxAttempts = 20) {
+async function pickApiPort(start = 18080, maxAttempts = 50) {
   for (let offset = 0; offset < maxAttempts; offset += 1) {
     const candidate = start + offset;
     if (await isPortFree(candidate)) {
@@ -35,9 +35,14 @@ function createPrefixWriter(prefix, stream) {
   };
 }
 
+function stripAnsi(input) {
+  return input.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
 async function main() {
   const apiPort = await pickApiPort();
-  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+  const npmCmd = "npm";
+  const useShell = process.platform === "win32";
   const baseEnv = {
     ...process.env,
     PORT: String(apiPort),
@@ -48,21 +53,55 @@ async function main() {
 
   const api = spawn(npmCmd, ["--prefix", "apps/api", "run", "dev"], {
     env: baseEnv,
+    shell: useShell,
     stdio: ["inherit", "pipe", "pipe"],
   });
   const web = spawn(npmCmd, ["--prefix", "apps/web", "run", "dev"], {
     env: baseEnv,
+    shell: useShell,
     stdio: ["inherit", "pipe", "pipe"],
   });
+
+  let announcedReadyUrl = false;
+  let apiReady = false;
+  let webUrl = null;
+
+  const maybeAnnounceReady = () => {
+    if (!announcedReadyUrl && apiReady && webUrl) {
+      announcedReadyUrl = true;
+      process.stdout.write(`[dev] NEXUS_WEB_URL=${webUrl}\n`);
+    }
+  };
 
   const apiOut = createPrefixWriter("[api]", process.stdout);
   const apiErr = createPrefixWriter("[api]", process.stderr);
   const webOut = createPrefixWriter("[web]", process.stdout);
   const webErr = createPrefixWriter("[web]", process.stderr);
 
-  api.stdout.on("data", apiOut);
+  api.stdout.on("data", (chunk) => {
+    const text = chunk.toString();
+    apiOut(chunk);
+    if (!apiReady) {
+      const clean = stripAnsi(text);
+      if (clean.includes("NEXUS OS API running on http://localhost:")) {
+        apiReady = true;
+        maybeAnnounceReady();
+      }
+    }
+  });
   api.stderr.on("data", apiErr);
-  web.stdout.on("data", webOut);
+  web.stdout.on("data", (chunk) => {
+    const text = chunk.toString();
+    webOut(chunk);
+    if (!webUrl) {
+      const clean = stripAnsi(text);
+      const match = clean.match(/Local:\s+(http:\/\/localhost:\d+\/)/);
+      if (match?.[1]) {
+        webUrl = match[1];
+        maybeAnnounceReady();
+      }
+    }
+  });
   web.stderr.on("data", webErr);
 
   let shuttingDown = false;

@@ -9,7 +9,7 @@ module.exports = {
           "npm run dev"
         ],
         on: [{
-          event: "/(http:\\/\\/localhost:51[0-9]{2}\\/)/",
+          event: "/NEXUS_WEB_URL=(http:\\/\\/localhost:[0-9]+\\/)/",
           done: true
         }]
       }
