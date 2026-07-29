@@ -5122,6 +5122,7 @@ async function ensureWorkspaceWritesForFileIntent(input: {
   }
 
   const requestedFiles = extractRequestedWorkspaceFiles(input.userMessage);
+  const claimedFiles = extractClaimedCreatedFiles(input.output);
   const retryPrompt = [
     "Your previous response did not produce executable workspace file-write actions.",
     "Re-emit the result as explicit JSON write actions only.",
@@ -5131,10 +5132,13 @@ async function ensureWorkspaceWritesForFileIntent(input: {
     requestedFiles.length > 0
       ? `Requested file paths: ${requestedFiles.join(", ")}`
       : "Requested file paths: infer from the user request.",
+    claimedFiles.length > 0
+      ? `You previously claimed these files were created: ${claimedFiles.join(", ")}`
+      : "",
     `Original user request: ${input.userMessage}`,
     "Previous answer to transform:",
     input.output,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   const retry = await invokeHarness({
     harness: input.harness,
@@ -5154,8 +5158,37 @@ async function ensureWorkspaceWritesForFileIntent(input: {
     };
   }
 
+  // Second pass: regenerate from user intent only, avoiding self-referential claims.
+  const regenPrompt = [
+    "Generate the requested file(s) now.",
+    "Return only one fenced ```json block with write actions; do not include prose.",
+    "Schema: [{\"action\":\"write_file\",\"path\":\"relative/path.ext\",\"content\":\"full file content\"}]",
+    requestedFiles.length > 0
+      ? `Required file paths: ${requestedFiles.join(", ")}`
+      : "Required file paths: infer from user request.",
+    `User request: ${input.userMessage}`,
+  ].join("\n");
+
+  const regenerated = await invokeHarness({
+    harness: input.harness,
+    message: regenPrompt,
+    history: input.history,
+    state: input.state,
+    workspace: input.workspace,
+    githubLogin: input.githubLogin,
+  });
+
+  const regeneratedActions = await applyWorkspaceActionsFromHarnessOutput(regenerated.content, input.workspacePath);
+  if (regeneratedActions.applied > 0) {
+    return {
+      output: `${input.output}\n\n[nexus auto-recovery] Regenerated and applied executable file writes from the original request.\n${regeneratedActions.output}`,
+      applied: regeneratedActions.applied,
+      recovered: true,
+    };
+  }
+
   return {
-    output: `${input.output}\n\n[nexus notice] No file write actions were produced. Ask the harness to return explicit write_file JSON actions.`,
+    output: `${input.output}\n\n[nexus notice] File write intent was detected, but no executable write actions were produced after automatic recovery.`,
     applied: 0,
     recovered: true,
   };
@@ -5414,6 +5447,28 @@ function extractRequestedWorkspaceFiles(message: string): string[] {
     .filter((entry) => !/^[A-Za-z]:[\\/]/.test(entry))
     .filter((entry) => entry.length > 0);
   return Array.from(new Set(cleaned));
+}
+
+function extractClaimedCreatedFiles(output: string): string[] {
+  const patterns = [
+    /\bfile\s+created\s*:\s*`?([^`\n\r]+\.[A-Za-z0-9_-]{1,12})`?/gi,
+    /\bthe\s+file\s+`?([^`\n\r]+\.[A-Za-z0-9_-]{1,12})`?\s+has\s+been\s+created/gi,
+    /\bcreated\s+the\s+file\s+`?([^`\n\r]+\.[A-Za-z0-9_-]{1,12})`?/gi,
+  ];
+
+  const found: string[] = [];
+  for (const pattern of patterns) {
+    let match = pattern.exec(output);
+    while (match) {
+      const cleaned = normalizeAnnotatedPath(match[1] ?? "");
+      if (cleaned && isLikelyWorkspaceRelativeFilePath(cleaned)) {
+        found.push(cleaned);
+      }
+      match = pattern.exec(output);
+    }
+  }
+
+  return Array.from(new Set(found));
 }
 
 function isNexusRouterConfigured(state: SystemState): boolean {
