@@ -5106,6 +5106,61 @@ async function applyWorkspaceActionsFromHarnessOutput(output: string, workspaceP
   };
 }
 
+async function ensureWorkspaceWritesForFileIntent(input: {
+  output: string;
+  userMessage: string;
+  workspacePath: string;
+  harness: Awaited<ReturnType<typeof readHarnessRegistry>>[number];
+  state: SystemState;
+  workspace: { id: string; path: string };
+  history: ChatMessage[];
+  githubLogin?: string;
+}): Promise<{ output: string; applied: number; recovered: boolean }> {
+  const initial = await applyWorkspaceActionsFromHarnessOutput(input.output, input.workspacePath);
+  if (initial.applied > 0 || !hasWorkspaceFileWriteIntent(input.userMessage)) {
+    return { ...initial, recovered: false };
+  }
+
+  const requestedFiles = extractRequestedWorkspaceFiles(input.userMessage);
+  const retryPrompt = [
+    "Your previous response did not produce executable workspace file-write actions.",
+    "Re-emit the result as explicit JSON write actions only.",
+    "Return only one fenced ```json block containing an array of objects.",
+    "Each object must use this shape:",
+    "{\"action\":\"write_file\",\"path\":\"relative/path.ext\",\"content\":\"full file content\"}",
+    requestedFiles.length > 0
+      ? `Requested file paths: ${requestedFiles.join(", ")}`
+      : "Requested file paths: infer from the user request.",
+    `Original user request: ${input.userMessage}`,
+    "Previous answer to transform:",
+    input.output,
+  ].join("\n");
+
+  const retry = await invokeHarness({
+    harness: input.harness,
+    message: retryPrompt,
+    history: input.history,
+    state: input.state,
+    workspace: input.workspace,
+    githubLogin: input.githubLogin,
+  });
+
+  const retried = await applyWorkspaceActionsFromHarnessOutput(retry.content, input.workspacePath);
+  if (retried.applied > 0) {
+    return {
+      output: `${input.output}\n\n[nexus auto-recovery] Converted chat output into executable file writes.\n${retried.output}`,
+      applied: retried.applied,
+      recovered: true,
+    };
+  }
+
+  return {
+    output: `${input.output}\n\n[nexus notice] No file write actions were produced. Ask the harness to return explicit write_file JSON actions.`,
+    applied: 0,
+    recovered: true,
+  };
+}
+
 function extractWorkspaceWriteActions(output: string): WorkspaceWriteAction[] {
   const candidates = extractJsonCandidates(output);
   const actions: WorkspaceWriteAction[] = [];
@@ -5329,6 +5384,36 @@ function resolveWorkspaceTargetPath(workspacePath: string, requestedPath: string
     throw new Error(`write_file path is outside workspace: ${requestedPath}`);
   }
   return resolved;
+}
+
+function hasWorkspaceFileWriteIntent(message: string): boolean {
+  const normalized = message.toLowerCase();
+  if (!normalized.trim()) {
+    return false;
+  }
+
+  const verbs = [
+    "create file",
+    "write file",
+    "save file",
+    "make file",
+    "generate file",
+    "update file",
+    "put this in",
+    "in this workspace",
+  ];
+  return verbs.some((verb) => normalized.includes(verb))
+    || /\b[a-z0-9._-]+\/[a-z0-9._-]+\.[a-z0-9]{1,12}\b/i.test(message)
+    || /\b[a-z0-9._-]+\.[a-z0-9]{1,12}\b/i.test(message);
+}
+
+function extractRequestedWorkspaceFiles(message: string): string[] {
+  const matches = message.match(/\b(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]{1,12}\b/g) ?? [];
+  const cleaned = matches
+    .map((entry) => entry.trim().replace(/^\.?[\\/]+/, ""))
+    .filter((entry) => !/^[A-Za-z]:[\\/]/.test(entry))
+    .filter((entry) => entry.length > 0);
+  return Array.from(new Set(cleaned));
 }
 
 function isNexusRouterConfigured(state: SystemState): boolean {
@@ -9977,7 +10062,16 @@ app.post("/api/chat", async (req, res) => {
     });
 
     if (workspace.path) {
-      const actionResult = await applyWorkspaceActionsFromHarnessOutput(adapterResult.content, workspace.path);
+      const actionResult = await ensureWorkspaceWritesForFileIntent({
+        output: adapterResult.content,
+        userMessage: message,
+        workspacePath: workspace.path,
+        harness,
+        state,
+        workspace,
+        history: safeHistory,
+        githubLogin: githubLoginForChat,
+      });
       adapterResult = {
         ...adapterResult,
         content: actionResult.output,
@@ -10228,9 +10322,18 @@ app.post("/api/chat/stream", async (req, res) => {
 
     let finalOutput = output;
     if (!controller.signal.aborted && workspace.path) {
-      const actionResult = await applyWorkspaceActionsFromHarnessOutput(output, workspace.path);
+      const actionResult = await ensureWorkspaceWritesForFileIntent({
+        output,
+        userMessage: message,
+        workspacePath: workspace.path,
+        harness,
+        state,
+        workspace,
+        history: safeHistory,
+        githubLogin: githubLoginForChat,
+      });
       finalOutput = actionResult.output;
-      if (actionResult.applied > 0) {
+      if (actionResult.applied > 0 || actionResult.recovered) {
         const suffix = finalOutput.slice(output.length);
         if (suffix.trim()) {
           res.write(`data: ${JSON.stringify({ type: "delta", text: suffix })}\n\n`);
