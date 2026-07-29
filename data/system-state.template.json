@@ -33,7 +33,17 @@
       "install-animato",
       "start-animato"
     ],
-    "runtimePullModelAllowPattern": "^[a-z0-9._:-]{1,120}$"
+    "runtimePullModelAllowPattern": "^[a-z0-9._:-]{1,120}$",
+    "runtimeAllowedSourceDomains": [
+      "github.com",
+      "objects.githubusercontent.com",
+      "download.pytorch.org",
+      "pypi.org",
+      "files.pythonhosted.org",
+      "huggingface.co",
+      "ollama.com"
+    ],
+    "runtimeExpectedArtifactSha256": {}
   },
   "activeWorkspaceId": "default",
   "selectedPane": {

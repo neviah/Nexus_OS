@@ -1116,11 +1116,28 @@ function getRuntimeTrustPolicy(state: SystemState): RuntimeTrustPolicy {
     : "";
   const pullModelAllowPattern = pullModelAllowPatternRaw || "^[a-z0-9._:-]{1,120}$";
 
+  const rawDomains = Array.isArray(state.toolPermissions?.runtimeAllowedSourceDomains)
+    ? state.toolPermissions?.runtimeAllowedSourceDomains
+    : DEFAULT_RUNTIME_ALLOWED_SOURCE_DOMAINS;
+  const allowedSourceDomains = Array.from(new Set(rawDomains
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0)));
+
+  const expectedArtifactSha256 = typeof state.toolPermissions?.runtimeExpectedArtifactSha256 === "object"
+    && state.toolPermissions?.runtimeExpectedArtifactSha256
+    ? Object.fromEntries(Object.entries(state.toolPermissions.runtimeExpectedArtifactSha256)
+      .filter(([key, value]) => typeof key === "string" && key.trim().length > 0 && typeof value === "string" && value.trim().length > 0)
+      .map(([key, value]) => [key.replace(/\\/g, "/"), value.trim().toLowerCase()]))
+    : {};
+
   return {
     installEnabled: state.toolPermissions?.runtimeInstallEnabled !== false,
     allowDirectInstallApi: Boolean(state.toolPermissions?.runtimeAllowDirectInstallApi),
     allowedJobActions: allowedJobActions.length > 0 ? allowedJobActions : [...ALL_RUNTIME_JOB_ACTIONS],
     pullModelAllowPattern,
+    allowedSourceDomains: allowedSourceDomains.length > 0 ? allowedSourceDomains : [...DEFAULT_RUNTIME_ALLOWED_SOURCE_DOMAINS],
+    expectedArtifactSha256,
   };
 }
 
@@ -1132,6 +1149,14 @@ function setRuntimeTrustPolicy(state: SystemState, input: Partial<RuntimeTrustPo
   const nextPattern = typeof input.pullModelAllowPattern === "string" && input.pullModelAllowPattern.trim().length > 0
     ? input.pullModelAllowPattern.trim()
     : current.pullModelAllowPattern;
+  const nextDomains = Array.isArray(input.allowedSourceDomains)
+    ? Array.from(new Set(input.allowedSourceDomains.map((entry) => entry.trim().toLowerCase()).filter((entry) => entry.length > 0)))
+    : current.allowedSourceDomains;
+  const nextExpectedSha = input.expectedArtifactSha256
+    ? Object.fromEntries(Object.entries(input.expectedArtifactSha256)
+      .filter(([key, value]) => key.trim().length > 0 && typeof value === "string" && value.trim().length > 0)
+      .map(([key, value]) => [key.replace(/\\/g, "/"), value.trim().toLowerCase()]))
+    : current.expectedArtifactSha256;
 
   state.toolPermissions = {
     ...(state.toolPermissions ?? {}),
@@ -1139,6 +1164,8 @@ function setRuntimeTrustPolicy(state: SystemState, input: Partial<RuntimeTrustPo
     runtimeAllowDirectInstallApi: input.allowDirectInstallApi ?? current.allowDirectInstallApi,
     runtimeAllowedJobActions: nextAllowed.length > 0 ? nextAllowed : [...ALL_RUNTIME_JOB_ACTIONS],
     runtimePullModelAllowPattern: nextPattern,
+    runtimeAllowedSourceDomains: nextDomains.length > 0 ? nextDomains : [...DEFAULT_RUNTIME_ALLOWED_SOURCE_DOMAINS],
+    runtimeExpectedArtifactSha256: nextExpectedSha,
   };
 
   return getRuntimeTrustPolicy(state);
@@ -1157,6 +1184,13 @@ function validateRuntimeJobRequest(input: {
     return { ok: false, reason: `Runtime action ${input.action} is blocked by trust policy.` };
   }
 
+  const requiredDomains = RUNTIME_ACTION_SOURCE_DOMAINS[input.action] ?? [];
+  const allowedDomainSet = new Set(input.policy.allowedSourceDomains.map((entry) => entry.toLowerCase()));
+  const missingDomains = requiredDomains.filter((domain) => !allowedDomainSet.has(domain.toLowerCase()));
+  if (missingDomains.length > 0) {
+    return { ok: false, reason: `Runtime action ${input.action} requires blocked source domain(s): ${missingDomains.join(", ")}.` };
+  }
+
   if (input.action === "pull-ollama-model") {
     const model = String(input.model ?? "").trim();
     if (!model) {
@@ -1173,6 +1207,149 @@ function validateRuntimeJobRequest(input: {
   }
 
   return { ok: true };
+}
+
+function runtimeTrackedPathsForAction(action: RuntimeJobAction): string[] {
+  if (action === "install-acejam") {
+    return [path.join(runtimeRoot, "acejam.pinokio")];
+  }
+  if (action === "install-piper") {
+    return [path.join(runtimeRoot, "piper")];
+  }
+  if (action === "install-default-piper-voice") {
+    return [path.join(runtimeRoot, "piper", "voices")];
+  }
+  if (action === "install-wan2gp") {
+    return [path.join(getRootDir(), "vendor", "wan2gp", "app"), path.join(getRootDir(), "vendor", "wan2gp", "app", "env")];
+  }
+  if (action === "install-hunyuan3d") {
+    return [path.join(getRootDir(), "vendor", "hunyuan3d-2gp", "app"), path.join(getRootDir(), "vendor", "hunyuan3d-2gp", "app", "env")];
+  }
+  if (action === "install-animato") {
+    return [path.join(getRootDir(), "vendor", "animato"), path.join(getRootDir(), "vendor", "animato", "env")];
+  }
+  return [];
+}
+
+async function captureRuntimeInstallCheckpoint(action: RuntimeJobAction): Promise<RuntimeInstallCheckpoint | null> {
+  if (!action.startsWith("install-")) {
+    return null;
+  }
+
+  const trackedPaths = runtimeTrackedPathsForAction(action);
+  const tracked = await Promise.all(trackedPaths.map(async (absolutePath) => ({
+    path: absolutePath,
+    existed: await fs.access(absolutePath).then(() => true).catch(() => false),
+  })));
+
+  return {
+    capturedAt: new Date().toISOString(),
+    action,
+    trackedPaths: tracked,
+  };
+}
+
+async function rollbackRuntimeInstallCheckpoint(checkpoint: RuntimeInstallCheckpoint | null): Promise<{ attempted: boolean; restoredPaths?: string[]; error?: string }> {
+  if (!checkpoint || !checkpoint.action.startsWith("install-")) {
+    return { attempted: false };
+  }
+
+  try {
+    const restoredPaths: string[] = [];
+    for (const entry of checkpoint.trackedPaths) {
+      if (entry.existed) {
+        continue;
+      }
+      await fs.rm(entry.path, { recursive: true, force: true });
+      restoredPaths.push(entry.path);
+    }
+    return { attempted: true, restoredPaths };
+  } catch (error) {
+    return {
+      attempted: true,
+      restoredPaths: [],
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function sha256ForFile(filePath: string): Promise<string> {
+  const bytes = await fs.readFile(filePath);
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function runtimeIntegrityArtifactsForAction(action: RuntimeJobAction): string[] {
+  if (action === "install-piper") {
+    return [
+      "data/runtime-tools/piper/piper/piper.exe",
+      "data/runtime-tools/piper/piper/espeak-ng-data/voices/en/en-us",
+    ];
+  }
+  if (action === "install-default-piper-voice") {
+    return [
+      "data/runtime-tools/piper/voices/en_US-lessac-low.onnx",
+      "data/runtime-tools/piper/voices/en_US-lessac-medium.onnx",
+      "data/runtime-tools/piper/voices/en_US-lessac-high.onnx",
+    ];
+  }
+  if (action === "install-acejam") {
+    return ["data/runtime-tools/acejam.pinokio/app/requirements.txt"];
+  }
+  if (action === "install-wan2gp") {
+    return ["vendor/wan2gp/app/requirements.txt"];
+  }
+  if (action === "install-hunyuan3d") {
+    return ["vendor/hunyuan3d-2gp/app/requirements.txt"];
+  }
+  if (action === "install-animato") {
+    return ["vendor/animato/pyproject.toml"];
+  }
+  return [];
+}
+
+async function verifyRuntimeActionIntegrity(action: RuntimeJobAction, policy: RuntimeTrustPolicy): Promise<RuntimeIntegrityCheck[]> {
+  const checks: RuntimeIntegrityCheck[] = [];
+  for (const relativePath of runtimeIntegrityArtifactsForAction(action)) {
+    const normalized = relativePath.replace(/\\/g, "/");
+    const absolutePath = path.join(getRootDir(), normalized);
+    const exists = await fs.access(absolutePath).then(() => true).catch(() => false);
+    if (!exists) {
+      checks.push({
+        path: normalized,
+        exists: false,
+        expectedSha256: policy.expectedArtifactSha256[normalized],
+        passed: false,
+        reason: "Artifact missing",
+      });
+      continue;
+    }
+
+    const expected = policy.expectedArtifactSha256[normalized];
+    if (!expected) {
+      checks.push({
+        path: normalized,
+        exists: true,
+        passed: true,
+      });
+      continue;
+    }
+
+    const actual = await sha256ForFile(absolutePath);
+    checks.push({
+      path: normalized,
+      exists: true,
+      expectedSha256: expected,
+      actualSha256: actual,
+      passed: actual.toLowerCase() === expected.toLowerCase(),
+      reason: actual.toLowerCase() === expected.toLowerCase() ? undefined : "SHA256 mismatch",
+    });
+  }
+
+  return checks;
+}
+
+async function appendRuntimeInstallAudit(entry: RuntimeInstallAuditRecord): Promise<void> {
+  await appendJsonLine(runtimeInstallAuditPath, entry);
 }
 
 type UnityRollbackSnapshotEntry = {
@@ -4601,6 +4778,8 @@ function startRuntimeJob(job: RuntimeJob): void {
   scheduleRuntimeJobPersist();
 
   void (async () => {
+    const startedAtMs = Date.now();
+    const checkpoint = await captureRuntimeInstallCheckpoint(job.action);
     try {
       if (job.status !== "queued") {
         return;
@@ -4609,11 +4788,48 @@ function startRuntimeJob(job: RuntimeJob): void {
       job.updatedAt = new Date().toISOString();
       appendRuntimeJobLog(job, "Job is running.");
       await executeRuntimeJob(job);
+
+      const state = await readSystemState();
+      const policy = getRuntimeTrustPolicy(state);
+      const integrityChecks = await verifyRuntimeActionIntegrity(job.action, policy);
+      const failures = integrityChecks.filter((entry) => !entry.passed);
+      if (integrityChecks.length > 0) {
+        appendRuntimeJobLog(job, `Integrity checks: ${integrityChecks.length} checked, ${failures.length} failed.`);
+      }
+      if (failures.length > 0) {
+        throw new Error(`Runtime integrity verification failed: ${failures.map((entry) => `${entry.path} (${entry.reason ?? "failed"})`).join(", ")}`);
+      }
+
       ensureRuntimeJobNotCanceled(job);
       job.status = "completed";
       job.finishedAt = new Date().toISOString();
       job.updatedAt = job.finishedAt;
       appendRuntimeJobLog(job, "Completed successfully.");
+
+      const integrityFailures: string[] = [];
+      await appendRuntimeInstallAudit({
+        id: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        jobId: job.id,
+        action: job.action,
+        model: job.model,
+        status: "completed",
+        durationMs: Date.now() - startedAtMs,
+        checkpoint: checkpoint
+          ? {
+            capturedAt: checkpoint.capturedAt,
+            trackedPathCount: checkpoint.trackedPaths.length,
+            existedCount: checkpoint.trackedPaths.filter((entry) => entry.existed).length,
+          }
+          : undefined,
+        integrity: {
+          checked: integrityChecks.length,
+          passed: integrityChecks.length,
+          failed: 0,
+          failures: integrityFailures,
+        },
+      }).catch(() => undefined);
+
       scheduleRuntimeJobPersist();
     } catch (error) {
       if (error instanceof Error && error.name === "RuntimeJobCanceledError") {
@@ -4621,12 +4837,54 @@ function startRuntimeJob(job: RuntimeJob): void {
         job.finishedAt = new Date().toISOString();
         job.updatedAt = job.finishedAt;
         appendRuntimeJobLog(job, "Canceled.");
+
+        await appendRuntimeInstallAudit({
+          id: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          jobId: job.id,
+          action: job.action,
+          model: job.model,
+          status: "canceled",
+          durationMs: Date.now() - startedAtMs,
+          checkpoint: checkpoint
+            ? {
+              capturedAt: checkpoint.capturedAt,
+              trackedPathCount: checkpoint.trackedPaths.length,
+              existedCount: checkpoint.trackedPaths.filter((entry) => entry.existed).length,
+            }
+            : undefined,
+        }).catch(() => undefined);
       } else {
+        const rollback = await rollbackRuntimeInstallCheckpoint(checkpoint);
         job.status = "failed";
         job.error = String(error);
         job.finishedAt = new Date().toISOString();
         job.updatedAt = job.finishedAt;
         appendRuntimeJobLog(job, `Failed: ${job.error}`);
+        if (rollback.attempted) {
+          appendRuntimeJobLog(job, `Rollback attempted. Restored ${rollback.restoredPaths?.length ?? 0} path(s).${rollback.error ? ` Error: ${rollback.error}` : ""}`);
+        }
+        appendRuntimeJobLog(job, "Install checkpoint captured. If runtime remains inconsistent, run the matching install action again from Runtime Jobs.");
+
+        await appendRuntimeInstallAudit({
+          id: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          jobId: job.id,
+          action: job.action,
+          model: job.model,
+          status: "failed",
+          durationMs: Date.now() - startedAtMs,
+          checkpoint: checkpoint
+            ? {
+              capturedAt: checkpoint.capturedAt,
+              trackedPathCount: checkpoint.trackedPaths.length,
+              existedCount: checkpoint.trackedPaths.filter((entry) => entry.existed).length,
+            }
+            : undefined,
+          rollback,
+          error: job.error,
+        }).catch(() => undefined);
+
         if (shouldAutoRetryRuntimeJob(job)) {
           queueRuntimeJobAutoRetry(job);
         }
@@ -8711,6 +8969,8 @@ app.post("/api/tools/runtimes/policy", async (req, res) => {
     allowDirectInstallApi?: boolean;
     allowedJobActions?: RuntimeJobAction[];
     pullModelAllowPattern?: string;
+    allowedSourceDomains?: string[];
+    expectedArtifactSha256?: Record<string, string>;
   };
   const state = await readSystemState();
   const policy = setRuntimeTrustPolicy(state, {
@@ -8720,9 +8980,20 @@ app.post("/api/tools/runtimes/policy", async (req, res) => {
       ? body.allowedJobActions.filter((entry): entry is RuntimeJobAction => ALL_RUNTIME_JOB_ACTIONS.includes(entry))
       : undefined,
     pullModelAllowPattern: body.pullModelAllowPattern,
+    allowedSourceDomains: Array.isArray(body.allowedSourceDomains) ? body.allowedSourceDomains : undefined,
+    expectedArtifactSha256: body.expectedArtifactSha256,
   });
   await writeSystemState(state);
   return res.json({ ok: true, policy });
+});
+
+app.get("/api/tools/runtimes/audit", async (req, res) => {
+  const limit = Number(req.query.limit ?? 120);
+  const records = await readTailJsonLines<RuntimeInstallAuditRecord>(
+    runtimeInstallAuditPath,
+    Number.isFinite(limit) ? Math.min(500, Math.max(1, Math.floor(limit))) : 120,
+  );
+  return res.json({ ok: true, records });
 });
 
 app.get("/api/tools/runtimes/jobs", async (_req, res) => {
@@ -9082,6 +9353,68 @@ function chooseWanModelFromInstalled(
 }
 
 function buildWanPreferenceTiers(recommendedProfile: number, mode: "image" | "video"): string[][] {
+type RuntimeInstallAuditRecord = {
+  id: string;
+  at: string;
+  jobId: string;
+  action: RuntimeJobAction;
+  status: "completed" | "failed" | "canceled";
+  model?: string;
+  durationMs?: number;
+  checkpoint?: {
+    capturedAt: string;
+    trackedPathCount: number;
+    existedCount: number;
+  };
+  rollback?: {
+    attempted: boolean;
+    restoredPaths?: string[];
+    error?: string;
+  };
+  integrity?: {
+    checked: number;
+    passed: number;
+    failed: number;
+    failures: string[];
+  };
+  error?: string;
+};
+
+type RuntimeInstallCheckpoint = {
+  capturedAt: string;
+  action: RuntimeJobAction;
+  trackedPaths: Array<{ path: string; existed: boolean }>;
+};
+
+type RuntimeIntegrityCheck = {
+  path: string;
+  exists: boolean;
+  expectedSha256?: string;
+  actualSha256?: string;
+  passed: boolean;
+  reason?: string;
+};
+
+const DEFAULT_RUNTIME_ALLOWED_SOURCE_DOMAINS = [
+  "github.com",
+  "objects.githubusercontent.com",
+  "download.pytorch.org",
+  "pypi.org",
+  "files.pythonhosted.org",
+  "huggingface.co",
+  "ollama.com",
+];
+
+const RUNTIME_ACTION_SOURCE_DOMAINS: Partial<Record<RuntimeJobAction, string[]>> = {
+  "install-acejam": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"],
+  "install-piper": ["github.com", "objects.githubusercontent.com"],
+  "install-default-piper-voice": ["huggingface.co"],
+  "install-wan2gp": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org", "download.pytorch.org"],
+  "install-hunyuan3d": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org", "download.pytorch.org"],
+  "install-animato": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"],
+  "install-ollama": ["ollama.com"],
+  "pull-ollama-model": ["ollama.com"],
+};
   const lowVramImage = ["flux_schnell", "alpha_sf", "alpha2_sf", "flux", "alpha2", "alpha"];
   const highVramImage = ["qwen_image_20B", "flux", "alpha2", "flux_schnell", "alpha_sf"];
   const lowVramVideo = ["t2v_1.3B", "t2v_sf", "fun_inp_1.3B", "hunyuan", "animate", "alpha2"];

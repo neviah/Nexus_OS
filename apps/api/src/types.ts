@@ -176,6 +176,8 @@ export type SystemState = {
     runtimeAllowDirectInstallApi?: boolean;
     runtimeAllowedJobActions?: string[];
     runtimePullModelAllowPattern?: string;
+    runtimeAllowedSourceDomains?: string[];
+    runtimeExpectedArtifactSha256?: Record<string, string>;
   };
   activeWorkspaceId: string;
   selectedPane: {

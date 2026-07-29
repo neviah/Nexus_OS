@@ -609,6 +609,26 @@ type RuntimeJob = {
   retryOfId?: string;
 };
 
+type RuntimeTrustPolicy = {
+  installEnabled: boolean;
+  allowDirectInstallApi: boolean;
+  allowedJobActions: RuntimeJob["action"][];
+  pullModelAllowPattern: string;
+  allowedSourceDomains: string[];
+  expectedArtifactSha256: Record<string, string>;
+};
+
+type RuntimeInstallAuditRecord = {
+  id: string;
+  at: string;
+  jobId: string;
+  action: RuntimeJob["action"];
+  status: "completed" | "failed" | "canceled";
+  model?: string;
+  durationMs?: number;
+  error?: string;
+};
+
 type ThemePreset = {
   id: string;
   name: string;
@@ -1622,6 +1642,13 @@ function App() {
   const [unityActionAudit, setUnityActionAudit] = useState<UnityActionAuditRecord[]>([]);
   const [unityApprovalAudit, setUnityApprovalAudit] = useState<UnityApprovalAuditRecord[]>([]);
   const [unityAuditBusy, setUnityAuditBusy] = useState(false);
+  const [runtimePolicy, setRuntimePolicy] = useState<RuntimeTrustPolicy | null>(null);
+  const [runtimePolicyBusy, setRuntimePolicyBusy] = useState(false);
+  const [runtimeSourceDomainsDraft, setRuntimeSourceDomainsDraft] = useState("");
+  const [runtimePullPatternDraft, setRuntimePullPatternDraft] = useState("^[a-z0-9._:-]{1,120}$");
+  const [runtimeExpectedShaDraft, setRuntimeExpectedShaDraft] = useState("{}");
+  const [runtimeInstallAudit, setRuntimeInstallAudit] = useState<RuntimeInstallAuditRecord[]>([]);
+  const [runtimeAuditBusy, setRuntimeAuditBusy] = useState(false);
   const [startupStrictMode, setStartupStrictMode] = useState(false);
   const [startupStrictModeSaving, setStartupStrictModeSaving] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
@@ -1880,6 +1907,80 @@ function App() {
     }
     const payload = (await response.json()) as RuntimeStatus;
     setRuntimeStatus(payload);
+  }
+
+  async function loadRuntimePolicy() {
+    setRuntimePolicyBusy(true);
+    const response = await fetch("/api/tools/runtimes/policy");
+    if (!response.ok) {
+      setRuntimePolicyBusy(false);
+      return;
+    }
+    const payload = (await response.json()) as { policy?: RuntimeTrustPolicy };
+    if (payload.policy) {
+      setRuntimePolicy(payload.policy);
+      setRuntimeSourceDomainsDraft((payload.policy.allowedSourceDomains ?? []).join("\n"));
+      setRuntimePullPatternDraft(payload.policy.pullModelAllowPattern ?? "^[a-z0-9._:-]{1,120}$");
+      setRuntimeExpectedShaDraft(JSON.stringify(payload.policy.expectedArtifactSha256 ?? {}, null, 2));
+    }
+    setRuntimePolicyBusy(false);
+  }
+
+  async function saveRuntimePolicy() {
+    if (runtimePolicyBusy) {
+      return;
+    }
+    setRuntimePolicyBusy(true);
+    let expectedSha: Record<string, string> = {};
+    try {
+      expectedSha = JSON.parse(runtimeExpectedShaDraft || "{}") as Record<string, string>;
+    } catch {
+      setStatusMessage("Runtime SHA256 map must be valid JSON.");
+      setRuntimePolicyBusy(false);
+      return;
+    }
+
+    const response = await fetch("/api/tools/runtimes/policy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        installEnabled: runtimePolicy?.installEnabled ?? true,
+        allowDirectInstallApi: runtimePolicy?.allowDirectInstallApi ?? false,
+        allowedJobActions: runtimePolicy?.allowedJobActions ?? [],
+        pullModelAllowPattern: runtimePullPatternDraft,
+        allowedSourceDomains: runtimeSourceDomainsDraft
+          .split(/\r?\n/)
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0),
+        expectedArtifactSha256: expectedSha,
+      }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to save runtime trust policy.");
+      setRuntimePolicyBusy(false);
+      return;
+    }
+
+    const payload = (await response.json()) as { policy?: RuntimeTrustPolicy };
+    if (payload.policy) {
+      setRuntimePolicy(payload.policy);
+    }
+    setStatusMessage("Runtime trust policy saved.");
+    setRuntimePolicyBusy(false);
+  }
+
+  async function loadRuntimeInstallAudit() {
+    setRuntimeAuditBusy(true);
+    const response = await fetch("/api/tools/runtimes/audit?limit=30");
+    if (!response.ok) {
+      setRuntimeAuditBusy(false);
+      return;
+    }
+    const payload = (await response.json()) as { records?: RuntimeInstallAuditRecord[] };
+    setRuntimeInstallAudit(Array.isArray(payload.records) ? payload.records : []);
+    setRuntimeAuditBusy(false);
   }
   
   async function loadVoiceStatus() {
@@ -4756,6 +4857,8 @@ function App() {
     await loadNxRouter();
     await loadUnityApprovalState();
     await loadUnityAudit();
+    await loadRuntimePolicy();
+    await loadRuntimeInstallAudit();
     await loadOfficePresets();
     await loadVoiceAssignments();
     setStatusMessage(payload.onboardingRequired ? "First run: Add a provider in Nexus Router to get started." : "Ready");
@@ -8692,6 +8795,93 @@ function App() {
                             <small>{new Date(entry.at).toLocaleString()} · {entry.actor}</small>
                             {entry.expiresAt ? <small>Expires: {new Date(entry.expiresAt).toLocaleString()}</small> : null}
                             {entry.reason ? <small>{entry.reason}</small> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </details>
+
+                  <hr style={{ margin: "18px 0", opacity: 0.25 }} />
+
+                  <div className="tool-header-row">
+                    <h3>Runtime Trust Policy</h3>
+                    <button type="button" className="ghost" onClick={() => void loadRuntimeInstallAudit()} disabled={runtimeAuditBusy || runtimePolicyBusy}>
+                      {runtimeAuditBusy ? "Refreshing..." : "Refresh Runtime Audit"}
+                    </button>
+                  </div>
+
+                  <div className="tool-list">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(runtimePolicy?.installEnabled)}
+                        onChange={(event) => setRuntimePolicy((current) => current ? { ...current, installEnabled: event.target.checked } : current)}
+                        disabled={runtimePolicyBusy || !runtimePolicy}
+                      />
+                      <span>Allow runtime installs/downloads</span>
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(runtimePolicy?.allowDirectInstallApi)}
+                        onChange={(event) => setRuntimePolicy((current) => current ? { ...current, allowDirectInstallApi: event.target.checked } : current)}
+                        disabled={runtimePolicyBusy || !runtimePolicy}
+                      />
+                      <span>Allow direct install API (otherwise jobs API only)</span>
+                    </label>
+                  </div>
+
+                  <label>
+                    Pull model allow pattern
+                    <input
+                      type="text"
+                      value={runtimePullPatternDraft}
+                      onChange={(event) => setRuntimePullPatternDraft(event.target.value)}
+                      disabled={runtimePolicyBusy}
+                    />
+                  </label>
+
+                  <label>
+                    Allowed source domains (one per line)
+                    <textarea
+                      rows={6}
+                      value={runtimeSourceDomainsDraft}
+                      onChange={(event) => setRuntimeSourceDomainsDraft(event.target.value)}
+                      disabled={runtimePolicyBusy}
+                    />
+                  </label>
+
+                  <label>
+                    Expected artifact SHA256 map (JSON)
+                    <textarea
+                      rows={8}
+                      value={runtimeExpectedShaDraft}
+                      onChange={(event) => setRuntimeExpectedShaDraft(event.target.value)}
+                      disabled={runtimePolicyBusy}
+                    />
+                  </label>
+
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => void saveRuntimePolicy()} disabled={runtimePolicyBusy || !runtimePolicy}>
+                      {runtimePolicyBusy ? "Saving..." : "Save Runtime Policy"}
+                    </button>
+                    <button type="button" className="ghost" onClick={() => void loadRuntimePolicy()} disabled={runtimePolicyBusy}>
+                      {runtimePolicyBusy ? "Refreshing..." : "Reload Policy"}
+                    </button>
+                  </div>
+
+                  <details className="tool-details">
+                    <summary>Runtime Install Audit ({runtimeInstallAudit.length})</summary>
+                    {runtimeInstallAudit.length === 0 ? (
+                      <small>No runtime install audit entries yet.</small>
+                    ) : (
+                      <ul className="tool-list">
+                        {runtimeInstallAudit.map((entry) => (
+                          <li key={entry.id}>
+                            <strong>{entry.action}</strong>
+                            <small>{new Date(entry.at).toLocaleString()} · {entry.status} · job {entry.jobId.slice(0, 8)}</small>
+                            {entry.durationMs ? <small>Duration: {Math.round(entry.durationMs / 1000)}s</small> : null}
+                            {entry.error ? <small>{entry.error}</small> : null}
                           </li>
                         ))}
                       </ul>

@@ -175,6 +175,8 @@ Example policy update request:
   - Returns runtime install/download policy settings.
 - `POST /api/tools/runtimes/policy`
   - Updates runtime policy (`installEnabled`, `allowDirectInstallApi`, `allowedJobActions`, `pullModelAllowPattern`).
+- `GET /api/tools/runtimes/audit?limit=<1..500>`
+  - Returns recent runtime install/download audit records with checkpoint and rollback outcomes.
 
 Runtime policy is enforced for:
 
@@ -183,6 +185,8 @@ Runtime policy is enforced for:
 - `POST /api/tools/runtimes/install`
 
 When blocked by policy, endpoints return HTTP `412` with a descriptive error message.
+
+`POST /api/tools/unity/:action` may include a `rollback` object in failure responses when automatic project file rollback was attempted.
 
 Example runtime policy update:
 
@@ -205,6 +209,16 @@ Example runtime policy update:
     "install-animato",
     "start-animato"
   ],
-  "pullModelAllowPattern": "^[a-z0-9._:-]{1,120}$"
+  "pullModelAllowPattern": "^[a-z0-9._:-]{1,120}$",
+  "allowedSourceDomains": [
+    "github.com",
+    "objects.githubusercontent.com",
+    "download.pytorch.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "huggingface.co",
+    "ollama.com"
+  ],
+  "expectedArtifactSha256": {}
 }
 ```
