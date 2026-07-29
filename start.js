@@ -6,11 +6,10 @@ module.exports = {
       params: {
         path: ".",
         message: [
-          "echo http://127.0.0.1:5173",
           "npm run dev"
         ],
         on: [{
-          event: "/(http:\\/\\/[0-9.:]+)/",
+          event: "/(http:\\/\\/localhost:51[0-9]{2}\\/)/",
           done: true
         }]
       }
