@@ -151,6 +151,7 @@ type BootstrapPayload = {
   appName: string;
   onboardingRequired: boolean;
   startupStrictMode?: boolean;
+  unityExecutionEnabled?: boolean;
   selectedPane: PaneSelection;
   activeWorkspaceId: string;
   harnesses: Harness[];
@@ -1581,6 +1582,8 @@ function App() {
   const [githubInlineError, setGithubInlineError] = useState<string | null>(null);
   const [nxConfigSaving, setNxConfigSaving] = useState(false);
   const [startupChecking, setStartupChecking] = useState(false);
+  const [unityExecutionEnabled, setUnityExecutionEnabled] = useState(false);
+  const [unityApprovalBusy, setUnityApprovalBusy] = useState(false);
   const [startupStrictMode, setStartupStrictMode] = useState(false);
   const [startupStrictModeSaving, setStartupStrictModeSaving] = useState(false);
   const [lastStartupCheck, setLastStartupCheck] = useState<{ readiness: StartupReadiness; timestamp: string } | null>(null);
@@ -4676,6 +4679,7 @@ function App() {
     const payload = (await response.json()) as BootstrapPayload;
     setBoot(payload);
     setStartupStrictMode(Boolean(payload.startupStrictMode));
+    setUnityExecutionEnabled(Boolean(payload.unityExecutionEnabled));
 
     const payloadPane = payload.selectedPane;
     if (payloadPane.type === "tool") {
@@ -5510,6 +5514,33 @@ function App() {
     setGitBusyAction(null);
   }
 
+  async function setUnityExecutionApproval(enabled: boolean) {
+    if (unityApprovalBusy) {
+      return;
+    }
+    setUnityApprovalBusy(true);
+    const response = await fetch("/api/tools/unity/approval", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      setStatusMessage(payload.error ?? "Failed to update Unity tool approval.");
+      setUnityApprovalBusy(false);
+      return;
+    }
+
+    const payload = (await response.json()) as { unityExecutionEnabled: boolean };
+    setUnityExecutionEnabled(Boolean(payload.unityExecutionEnabled));
+    setBoot((current) => current ? { ...current, unityExecutionEnabled: Boolean(payload.unityExecutionEnabled) } : current);
+    setStatusMessage(payload.unityExecutionEnabled
+      ? "Unity tool execution enabled for harness actions."
+      : "Unity tool execution disabled.");
+    setUnityApprovalBusy(false);
+  }
+
   async function onRunStartupCheck() {
     setStartupChecking(true);
     setStatusMessage("Running startup check...");
@@ -5541,6 +5572,18 @@ function App() {
     const textToSend = (resendText ?? composer).trim();
     if (!activeHarness || !textToSend || chatBusy) {
       return;
+    }
+
+    const unityIntent = /\b(unity|compile|run tests|test runner|screenshot|play mode|execute dynamic code|package manager|install package)\b/i.test(textToSend);
+    if (unityIntent && !unityExecutionEnabled) {
+      const allow = window.confirm(
+        "This request may trigger Unity compile/test/screenshot/code execution actions. Enable Unity tool execution now?",
+      );
+      if (!allow) {
+        setStatusMessage("Unity tool execution is disabled. Request canceled.");
+        return;
+      }
+      await setUnityExecutionApproval(true);
     }
 
     const harnessId = activeHarness.id;
@@ -8492,6 +8535,28 @@ function App() {
 
               {settingsTab === "automation" ? (
                 <section className="tool-section">
+                  <div className="tool-header-row">
+                    <h3>Unity Tool Execution</h3>
+                  </div>
+                  <p className="subtitle">Controls whether harnesses can run Unity compile/test/log/screenshot/dynamic-code actions.</p>
+                  <div className="tool-action-row" style={{ alignItems: "center", gap: 12 }}>
+                    <span className={`status-dot ${unityExecutionEnabled ? "ok" : "warn"}`}>{unityExecutionEnabled ? "Enabled" : "Disabled"}</span>
+                    <button
+                      type="button"
+                      className={unityExecutionEnabled ? "ghost" : ""}
+                      onClick={() => void setUnityExecutionApproval(!unityExecutionEnabled)}
+                      disabled={unityApprovalBusy}
+                    >
+                      {unityApprovalBusy
+                        ? "Saving..."
+                        : unityExecutionEnabled
+                          ? "Disable Unity Execution"
+                          : "Enable Unity Execution"}
+                    </button>
+                  </div>
+
+                  <hr style={{ margin: "18px 0", opacity: 0.25 }} />
+
                   <div className="tool-header-row">
                     <h3>Git Workspace</h3>
                     <button type="button" className="ghost" onClick={() => void loadGitStatus()} disabled={gitBusyAction !== null}>

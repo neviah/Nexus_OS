@@ -162,6 +162,9 @@ export type WorkspaceRecord = {
 export type SystemState = {
   onboardingComplete: boolean;
   startupStrictMode?: boolean;
+  toolPermissions?: {
+    unityExecutionEnabled?: boolean;
+  };
   activeWorkspaceId: string;
   selectedPane: {
     type: "agent" | "tool";

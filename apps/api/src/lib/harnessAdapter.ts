@@ -586,6 +586,9 @@ function buildNexusSystemMessage(ctx: NexusInjectedContext): string {
   lines.push("Read action format: {\"action\":\"read_file\",\"path\":\"relative/path.ext\"}.");
   lines.push("List action format: {\"action\":\"list_dir\",\"path\":\"relative/folder\"}.");
   lines.push("Write action format: {\"action\":\"write_file\",\"path\":\"relative/path.ext\",\"content\":\"full file content\"}.");
+  lines.push("Unity tool actions (when Unity project automation is needed): unity_compile, unity_run_tests, unity_get_logs, unity_screenshot, unity_execute_dynamic_code.");
+  lines.push("Unity action format: {\"action\":\"unity_compile\"} or {\"action\":\"unity_execute_dynamic_code\",\"arguments\":{\"code\":\"...\"}}.");
+  lines.push("Unity actions may require explicit user approval in Nexus settings; if blocked, continue by asking the user to enable Unity tool execution.");
   lines.push("For multiple actions, return a JSON array inside one fenced json block.");
   lines.push("After Nexus returns workspace tool results, continue the task until the requested file or code change is complete.");
   lines.push("Do not claim a file was created or edited unless you emitted a write_file action and Nexus confirmed the write.");

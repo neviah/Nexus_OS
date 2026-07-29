@@ -252,6 +252,14 @@ type WorkspaceActionSet = {
   writes: WorkspaceWriteAction[];
   reads: WorkspaceReadAction[];
   lists: WorkspaceListAction[];
+  unity: UnityToolAction[];
+};
+
+type UnityToolActionName = "unity_compile" | "unity_run_tests" | "unity_get_logs" | "unity_screenshot" | "unity_execute_dynamic_code";
+
+type UnityToolAction = {
+  action: UnityToolActionName;
+  args?: Record<string, unknown>;
 };
 
 const GAME_CREATOR_TARGETS = ["unity-3d", "unity-2d", "web-2d"] as const;
@@ -726,6 +734,109 @@ async function runNodeScript(input: {
       ok: false,
       stdout: "",
       stderr: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function isUnityExecutionEnabled(state: SystemState): boolean {
+  return Boolean(state.toolPermissions?.unityExecutionEnabled);
+}
+
+function setUnityExecutionEnabled(state: SystemState, enabled: boolean): void {
+  state.toolPermissions = {
+    ...(state.toolPermissions ?? {}),
+    unityExecutionEnabled: enabled,
+  };
+}
+
+type UnityCliLoopStatus = {
+  available: boolean;
+  executable: string | null;
+  version: string | null;
+  error?: string;
+};
+
+async function detectUnityCliLoopStatus(): Promise<UnityCliLoopStatus> {
+  const candidates = process.platform === "win32"
+    ? ["uloop.cmd", "uloop"]
+    : ["uloop"];
+
+  for (const candidate of candidates) {
+    try {
+      const result = await execFileAsync(candidate, ["--version"], {
+        windowsHide: true,
+        maxBuffer: 1024 * 256,
+      });
+      const version = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() || null;
+      return {
+        available: true,
+        executable: candidate,
+        version,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return {
+    available: false,
+    executable: null,
+    version: null,
+    error: "Unity CLI Loop not found on PATH. Install it in your Unity project and ensure the uloop command is available.",
+  };
+}
+
+type UnityCliLoopRunResult = {
+  ok: boolean;
+  command: string[];
+  stdout: string;
+  stderr: string;
+};
+
+async function runUnityCliLoopCommand(input: {
+  executable: string;
+  action: UnityToolActionName;
+  workspacePath: string;
+  args?: Record<string, unknown>;
+}): Promise<UnityCliLoopRunResult> {
+  const actionArgs: string[] = [];
+  const projectPathArgs = ["--project-path", input.workspacePath];
+
+  if (input.action === "unity_execute_dynamic_code") {
+    const code = typeof input.args?.code === "string" ? input.args.code : "";
+    if (!code.trim()) {
+      throw new Error("unity_execute_dynamic_code requires args.code");
+    }
+    actionArgs.push("execute-dynamic-code", ...projectPathArgs, "--code", code);
+  } else if (input.action === "unity_screenshot") {
+    const windowName = typeof input.args?.windowName === "string" ? input.args.windowName.trim() : "Game";
+    actionArgs.push("screenshot", ...projectPathArgs, "--window-name", windowName || "Game");
+  } else if (input.action === "unity_run_tests") {
+    actionArgs.push("run-tests", ...projectPathArgs);
+  } else if (input.action === "unity_get_logs") {
+    actionArgs.push("get-logs", ...projectPathArgs);
+  } else {
+    actionArgs.push("compile", ...projectPathArgs);
+  }
+
+  try {
+    const result = await execFileAsync(input.executable, actionArgs, {
+      windowsHide: true,
+      maxBuffer: 1024 * 1024 * 8,
+    });
+    return {
+      ok: true,
+      command: [input.executable, ...actionArgs],
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+    };
+  } catch (error) {
+    const stderr = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      command: [input.executable, ...actionArgs],
+      stdout: "",
+      stderr,
     };
   }
 }
@@ -5218,6 +5329,53 @@ async function executeWorkspaceReadActions(workspacePath: string, reads: Workspa
   return entries.join("\n\n");
 }
 
+async function executeUnityToolActions(input: {
+  workspacePath: string;
+  actions: UnityToolAction[];
+  state: SystemState;
+}): Promise<string> {
+  if (!input.actions.length) {
+    return "";
+  }
+
+  if (!isUnityExecutionEnabled(input.state)) {
+    return [
+      "UNITY TOOL EXECUTION BLOCKED",
+      "Enable Unity tool execution in Settings > Automation before running compile/tests/logs/screenshot/dynamic-code from harness output.",
+    ].join("\n");
+  }
+
+  const cli = await detectUnityCliLoopStatus();
+  if (!cli.available || !cli.executable) {
+    return [
+      "UNITY TOOL EXECUTION UNAVAILABLE",
+      cli.error ?? "Unity CLI Loop not found.",
+      "Install Unity CLI Loop in the Unity project, then make sure the uloop command is available.",
+    ].join("\n");
+  }
+
+  const unityProjectPath = await resolveUnityProjectPathForWorkspace(input.workspacePath);
+
+  const outputs: string[] = [];
+  for (const action of input.actions.slice(0, 3)) {
+    const result = await runUnityCliLoopCommand({
+      executable: cli.executable,
+      action: action.action,
+      workspacePath: unityProjectPath,
+      args: action.args,
+    });
+    outputs.push([
+      `UNITY ${action.action}`,
+      `ok=${result.ok}`,
+      `cmd=${result.command.join(" ")}`,
+      result.stdout ? `stdout:\n${result.stdout.slice(0, 4000)}` : "",
+      result.stderr ? `stderr:\n${result.stderr.slice(0, 4000)}` : "",
+    ].filter(Boolean).join("\n"));
+  }
+
+  return outputs.join("\n\n");
+}
+
 async function listWorkspaceDirectoryForTool(targetPath: string, workspacePath: string): Promise<string> {
   const entries = await fs.readdir(targetPath, { withFileTypes: true });
   const lines = entries
@@ -5231,18 +5389,71 @@ function extractWorkspaceActions(output: string): WorkspaceActionSet {
   const writes = extractWorkspaceWriteActions(output);
   const reads: WorkspaceReadAction[] = [];
   const lists: WorkspaceListAction[] = [];
+  const unity: UnityToolAction[] = [];
 
   const candidates = extractJsonCandidates(output);
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate) as unknown;
       collectWorkspaceReadListActions(parsed, reads, lists);
+      collectUnityToolActions(parsed, unity);
     } catch {
       // Ignore malformed snippets.
     }
   }
 
-  return { writes, reads, lists };
+  return { writes, reads, lists, unity };
+}
+
+function collectUnityToolActions(value: unknown, unity: UnityToolAction[]): void {
+  if (!value) {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectUnityToolActions(entry, unity);
+    }
+    return;
+  }
+
+  if (typeof value !== "object") {
+    return;
+  }
+
+  const obj = value as Record<string, unknown>;
+  const actionName = typeof obj.action === "string"
+    ? obj.action.trim().toLowerCase()
+    : (typeof obj.name === "string"
+      ? obj.name.trim().toLowerCase()
+      : (typeof obj.type === "string"
+        ? obj.type.trim().toLowerCase()
+        : (typeof obj.tool === "string" ? obj.tool.trim().toLowerCase() : "")));
+
+  const normalized = actionName.replace(/\s+/g, "_");
+  const allowed: UnityToolActionName[] = [
+    "unity_compile",
+    "unity_run_tests",
+    "unity_get_logs",
+    "unity_screenshot",
+    "unity_execute_dynamic_code",
+  ];
+  if (allowed.includes(normalized as UnityToolActionName)) {
+    const args = typeof obj.arguments === "object" && obj.arguments !== null
+      ? obj.arguments as Record<string, unknown>
+      : (typeof obj.args === "object" && obj.args !== null ? obj.args as Record<string, unknown> : undefined);
+    unity.push({ action: normalized as UnityToolActionName, args });
+  }
+
+  if (Array.isArray(obj.actions)) {
+    collectUnityToolActions(obj.actions, unity);
+  }
+  if (Array.isArray(obj.tool_calls)) {
+    collectUnityToolActions(obj.tool_calls, unity);
+  }
+  if (obj.function && typeof obj.function === "object") {
+    collectUnityToolActions(obj.function, unity);
+  }
 }
 
 function collectWorkspaceReadListActions(value: unknown, reads: WorkspaceReadAction[], lists: WorkspaceListAction[]): void {
@@ -5418,8 +5629,12 @@ async function runHarnessWorkspaceConversation(input: {
       }
     }
 
-    if (input.workspace.path && (actions.reads.length > 0 || actions.lists.length > 0)) {
-      const toolResults = await executeWorkspaceReadActions(input.workspace.path, actions.reads, actions.lists);
+    if (input.workspace.path && (actions.reads.length > 0 || actions.lists.length > 0 || actions.unity.length > 0)) {
+      const workspaceToolResults = await executeWorkspaceReadActions(input.workspace.path, actions.reads, actions.lists);
+      const unityToolResults = actions.unity.length > 0
+        ? await executeUnityToolActions({ workspacePath: input.workspace.path, actions: actions.unity, state: input.state })
+        : "";
+      const toolResults = [workspaceToolResults, unityToolResults].filter(Boolean).join("\n\n");
       nextHistory = [
         ...nextHistory,
         { id: crypto.randomUUID(), role: "user", content: nextMessage, createdAt: new Date().toISOString() },
@@ -5968,6 +6183,7 @@ app.get("/api/bootstrap", async (_req, res) => {
     appName: "NEXUS OS",
     onboardingRequired: !routerConfigured,
     startupStrictMode: isStartupStrictModeEnabled(state),
+    unityExecutionEnabled: isUnityExecutionEnabled(state),
     selectedPane,
     activeWorkspaceId,
     harnesses: harnessStatus,
@@ -7355,6 +7571,95 @@ app.get("/api/tools/game-creator/unity/status", async (_req, res) => {
     guidance: unity.available
       ? "Unity CLI available for Game Creator automation."
       : "Unity CLI not found. Set UNITY_EDITOR_PATH to Unity.exe or install Unity under C:/Program Files/Unity/Hub/Editor.",
+  });
+});
+
+async function resolveUnityProjectPathForWorkspace(workspacePath: string): Promise<string> {
+  const directAssets = path.join(workspacePath, "Assets");
+  const directProjectSettings = path.join(workspacePath, "ProjectSettings");
+  const generatedUnity = path.join(workspacePath, "GameBuild", "unity");
+
+  const hasDirect = await fs.stat(directAssets).then((s) => s.isDirectory()).catch(() => false)
+    && await fs.stat(directProjectSettings).then((s) => s.isDirectory()).catch(() => false);
+  if (hasDirect) {
+    return workspacePath;
+  }
+
+  const hasGenerated = await fs.stat(generatedUnity).then((s) => s.isDirectory()).catch(() => false);
+  return hasGenerated ? generatedUnity : workspacePath;
+}
+
+app.get("/api/tools/unity/status", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId ?? state.activeWorkspaceId);
+  const unity = await detectUnityCliStatus();
+  const uloop = await detectUnityCliLoopStatus();
+  return res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    unityEditor: unity,
+    unityCliLoop: uloop,
+    unityExecutionEnabled: isUnityExecutionEnabled(state),
+  });
+});
+
+app.get("/api/tools/unity/approval", async (_req, res) => {
+  const state = await readSystemState();
+  return res.json({
+    unityExecutionEnabled: isUnityExecutionEnabled(state),
+  });
+});
+
+app.post("/api/tools/unity/approval", async (req, res) => {
+  const body = req.body as { enabled?: boolean };
+  const state = await readSystemState();
+  setUnityExecutionEnabled(state, Boolean(body.enabled));
+  await writeSystemState(state);
+  return res.json({
+    ok: true,
+    unityExecutionEnabled: isUnityExecutionEnabled(state),
+  });
+});
+
+app.post("/api/tools/unity/:action", async (req, res) => {
+  const action = pickEnumValue(
+    req.params.action,
+    ["unity_compile", "unity_run_tests", "unity_get_logs", "unity_screenshot", "unity_execute_dynamic_code"] as const,
+    "unity_compile",
+  );
+  const body = req.body as { workspaceId?: string; args?: Record<string, unknown> };
+  const state = await readSystemState();
+  if (!isUnityExecutionEnabled(state)) {
+    return res.status(412).json({
+      error: "Unity tool execution is disabled. Enable it in Settings > Automation first.",
+    });
+  }
+
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const uloop = await detectUnityCliLoopStatus();
+  if (!uloop.available || !uloop.executable) {
+    return res.status(409).json({
+      error: uloop.error ?? "Unity CLI Loop (uloop) is not available.",
+    });
+  }
+
+  const unityProjectPath = await resolveUnityProjectPathForWorkspace(workspace.path);
+  const result = await runUnityCliLoopCommand({
+    executable: uloop.executable,
+    action,
+    workspacePath: unityProjectPath,
+    args: body.args,
+  });
+
+  return res.status(result.ok ? 200 : 500).json({
+    ok: result.ok,
+    workspaceId: workspace.id,
+    action,
+    command: result.command,
+    stdout: result.stdout,
+    stderr: result.stderr,
   });
 });
 
