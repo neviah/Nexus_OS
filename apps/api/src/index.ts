@@ -5307,7 +5307,10 @@ async function ensureWorkspaceWritesForFileIntent(input: {
     return { ...initial, recovered: false };
   }
 
-  const requestedFiles = extractRequestedWorkspaceFiles(input.userMessage);
+  const requestedFiles = Array.from(new Set([
+    ...extractRequestedWorkspaceFiles(input.userMessage),
+    ...extractImpliedWorkspaceFiles(input.userMessage),
+  ]));
   const claimedFiles = extractClaimedCreatedFiles(input.output);
   const retryPrompt = [
     "Your previous response did not produce executable workspace file-write actions.",
@@ -5466,6 +5469,8 @@ function extractWorkspaceWriteActions(output: string): WorkspaceWriteAction[] {
 
   // Fallback extractor for non-JSON tool payloads like single-quoted dicts.
   collectLooseWriteActions(output, actions);
+  // Hermes-style fallback: parse simple shell redirections like echo "..." > file.md.
+  collectShellWriteActions(output, actions);
   // Additional fallback for chat-style file drops like "File: README.md" followed by content.
   collectAnnotatedFileBlocks(output, actions);
 
@@ -5661,6 +5666,27 @@ function collectLooseWriteActions(output: string, bucket: WorkspaceWriteAction[]
   }
 }
 
+function collectShellWriteActions(output: string, bucket: WorkspaceWriteAction[]): void {
+  const echoOrPrintf = /(?:^|\n)\s*(?:echo|printf)\s+(["'])([\s\S]*?)\1\s*>\s*([^\s"'`]+\.[A-Za-z0-9_-]{1,12})/gi;
+  let match = echoOrPrintf.exec(output);
+  while (match) {
+    const rawContent = String(match[2] ?? "");
+    const pathValue = String(match[3] ?? "").trim();
+    if (pathValue) {
+      bucket.push({
+        path: pathValue,
+        content: rawContent
+          .replace(/\\n/g, "\n")
+          .replace(/\\r/g, "\r")
+          .replace(/\\t/g, "\t")
+          .replace(/\\"/g, "\"")
+          .replace(/\\'/g, "'"),
+      });
+    }
+    match = echoOrPrintf.exec(output);
+  }
+}
+
 function resolveWorkspaceTargetPath(workspacePath: string, requestedPath: string): string {
   const root = path.resolve(workspacePath);
   const normalizedRequest = requestedPath.replace(/^\.?[\\/]+/, "").trim();
@@ -5704,6 +5730,29 @@ function extractRequestedWorkspaceFiles(message: string): string[] {
     .filter((entry) => !/^[A-Za-z]:[\\/]/.test(entry))
     .filter((entry) => entry.length > 0);
   return Array.from(new Set(cleaned));
+}
+
+function extractImpliedWorkspaceFiles(message: string): string[] {
+  const normalized = message.toLowerCase();
+  const isDocumentIntent = /\bdocument\b|\bmarkdown\b|\bmd\b/.test(normalized);
+  const docsFolder = /\bdocs\b|\bdocumentation\b/.test(normalized) ? "docs/" : "";
+  const nameMatch = /\b(?:name\s+it|call\s+it|named)\s+["'`]?([a-z0-9._-]{1,80})/i.exec(message);
+  if (!nameMatch?.[1]) {
+    return [];
+  }
+
+  const rawName = nameMatch[1].trim().replace(/^\.+/, "").replace(/^[/\\]+/, "");
+  if (!rawName || /\s/.test(rawName) || /^[A-Za-z]:[\\/]/.test(rawName)) {
+    return [];
+  }
+
+  const hasExtension = /\.[A-Za-z0-9_-]{1,12}$/.test(rawName);
+  const finalName = hasExtension ? rawName : (isDocumentIntent ? `${rawName}.md` : rawName);
+  if (!/\.[A-Za-z0-9_-]{1,12}$/.test(finalName)) {
+    return [];
+  }
+
+  return [`${docsFolder}${finalName}`];
 }
 
 function extractClaimedCreatedFiles(output: string): string[] {
