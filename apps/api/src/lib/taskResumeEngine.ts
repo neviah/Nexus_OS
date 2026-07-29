@@ -87,6 +87,12 @@ export async function listResumableTasks(): Promise<TaskRecord[]> {
   return tasks.filter((task) => task.status === "failed").slice(0, 30);
 }
 
+export async function listRecentTasks(limit: number = 200): Promise<TaskRecord[]> {
+  const tasks = await readTasks();
+  const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
+  return tasks.slice(0, safeLimit);
+}
+
 export function buildReplayPrompt(task: TaskRecord): string {
   return [
     "The previous response was interrupted.",

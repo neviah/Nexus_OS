@@ -32,6 +32,7 @@ import {
   buildReplayPrompt,
   createTask,
   getTask,
+  listRecentTasks,
   listResumableTasks,
   updateTaskStatus,
 } from "./lib/taskResumeEngine.js";
@@ -4076,6 +4077,81 @@ async function appendHunyuanAgentLog(logFilePath: string, entry: Record<string, 
   await fs.appendFile(logFilePath, `${JSON.stringify(entry)}\n`, "utf-8");
 }
 
+async function ensureWorkspaceHarnessLogsDir(
+  harnessId: string,
+  workspaceId?: string,
+): Promise<{ workspaceId: string; logsPath: string }> {
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId);
+  if (!workspace.path) {
+    throw new Error("Active workspace path is unavailable.");
+  }
+  const folder = sanitizeFileNameSegment(harnessId, "harness");
+  const logsPath = path.join(workspace.path, "Agents", "Logs", folder);
+  await fs.mkdir(logsPath, { recursive: true });
+  return { workspaceId: workspace.id, logsPath };
+}
+
+async function appendHarnessChatRunLog(logFilePath: string, entry: Record<string, unknown>): Promise<void> {
+  await fs.appendFile(logFilePath, `${JSON.stringify(entry)}\n`, "utf-8");
+}
+
+function extractAppliedWritePaths(content: string): string[] {
+  const paths = new Set<string>();
+  const regex = /^- wrote\s+(.+)$/gim;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content)) !== null) {
+    const rawPath = String(match[1] ?? "").trim();
+    if (rawPath) {
+      paths.add(rawPath);
+    }
+  }
+  return Array.from(paths).slice(0, 60);
+}
+
+function isAdapterUnreachableSignal(text?: string): boolean {
+  if (!text) {
+    return false;
+  }
+  const normalized = text.toLowerCase();
+  return normalized.includes("currently unreachable")
+    || normalized.includes("all configured adapter paths failed")
+    || normalized.includes("local fallback response returned");
+}
+
+function applyTaskSignalsToHarnessStatus<T extends { id: string; status: "online" | "offline"; health: "healthy" | "degraded" | "offline" }>(
+  harnesses: T[],
+  tasks: Array<{ harnessId: string; status: string; error?: string; finalOutput?: string; partialOutput?: string }>,
+): T[] {
+  const latestByHarness = new Map<string, { status: string; error?: string; finalOutput?: string; partialOutput?: string }>();
+  for (const task of tasks) {
+    if (!latestByHarness.has(task.harnessId)) {
+      latestByHarness.set(task.harnessId, task);
+    }
+  }
+
+  return harnesses.map((entry) => {
+    const latest = latestByHarness.get(entry.id);
+    if (!latest) {
+      return entry;
+    }
+
+    const unreachable = isAdapterUnreachableSignal(latest.error)
+      || isAdapterUnreachableSignal(latest.finalOutput)
+      || isAdapterUnreachableSignal(latest.partialOutput);
+
+    if (!unreachable) {
+      return entry;
+    }
+
+    return {
+      ...entry,
+      status: "offline",
+      health: "offline",
+    };
+  });
+}
+
 async function ensureWorkspaceAgentsScaffold(workspacePath: string): Promise<void> {
   await fs.mkdir(path.join(workspacePath, "Agents", "Logs"), { recursive: true });
 }
@@ -5786,7 +5862,9 @@ app.get("/api/bootstrap", async (_req, res) => {
   void ensureCoreRuntimeProvisioning();
   const state = await readSystemState();
   const harnesses = await readHarnessRegistry();
-  const harnessStatus = await resolveHarnessHealth(harnesses);
+  const recentTasks = await listRecentTasks(240);
+  const resolvedHarnessStatus = await resolveHarnessHealth(harnesses);
+  const harnessStatus = applyTaskSignalsToHarnessStatus(resolvedHarnessStatus, recentTasks);
   const runtimeStatus = await getRuntimeStatus();
   const stableAudioStatus = await getStableAudioStatus();
   const wan2gpStatus = await getWan2GpStatus();
@@ -5852,7 +5930,9 @@ app.get("/api/bootstrap", async (_req, res) => {
 
 app.get("/api/harnesses", async (_req, res) => {
   const harnesses = await readHarnessRegistry();
-  const status = await resolveHarnessHealth(harnesses);
+  const recentTasks = await listRecentTasks(240);
+  const resolved = await resolveHarnessHealth(harnesses);
+  const status = applyTaskSignalsToHarnessStatus(resolved, recentTasks);
   res.json({ harnesses: status });
 });
 
@@ -10256,7 +10336,9 @@ app.post("/api/chat", async (req, res) => {
   }
 
   if (isStartupStrictModeEnabled(state)) {
-    const liveHarnesses = (await resolveHarnessHealth(harnesses)).filter((entry) => entry.status === "online").length;
+    const recentTasks = await listRecentTasks(240);
+    const reconciledHarnesses = applyTaskSignalsToHarnessStatus(await resolveHarnessHealth(harnesses), recentTasks);
+    const liveHarnesses = reconciledHarnesses.filter((entry) => entry.status === "online").length;
     const runtimeStatus = await getRuntimeStatus();
     const startup = buildStartupReadiness({
       onboardingComplete: isNexusRouterConfigured(state),
@@ -10296,6 +10378,26 @@ app.post("/api/chat", async (req, res) => {
       workspace,
       githubLogin: githubLoginForChat,
     });
+
+    const harnessLogContext = await ensureWorkspaceHarnessLogsDir(harness.id, workspace.id).catch(() => null);
+    if (harnessLogContext) {
+      const logFilePath = path.join(harnessLogContext.logsPath, "chat-runs.jsonl");
+      await appendHarnessChatRunLog(logFilePath, {
+        ts: new Date().toISOString(),
+        requestId: taskId,
+        workspaceId: harnessLogContext.workspaceId,
+        harnessId: harness.id,
+        mode: "sync",
+        status: "completed",
+        prompt: message,
+        fallbackUsed: Boolean(adapterResult.meta?.fallbackUsed),
+        model: adapterResult.meta?.model,
+        provider: adapterResult.meta?.provider,
+        wroteFiles: extractAppliedWritePaths(adapterResult.content),
+        unreachableSignal: isAdapterUnreachableSignal(adapterResult.content),
+        responsePreview: adapterResult.content.slice(0, 2400),
+      });
+    }
   } catch (error) {
     if (fableProfile !== "off") {
       await appendFableTelemetry({
@@ -10305,6 +10407,20 @@ app.post("/api/chat", async (req, res) => {
         success: false,
         fallbackUsed: false,
         createdAt: new Date().toISOString(),
+      });
+    }
+    const harnessLogContext = await ensureWorkspaceHarnessLogsDir(harness.id, workspace.id).catch(() => null);
+    if (harnessLogContext) {
+      const logFilePath = path.join(harnessLogContext.logsPath, "chat-runs.jsonl");
+      await appendHarnessChatRunLog(logFilePath, {
+        ts: new Date().toISOString(),
+        requestId: taskId,
+        workspaceId: harnessLogContext.workspaceId,
+        harnessId: harness.id,
+        mode: "sync",
+        status: "failed",
+        prompt: message,
+        error: String(error),
       });
     }
     await updateTaskStatus(taskId, "failed", { error: String(error) });
@@ -10444,7 +10560,9 @@ app.post("/api/chat/stream", async (req, res) => {
   }
 
   if (isStartupStrictModeEnabled(state)) {
-    const liveHarnesses = (await resolveHarnessHealth(harnesses)).filter((entry) => entry.status === "online").length;
+    const recentTasks = await listRecentTasks(240);
+    const reconciledHarnesses = applyTaskSignalsToHarnessStatus(await resolveHarnessHealth(harnesses), recentTasks);
+    const liveHarnesses = reconciledHarnesses.filter((entry) => entry.status === "online").length;
     const runtimeStatus = await getRuntimeStatus();
     const startup = buildStartupReadiness({
       onboardingComplete: isNexusRouterConfigured(state),
@@ -10526,6 +10644,26 @@ app.post("/api/chat/stream", async (req, res) => {
       error: controller.signal.aborted ? "Stopped by user" : undefined,
     });
 
+    const harnessLogContext = await ensureWorkspaceHarnessLogsDir(harness.id, workspace.id).catch(() => null);
+    if (harnessLogContext) {
+      const logFilePath = path.join(harnessLogContext.logsPath, "chat-runs.jsonl");
+      await appendHarnessChatRunLog(logFilePath, {
+        ts: new Date().toISOString(),
+        requestId,
+        workspaceId: harnessLogContext.workspaceId,
+        harnessId: harness.id,
+        mode: "stream",
+        status: controller.signal.aborted ? "aborted" : "completed",
+        prompt: message,
+        fallbackUsed: Boolean(latestMeta?.fallbackUsed),
+        model: latestMeta?.model,
+        provider: latestMeta?.provider,
+        wroteFiles: extractAppliedWritePaths(finalOutput),
+        unreachableSignal: isAdapterUnreachableSignal(finalOutput),
+        responsePreview: finalOutput.slice(0, 2400),
+      });
+    }
+
     if (!controller.signal.aborted && fableProfile !== "off") {
       await appendFableTelemetry({
         id: crypto.randomUUID(),
@@ -10553,6 +10691,21 @@ app.post("/api/chat/stream", async (req, res) => {
     }
     await updateTaskStatus(requestId, "failed", { error: failureMessage });
 
+    const harnessLogContext = await ensureWorkspaceHarnessLogsDir(harness.id, workspace.id).catch(() => null);
+    if (harnessLogContext) {
+      const logFilePath = path.join(harnessLogContext.logsPath, "chat-runs.jsonl");
+      await appendHarnessChatRunLog(logFilePath, {
+        ts: new Date().toISOString(),
+        requestId,
+        workspaceId: harnessLogContext.workspaceId,
+        harnessId: harness.id,
+        mode: "stream",
+        status: "failed",
+        prompt: message,
+        error: failureMessage,
+      });
+    }
+
     const replayTask = await getTask(requestId);
     if (replayTask && !controller.signal.aborted) {
       const replayPrompt = buildReplayPrompt(replayTask);
@@ -10573,12 +10726,46 @@ app.post("/api/chat/stream", async (req, res) => {
           meta: resumed.meta,
         });
 
+        if (harnessLogContext) {
+          const logFilePath = path.join(harnessLogContext.logsPath, "chat-runs.jsonl");
+          await appendHarnessChatRunLog(logFilePath, {
+            ts: new Date().toISOString(),
+            requestId,
+            workspaceId: harnessLogContext.workspaceId,
+            harnessId: harness.id,
+            mode: "stream",
+            status: "completed",
+            resumed: true,
+            prompt: replayPrompt,
+            fallbackUsed: true,
+            model: resumed.meta?.model,
+            provider: resumed.meta?.provider,
+            wroteFiles: extractAppliedWritePaths(resumedContent),
+            unreachableSignal: isAdapterUnreachableSignal(resumedContent),
+            responsePreview: resumedContent.slice(0, 2400),
+          });
+        }
+
         res.write(`data: ${JSON.stringify({ type: "meta", meta: { ...resumed.meta, fallbackUsed: true } })}\n\n`);
         res.write(`data: ${JSON.stringify({ type: "delta", text: resumedContent })}\n\n`);
         res.write("data: {\"type\":\"done\"}\n\n");
         res.end();
       } catch (replayError) {
         await updateTaskStatus(requestId, "failed", { error: `${failureMessage} | replay-failed: ${String(replayError)}` });
+        if (harnessLogContext) {
+          const logFilePath = path.join(harnessLogContext.logsPath, "chat-runs.jsonl");
+          await appendHarnessChatRunLog(logFilePath, {
+            ts: new Date().toISOString(),
+            requestId,
+            workspaceId: harnessLogContext.workspaceId,
+            harnessId: harness.id,
+            mode: "stream",
+            status: "failed",
+            resumed: true,
+            prompt: replayPrompt,
+            error: `${failureMessage} | replay-failed: ${String(replayError)}`,
+          });
+        }
         res.write(`data: ${JSON.stringify({ type: "error", message: String(replayError) })}\n\n`);
         res.end();
       }
