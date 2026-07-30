@@ -616,6 +616,8 @@ type RuntimeTrustPolicy = {
   pullModelAllowPattern: string;
   allowedSourceDomains: string[];
   expectedArtifactSha256: Record<string, string>;
+  requireSignedArtifactManifest: boolean;
+  trustedManifestKeyIds: string[];
 };
 
 type RuntimeInstallAuditRecord = {
@@ -626,8 +628,46 @@ type RuntimeInstallAuditRecord = {
   status: "completed" | "failed" | "canceled";
   model?: string;
   durationMs?: number;
+  integrity?: {
+    checked: number;
+    passed: number;
+    failed: number;
+    failures: string[];
+    signedManifestRequired: boolean;
+    signedManifestVerified: number;
+    signedManifestMissing: number;
+    signedManifestInvalid: number;
+  };
   error?: string;
 };
+
+const RUNTIME_JOB_ACTIONS: RuntimeJob["action"][] = [
+  "install-ollama",
+  "start-ollama",
+  "pull-ollama-model",
+  "install-piper",
+  "install-default-piper-voice",
+  "install-acejam",
+  "start-acejam",
+  "install-wan2gp",
+  "start-wan2gp",
+  "install-hunyuan3d",
+  "start-hunyuan3d",
+  "install-animato",
+  "start-animato",
+];
+
+const DEFAULT_RUNTIME_SOURCE_DOMAINS = [
+  "github.com",
+  "objects.githubusercontent.com",
+  "download.pytorch.org",
+  "pypi.org",
+  "files.pythonhosted.org",
+  "huggingface.co",
+  "ollama.com",
+];
+
+const DEFAULT_RUNTIME_PULL_PATTERN = "^[a-z0-9._:-]{1,120}$";
 
 type ThemePreset = {
   id: string;
@@ -1645,8 +1685,9 @@ function App() {
   const [runtimePolicy, setRuntimePolicy] = useState<RuntimeTrustPolicy | null>(null);
   const [runtimePolicyBusy, setRuntimePolicyBusy] = useState(false);
   const [runtimeSourceDomainsDraft, setRuntimeSourceDomainsDraft] = useState("");
-  const [runtimePullPatternDraft, setRuntimePullPatternDraft] = useState("^[a-z0-9._:-]{1,120}$");
+  const [runtimePullPatternDraft, setRuntimePullPatternDraft] = useState(DEFAULT_RUNTIME_PULL_PATTERN);
   const [runtimeExpectedShaDraft, setRuntimeExpectedShaDraft] = useState("{}");
+  const [runtimeTrustedManifestKeysDraft, setRuntimeTrustedManifestKeysDraft] = useState("");
   const [runtimeInstallAudit, setRuntimeInstallAudit] = useState<RuntimeInstallAuditRecord[]>([]);
   const [runtimeAuditBusy, setRuntimeAuditBusy] = useState(false);
   const [startupStrictMode, setStartupStrictMode] = useState(false);
@@ -1920,8 +1961,9 @@ function App() {
     if (payload.policy) {
       setRuntimePolicy(payload.policy);
       setRuntimeSourceDomainsDraft((payload.policy.allowedSourceDomains ?? []).join("\n"));
-      setRuntimePullPatternDraft(payload.policy.pullModelAllowPattern ?? "^[a-z0-9._:-]{1,120}$");
+      setRuntimePullPatternDraft(payload.policy.pullModelAllowPattern ?? DEFAULT_RUNTIME_PULL_PATTERN);
       setRuntimeExpectedShaDraft(JSON.stringify(payload.policy.expectedArtifactSha256 ?? {}, null, 2));
+      setRuntimeTrustedManifestKeysDraft((payload.policy.trustedManifestKeyIds ?? []).join("\n"));
     }
     setRuntimePolicyBusy(false);
   }
@@ -1940,6 +1982,11 @@ function App() {
       return;
     }
 
+    const trustedManifestKeyIds = runtimeTrustedManifestKeysDraft
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+
     const response = await fetch("/api/tools/runtimes/policy", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1953,12 +2000,15 @@ function App() {
           .map((entry) => entry.trim())
           .filter((entry) => entry.length > 0),
         expectedArtifactSha256: expectedSha,
+        requireSignedArtifactManifest: runtimePolicy?.requireSignedArtifactManifest ?? false,
+        trustedManifestKeyIds,
       }),
     });
 
     if (!response.ok) {
-      const payload = (await response.json()) as { error?: string };
-      setStatusMessage(payload.error ?? "Failed to save runtime trust policy.");
+      const payload = (await response.json()) as { error?: string; code?: string; details?: Record<string, unknown> };
+      const detail = payload.details ? ` ${JSON.stringify(payload.details)}` : "";
+      setStatusMessage((payload.error ?? "Failed to save runtime trust policy.") + detail);
       setRuntimePolicyBusy(false);
       return;
     }
@@ -1969,6 +2019,73 @@ function App() {
     }
     setStatusMessage("Runtime trust policy saved.");
     setRuntimePolicyBusy(false);
+  }
+
+  function applyRuntimePolicyPreset(preset: "strict" | "balanced" | "open-dev") {
+    setRuntimePolicy((current) => {
+      if (!current) {
+        return current;
+      }
+      if (preset === "strict") {
+        setRuntimeSourceDomainsDraft(DEFAULT_RUNTIME_SOURCE_DOMAINS.join("\n"));
+        setRuntimePullPatternDraft("^(llama3\\.2:3b|qwen2\\.5-coder:7b|qwen2\\.5-coder:32b)$");
+        setRuntimeTrustedManifestKeysDraft("runtime-prod-key-1");
+        return {
+          ...current,
+          allowDirectInstallApi: false,
+          allowedJobActions: ["install-ollama", "start-ollama", "pull-ollama-model", "install-piper", "install-default-piper-voice"],
+          requireSignedArtifactManifest: true,
+          trustedManifestKeyIds: ["runtime-prod-key-1"],
+        };
+      }
+      if (preset === "open-dev") {
+        setRuntimeSourceDomainsDraft(DEFAULT_RUNTIME_SOURCE_DOMAINS.join("\n"));
+        setRuntimePullPatternDraft(DEFAULT_RUNTIME_PULL_PATTERN);
+        setRuntimeTrustedManifestKeysDraft("");
+        return {
+          ...current,
+          allowDirectInstallApi: true,
+          allowedJobActions: [...RUNTIME_JOB_ACTIONS],
+          requireSignedArtifactManifest: false,
+          trustedManifestKeyIds: [],
+        };
+      }
+
+      setRuntimeSourceDomainsDraft(DEFAULT_RUNTIME_SOURCE_DOMAINS.join("\n"));
+      setRuntimePullPatternDraft(DEFAULT_RUNTIME_PULL_PATTERN);
+      setRuntimeTrustedManifestKeysDraft("");
+      return {
+        ...current,
+        allowDirectInstallApi: false,
+        allowedJobActions: [...RUNTIME_JOB_ACTIONS],
+        requireSignedArtifactManifest: false,
+        trustedManifestKeyIds: [],
+      };
+    });
+    setStatusMessage(`Runtime policy preset applied: ${preset}.`);
+  }
+
+  function resetRuntimePolicyDraftToSafeDefaults() {
+    setRuntimePolicy((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        installEnabled: true,
+        allowDirectInstallApi: false,
+        allowedJobActions: [...RUNTIME_JOB_ACTIONS],
+        pullModelAllowPattern: DEFAULT_RUNTIME_PULL_PATTERN,
+        expectedArtifactSha256: {},
+        requireSignedArtifactManifest: false,
+        trustedManifestKeyIds: [],
+      };
+    });
+    setRuntimeSourceDomainsDraft(DEFAULT_RUNTIME_SOURCE_DOMAINS.join("\n"));
+    setRuntimePullPatternDraft(DEFAULT_RUNTIME_PULL_PATTERN);
+    setRuntimeExpectedShaDraft("{}");
+    setRuntimeTrustedManifestKeysDraft("");
+    setStatusMessage("Runtime policy reset to safe defaults. Save to persist.");
   }
 
   async function loadRuntimeInstallAudit() {
@@ -2257,10 +2374,12 @@ function App() {
     });
 
     if (!response.ok) {
-      const payload = (await response.json()) as { error?: string };
-      setStatusMessage(payload.error ?? "Runtime job failed to start");
+      const payload = (await response.json()) as { error?: string; code?: string; details?: Record<string, unknown> };
+      const detail = payload.details ? ` ${JSON.stringify(payload.details)}` : "";
+      const errorText = (payload.error ?? "Runtime job failed to start") + detail;
+      setStatusMessage(errorText);
       setRuntimeBusyAction(null);
-      return { ok: false, error: payload.error ?? "Runtime job failed to start" };
+      return { ok: false, error: errorText };
     }
 
     const payload = (await response.json()) as { job: RuntimeJob };
@@ -8810,6 +8929,13 @@ function App() {
                     </button>
                   </div>
 
+                  <div className="tool-action-row">
+                    <button type="button" className="ghost" onClick={() => applyRuntimePolicyPreset("strict")} disabled={runtimePolicyBusy || !runtimePolicy}>Preset: Strict</button>
+                    <button type="button" className="ghost" onClick={() => applyRuntimePolicyPreset("balanced")} disabled={runtimePolicyBusy || !runtimePolicy}>Preset: Balanced</button>
+                    <button type="button" className="ghost" onClick={() => applyRuntimePolicyPreset("open-dev")} disabled={runtimePolicyBusy || !runtimePolicy}>Preset: Open Dev</button>
+                    <button type="button" className="ghost" onClick={resetRuntimePolicyDraftToSafeDefaults} disabled={runtimePolicyBusy || !runtimePolicy}>Safe Reset</button>
+                  </div>
+
                   <div className="tool-list">
                     <label>
                       <input
@@ -8829,7 +8955,46 @@ function App() {
                       />
                       <span>Allow direct install API (otherwise jobs API only)</span>
                     </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(runtimePolicy?.requireSignedArtifactManifest)}
+                        onChange={(event) => setRuntimePolicy((current) => current ? { ...current, requireSignedArtifactManifest: event.target.checked } : current)}
+                        disabled={runtimePolicyBusy || !runtimePolicy}
+                      />
+                      <span>Require signed artifact manifests during install integrity checks</span>
+                    </label>
                   </div>
+
+                  <details className="tool-details">
+                    <summary>Allowed Runtime Job Actions ({runtimePolicy?.allowedJobActions.length ?? 0})</summary>
+                    <div className="tool-list">
+                      {RUNTIME_JOB_ACTIONS.map((action) => {
+                        const selected = Boolean(runtimePolicy?.allowedJobActions.includes(action));
+                        return (
+                          <label key={action}>
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={(event) => {
+                                setRuntimePolicy((current) => {
+                                  if (!current) {
+                                    return current;
+                                  }
+                                  const next = event.target.checked
+                                    ? Array.from(new Set([...current.allowedJobActions, action]))
+                                    : current.allowedJobActions.filter((entry) => entry !== action);
+                                  return { ...current, allowedJobActions: next };
+                                });
+                              }}
+                              disabled={runtimePolicyBusy || !runtimePolicy}
+                            />
+                            <span>{action}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </details>
 
                   <label>
                     Pull model allow pattern
@@ -8861,6 +9026,16 @@ function App() {
                     />
                   </label>
 
+                  <label>
+                    Trusted manifest key IDs (one per line, optional)
+                    <textarea
+                      rows={4}
+                      value={runtimeTrustedManifestKeysDraft}
+                      onChange={(event) => setRuntimeTrustedManifestKeysDraft(event.target.value)}
+                      disabled={runtimePolicyBusy}
+                    />
+                  </label>
+
                   <div className="tool-action-row">
                     <button type="button" onClick={() => void saveRuntimePolicy()} disabled={runtimePolicyBusy || !runtimePolicy}>
                       {runtimePolicyBusy ? "Saving..." : "Save Runtime Policy"}
@@ -8881,6 +9056,11 @@ function App() {
                             <strong>{entry.action}</strong>
                             <small>{new Date(entry.at).toLocaleString()} · {entry.status} · job {entry.jobId.slice(0, 8)}</small>
                             {entry.durationMs ? <small>Duration: {Math.round(entry.durationMs / 1000)}s</small> : null}
+                            {entry.integrity ? (
+                              <small>
+                                Integrity {entry.integrity.passed}/{entry.integrity.checked}, signed ok {entry.integrity.signedManifestVerified}, missing {entry.integrity.signedManifestMissing}, invalid {entry.integrity.signedManifestInvalid}
+                              </small>
+                            ) : null}
                             {entry.error ? <small>{entry.error}</small> : null}
                           </li>
                         ))}

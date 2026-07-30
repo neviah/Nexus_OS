@@ -3,7 +3,7 @@ import cors from "cors";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, createVerify } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
@@ -159,6 +159,10 @@ type RuntimeTrustPolicy = {
   allowDirectInstallApi: boolean;
   allowedJobActions: RuntimeJobAction[];
   pullModelAllowPattern: string;
+  allowedSourceDomains: string[];
+  expectedArtifactSha256: Record<string, string>;
+  requireSignedArtifactManifest: boolean;
+  trustedManifestKeyIds: string[];
 };
 
 type RuntimeJob = {
@@ -176,15 +180,125 @@ type RuntimeJob = {
   autoRetryAttempt?: number;
 };
 
+type RuntimeInstallAuditRecord = {
+  id: string;
+  at: string;
+  jobId: string;
+  action: RuntimeJobAction;
+  status: "completed" | "failed" | "canceled";
+  model?: string;
+  durationMs?: number;
+  checkpoint?: {
+    capturedAt: string;
+    trackedPathCount: number;
+    existedCount: number;
+  };
+  rollback?: {
+    attempted: boolean;
+    restoredPaths?: string[];
+    error?: string;
+  };
+  integrity?: {
+    checked: number;
+    passed: number;
+    failed: number;
+    failures: string[];
+    signedManifestRequired: boolean;
+    signedManifestVerified: number;
+    signedManifestMissing: number;
+    signedManifestInvalid: number;
+  };
+  error?: string;
+};
+
+type RuntimeInstallCheckpoint = {
+  capturedAt: string;
+  action: RuntimeJobAction;
+  trackedPaths: Array<{ path: string; existed: boolean }>;
+};
+
+type RuntimeManifestSignatureResult = {
+  required: boolean;
+  present: boolean;
+  valid: boolean;
+  trusted: boolean;
+  manifestId?: string;
+  keyId?: string;
+  sourceDomain?: string;
+  reason?: string;
+};
+
+type RuntimeIntegrityCheck = {
+  path: string;
+  exists: boolean;
+  expectedSha256?: string;
+  actualSha256?: string;
+  passed: boolean;
+  reason?: string;
+  manifest?: RuntimeManifestSignatureResult;
+};
+
+type RuntimeArtifactManifestRecord = {
+  id: string;
+  action: RuntimeJobAction;
+  artifactPath: string;
+  sourceDomain: string;
+  sha256: string;
+  signedAt: string;
+  keyId: string;
+  signature: string;
+};
+
+type RuntimeArtifactManifestBundle = {
+  version: number;
+  manifests: RuntimeArtifactManifestRecord[];
+};
+
+type RuntimeTrustPublicKeyRecord = {
+  id: string;
+  algorithm: "rsa-sha256";
+  publicKeyPem: string;
+};
+
+type RuntimeTrustPublicKeyBundle = {
+  version: number;
+  keys: RuntimeTrustPublicKeyRecord[];
+};
+
+const DEFAULT_RUNTIME_ALLOWED_SOURCE_DOMAINS = [
+  "github.com",
+  "objects.githubusercontent.com",
+  "download.pytorch.org",
+  "pypi.org",
+  "files.pythonhosted.org",
+  "huggingface.co",
+  "ollama.com",
+];
+
+const RUNTIME_ACTION_SOURCE_DOMAINS: Partial<Record<RuntimeJobAction, string[]>> = {
+  "install-acejam": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"],
+  "install-piper": ["github.com", "objects.githubusercontent.com"],
+  "install-default-piper-voice": ["huggingface.co"],
+  "install-wan2gp": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org", "download.pytorch.org"],
+  "install-hunyuan3d": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org", "download.pytorch.org"],
+  "install-animato": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"],
+  "install-ollama": ["ollama.com"],
+  "pull-ollama-model": ["ollama.com"],
+};
+
 const runtimeJobs = new Map<string, RuntimeJob>();
 const runtimeJobsPath = path.join(getRootDir(), "data", "runtime-jobs.local.json");
 const webCapabilitiesHistoryPath = path.join(getRootDir(), "data", "web-capabilities-history.local.json");
 const fableTelemetryPath = path.join(getRootDir(), "data", "fable-telemetry.local.json");
 const gameCreatorTelemetryStorageDir = path.join(getRootDir(), "data", "game-creator-telemetry");
+const runtimeRoot = path.join(getRootDir(), "data", "runtime-tools");
 const piperAssignmentsPath = path.join(getRootDir(), "data", "piper-voice-assignments.local.json");
 const githubConnectorPath = path.join(getRootDir(), "data", "connectors.github.local.json");
 const unityAuditLogPath = path.join(getRootDir(), "data", "unity-tool-audit.local.jsonl");
 const unityApprovalAuditLogPath = path.join(getRootDir(), "data", "unity-approval-audit.local.jsonl");
+const runtimeInstallAuditPath = path.join(getRootDir(), "data", "runtime-install-audit.local.jsonl");
+const runtimeArtifactManifestPath = path.join(getRootDir(), "config", "runtime-artifact-manifests.json");
+const runtimeTrustPublicKeysPath = path.join(getRootDir(), "config", "runtime-trust-public-keys.json");
 let runtimeJobsLoaded = false;
 let runtimeJobPersistQueue: Promise<void> = Promise.resolve();
 let unityAuditWriteQueue: Promise<void> = Promise.resolve();
@@ -1131,6 +1245,13 @@ function getRuntimeTrustPolicy(state: SystemState): RuntimeTrustPolicy {
       .map(([key, value]) => [key.replace(/\\/g, "/"), value.trim().toLowerCase()]))
     : {};
 
+  const trustedManifestKeyIds = Array.isArray(state.toolPermissions?.runtimeTrustedManifestKeyIds)
+    ? Array.from(new Set(state.toolPermissions.runtimeTrustedManifestKeyIds
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)))
+    : [];
+
   return {
     installEnabled: state.toolPermissions?.runtimeInstallEnabled !== false,
     allowDirectInstallApi: Boolean(state.toolPermissions?.runtimeAllowDirectInstallApi),
@@ -1138,7 +1259,34 @@ function getRuntimeTrustPolicy(state: SystemState): RuntimeTrustPolicy {
     pullModelAllowPattern,
     allowedSourceDomains: allowedSourceDomains.length > 0 ? allowedSourceDomains : [...DEFAULT_RUNTIME_ALLOWED_SOURCE_DOMAINS],
     expectedArtifactSha256,
+    requireSignedArtifactManifest: Boolean(state.toolPermissions?.runtimeRequireSignedArtifactManifest),
+    trustedManifestKeyIds,
   };
+}
+
+function ensureRuntimeTrustPolicyNormalized(state: SystemState): { policy: RuntimeTrustPolicy; changed: boolean } {
+  const before = JSON.stringify({
+    runtimeInstallEnabled: state.toolPermissions?.runtimeInstallEnabled,
+    runtimeAllowDirectInstallApi: state.toolPermissions?.runtimeAllowDirectInstallApi,
+    runtimeAllowedJobActions: state.toolPermissions?.runtimeAllowedJobActions,
+    runtimePullModelAllowPattern: state.toolPermissions?.runtimePullModelAllowPattern,
+    runtimeAllowedSourceDomains: state.toolPermissions?.runtimeAllowedSourceDomains,
+    runtimeExpectedArtifactSha256: state.toolPermissions?.runtimeExpectedArtifactSha256,
+    runtimeRequireSignedArtifactManifest: state.toolPermissions?.runtimeRequireSignedArtifactManifest,
+    runtimeTrustedManifestKeyIds: state.toolPermissions?.runtimeTrustedManifestKeyIds,
+  });
+  const policy = setRuntimeTrustPolicy(state, {});
+  const after = JSON.stringify({
+    runtimeInstallEnabled: state.toolPermissions?.runtimeInstallEnabled,
+    runtimeAllowDirectInstallApi: state.toolPermissions?.runtimeAllowDirectInstallApi,
+    runtimeAllowedJobActions: state.toolPermissions?.runtimeAllowedJobActions,
+    runtimePullModelAllowPattern: state.toolPermissions?.runtimePullModelAllowPattern,
+    runtimeAllowedSourceDomains: state.toolPermissions?.runtimeAllowedSourceDomains,
+    runtimeExpectedArtifactSha256: state.toolPermissions?.runtimeExpectedArtifactSha256,
+    runtimeRequireSignedArtifactManifest: state.toolPermissions?.runtimeRequireSignedArtifactManifest,
+    runtimeTrustedManifestKeyIds: state.toolPermissions?.runtimeTrustedManifestKeyIds,
+  });
+  return { policy, changed: before !== after };
 }
 
 function setRuntimeTrustPolicy(state: SystemState, input: Partial<RuntimeTrustPolicy>): RuntimeTrustPolicy {
@@ -1157,6 +1305,11 @@ function setRuntimeTrustPolicy(state: SystemState, input: Partial<RuntimeTrustPo
       .filter(([key, value]) => key.trim().length > 0 && typeof value === "string" && value.trim().length > 0)
       .map(([key, value]) => [key.replace(/\\/g, "/"), value.trim().toLowerCase()]))
     : current.expectedArtifactSha256;
+  const nextTrustedManifestKeyIds = Array.isArray(input.trustedManifestKeyIds)
+    ? Array.from(new Set(input.trustedManifestKeyIds
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)))
+    : current.trustedManifestKeyIds;
 
   state.toolPermissions = {
     ...(state.toolPermissions ?? {}),
@@ -1166,43 +1319,89 @@ function setRuntimeTrustPolicy(state: SystemState, input: Partial<RuntimeTrustPo
     runtimePullModelAllowPattern: nextPattern,
     runtimeAllowedSourceDomains: nextDomains.length > 0 ? nextDomains : [...DEFAULT_RUNTIME_ALLOWED_SOURCE_DOMAINS],
     runtimeExpectedArtifactSha256: nextExpectedSha,
+    runtimeRequireSignedArtifactManifest: input.requireSignedArtifactManifest ?? current.requireSignedArtifactManifest,
+    runtimeTrustedManifestKeyIds: nextTrustedManifestKeyIds,
   };
 
   return getRuntimeTrustPolicy(state);
 }
 
+type RuntimeJobValidationFailure = {
+  ok: false;
+  reason: string;
+  code: "install_disabled" | "action_blocked" | "domain_blocked" | "model_required" | "model_pattern_blocked" | "policy_regex_invalid";
+  details?: Record<string, unknown>;
+};
+
 function validateRuntimeJobRequest(input: {
   policy: RuntimeTrustPolicy;
   action: RuntimeJobAction;
   model?: string;
-}): { ok: true } | { ok: false; reason: string } {
+}): { ok: true } | RuntimeJobValidationFailure {
   if (!input.policy.installEnabled) {
-    return { ok: false, reason: "Runtime install/download actions are disabled by policy." };
+    return {
+      ok: false,
+      code: "install_disabled",
+      reason: "Runtime install/download actions are disabled by policy.",
+    };
   }
 
   if (!input.policy.allowedJobActions.includes(input.action)) {
-    return { ok: false, reason: `Runtime action ${input.action} is blocked by trust policy.` };
+    return {
+      ok: false,
+      code: "action_blocked",
+      reason: `Runtime action ${input.action} is blocked by trust policy.`,
+      details: {
+        action: input.action,
+        allowedJobActions: input.policy.allowedJobActions,
+      },
+    };
   }
 
   const requiredDomains = RUNTIME_ACTION_SOURCE_DOMAINS[input.action] ?? [];
   const allowedDomainSet = new Set(input.policy.allowedSourceDomains.map((entry) => entry.toLowerCase()));
   const missingDomains = requiredDomains.filter((domain) => !allowedDomainSet.has(domain.toLowerCase()));
   if (missingDomains.length > 0) {
-    return { ok: false, reason: `Runtime action ${input.action} requires blocked source domain(s): ${missingDomains.join(", ")}.` };
+    return {
+      ok: false,
+      code: "domain_blocked",
+      reason: `Runtime action ${input.action} requires blocked source domain(s): ${missingDomains.join(", ")}.`,
+      details: {
+        action: input.action,
+        missingDomains,
+        allowedSourceDomains: input.policy.allowedSourceDomains,
+      },
+    };
   }
 
   if (input.action === "pull-ollama-model") {
     const model = String(input.model ?? "").trim();
     if (!model) {
-      return { ok: false, reason: "pull-ollama-model requires model." };
+      return {
+        ok: false,
+        code: "model_required",
+        reason: "pull-ollama-model requires model.",
+      };
     }
     try {
       const regex = new RegExp(input.policy.pullModelAllowPattern);
       if (!regex.test(model)) {
-        return { ok: false, reason: "Model name is blocked by runtime trust policy pattern." };
+        return {
+          ok: false,
+          code: "model_pattern_blocked",
+          reason: "Model name is blocked by runtime trust policy pattern.",
+          details: {
+            model,
+            pullModelAllowPattern: input.policy.pullModelAllowPattern,
+          },
+        };
       }
     } catch {
-      return { ok: false, reason: "Runtime trust policy regex is invalid." };
+      return {
+        ok: false,
+        code: "policy_regex_invalid",
+        reason: "Runtime trust policy regex is invalid.",
+      };
     }
   }
 
@@ -1307,41 +1506,216 @@ function runtimeIntegrityArtifactsForAction(action: RuntimeJobAction): string[] 
   return [];
 }
 
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function loadRuntimeTrustPublicKeys(): Promise<Map<string, RuntimeTrustPublicKeyRecord>> {
+  try {
+    const raw = await fs.readFile(runtimeTrustPublicKeysPath, "utf-8");
+    const parsed = JSON.parse(raw) as Partial<RuntimeTrustPublicKeyBundle>;
+    const records = Array.isArray(parsed.keys) ? parsed.keys : [];
+    const map = new Map<string, RuntimeTrustPublicKeyRecord>();
+    for (const entry of records) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const id = typeof entry.id === "string" ? entry.id.trim() : "";
+      const algorithm = typeof entry.algorithm === "string" ? entry.algorithm.toLowerCase() : "";
+      const publicKeyPem = typeof entry.publicKeyPem === "string" ? entry.publicKeyPem.trim() : "";
+      if (!id || !publicKeyPem || algorithm !== "rsa-sha256") {
+        continue;
+      }
+      map.set(id, { id, algorithm: "rsa-sha256", publicKeyPem });
+    }
+    return map;
+  } catch {
+    return new Map<string, RuntimeTrustPublicKeyRecord>();
+  }
+}
+
+async function loadRuntimeArtifactManifests(): Promise<Map<string, RuntimeArtifactManifestRecord>> {
+  try {
+    const raw = await fs.readFile(runtimeArtifactManifestPath, "utf-8");
+    const parsed = JSON.parse(raw) as Partial<RuntimeArtifactManifestBundle>;
+    const records = Array.isArray(parsed.manifests) ? parsed.manifests : [];
+    const map = new Map<string, RuntimeArtifactManifestRecord>();
+    for (const entry of records) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const id = typeof entry.id === "string" ? entry.id.trim() : "";
+      const action = typeof entry.action === "string" ? entry.action.trim() as RuntimeJobAction : null;
+      const artifactPath = typeof entry.artifactPath === "string" ? entry.artifactPath.replace(/\\/g, "/").trim() : "";
+      const sourceDomain = typeof entry.sourceDomain === "string" ? entry.sourceDomain.trim().toLowerCase() : "";
+      const sha256 = typeof entry.sha256 === "string" ? entry.sha256.trim().toLowerCase() : "";
+      const signedAt = typeof entry.signedAt === "string" ? entry.signedAt.trim() : "";
+      const keyId = typeof entry.keyId === "string" ? entry.keyId.trim() : "";
+      const signature = typeof entry.signature === "string" ? entry.signature.trim() : "";
+      if (!id || !action || !ALL_RUNTIME_JOB_ACTIONS.includes(action) || !artifactPath || !sourceDomain || !sha256 || !signedAt || !keyId || !signature) {
+        continue;
+      }
+      const key = `${action}::${artifactPath}`;
+      map.set(key, { id, action, artifactPath, sourceDomain, sha256, signedAt, keyId, signature });
+    }
+    return map;
+  } catch {
+    return new Map<string, RuntimeArtifactManifestRecord>();
+  }
+}
+
+function verifyRuntimeManifestSignature(
+  manifest: RuntimeArtifactManifestRecord,
+  publicKeys: Map<string, RuntimeTrustPublicKeyRecord>,
+  trustedKeyIds: Set<string>,
+): RuntimeManifestSignatureResult {
+  const key = publicKeys.get(manifest.keyId);
+  if (!key) {
+    return {
+      required: false,
+      present: true,
+      valid: false,
+      trusted: false,
+      manifestId: manifest.id,
+      keyId: manifest.keyId,
+      sourceDomain: manifest.sourceDomain,
+      reason: `Unknown keyId ${manifest.keyId}`,
+    };
+  }
+  const trusted = trustedKeyIds.size === 0 || trustedKeyIds.has(manifest.keyId);
+  if (!trusted) {
+    return {
+      required: false,
+      present: true,
+      valid: false,
+      trusted: false,
+      manifestId: manifest.id,
+      keyId: manifest.keyId,
+      sourceDomain: manifest.sourceDomain,
+      reason: `Key ${manifest.keyId} is not in trusted manifest key ids`,
+    };
+  }
+
+  const payload = {
+    id: manifest.id,
+    action: manifest.action,
+    artifactPath: manifest.artifactPath,
+    sourceDomain: manifest.sourceDomain,
+    sha256: manifest.sha256,
+    signedAt: manifest.signedAt,
+    keyId: manifest.keyId,
+  };
+  const canonicalPayload = stableStringify(payload);
+
+  try {
+    const verifier = createVerify("RSA-SHA256");
+    verifier.update(canonicalPayload, "utf-8");
+    verifier.end();
+    const valid = verifier.verify(key.publicKeyPem, Buffer.from(manifest.signature, "base64"));
+    return {
+      required: false,
+      present: true,
+      valid,
+      trusted,
+      manifestId: manifest.id,
+      keyId: manifest.keyId,
+      sourceDomain: manifest.sourceDomain,
+      reason: valid ? undefined : "Signature verification failed",
+    };
+  } catch (error) {
+    return {
+      required: false,
+      present: true,
+      valid: false,
+      trusted,
+      manifestId: manifest.id,
+      keyId: manifest.keyId,
+      sourceDomain: manifest.sourceDomain,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function verifyRuntimeActionIntegrity(action: RuntimeJobAction, policy: RuntimeTrustPolicy): Promise<RuntimeIntegrityCheck[]> {
   const checks: RuntimeIntegrityCheck[] = [];
+  const publicKeys = await loadRuntimeTrustPublicKeys();
+  const manifests = await loadRuntimeArtifactManifests();
+  const trustedKeyIds = new Set(policy.trustedManifestKeyIds);
+  const requiredDomains = new Set((RUNTIME_ACTION_SOURCE_DOMAINS[action] ?? []).map((entry) => entry.toLowerCase()));
   for (const relativePath of runtimeIntegrityArtifactsForAction(action)) {
     const normalized = relativePath.replace(/\\/g, "/");
     const absolutePath = path.join(getRootDir(), normalized);
+    const manifestKey = `${action}::${normalized}`;
+    const manifestRecord = manifests.get(manifestKey);
+    const manifest = manifestRecord
+      ? verifyRuntimeManifestSignature(manifestRecord, publicKeys, trustedKeyIds)
+      : {
+        required: policy.requireSignedArtifactManifest,
+        present: false,
+        valid: false,
+        trusted: false,
+        reason: "No signed manifest entry",
+      } satisfies RuntimeManifestSignatureResult;
+
+    if (manifest.present && manifest.sourceDomain && requiredDomains.size > 0 && !requiredDomains.has(manifest.sourceDomain.toLowerCase())) {
+      manifest.valid = false;
+      manifest.reason = `Manifest source domain ${manifest.sourceDomain} is not valid for ${action}`;
+    }
+
     const exists = await fs.access(absolutePath).then(() => true).catch(() => false);
     if (!exists) {
       checks.push({
         path: normalized,
         exists: false,
-        expectedSha256: policy.expectedArtifactSha256[normalized],
+        expectedSha256: policy.expectedArtifactSha256[normalized] ?? manifestRecord?.sha256,
         passed: false,
         reason: "Artifact missing",
+        manifest,
       });
       continue;
     }
 
-    const expected = policy.expectedArtifactSha256[normalized];
+    const expected = policy.expectedArtifactSha256[normalized] ?? manifestRecord?.sha256;
     if (!expected) {
+      if (policy.requireSignedArtifactManifest && (!manifest.present || !manifest.valid || !manifest.trusted)) {
+        checks.push({
+          path: normalized,
+          exists: true,
+          passed: false,
+          reason: manifest.reason ?? "Signed manifest required but invalid",
+          manifest,
+        });
+        continue;
+      }
       checks.push({
         path: normalized,
         exists: true,
         passed: true,
+        manifest,
       });
       continue;
     }
 
     const actual = await sha256ForFile(absolutePath);
+    const shaMatches = actual.toLowerCase() === expected.toLowerCase();
+    const signedManifestOk = !policy.requireSignedArtifactManifest || (manifest.present && manifest.valid && manifest.trusted);
     checks.push({
       path: normalized,
       exists: true,
       expectedSha256: expected,
       actualSha256: actual,
-      passed: actual.toLowerCase() === expected.toLowerCase(),
-      reason: actual.toLowerCase() === expected.toLowerCase() ? undefined : "SHA256 mismatch",
+      passed: shaMatches && signedManifestOk,
+      reason: !shaMatches
+        ? "SHA256 mismatch"
+        : (!signedManifestOk ? (manifest.reason ?? "Signed manifest required but invalid") : undefined),
+      manifest,
     });
   }
 
@@ -4780,6 +5154,7 @@ function startRuntimeJob(job: RuntimeJob): void {
   void (async () => {
     const startedAtMs = Date.now();
     const checkpoint = await captureRuntimeInstallCheckpoint(job.action);
+    let integrityChecks: RuntimeIntegrityCheck[] = [];
     try {
       if (job.status !== "queued") {
         return;
@@ -4791,7 +5166,7 @@ function startRuntimeJob(job: RuntimeJob): void {
 
       const state = await readSystemState();
       const policy = getRuntimeTrustPolicy(state);
-      const integrityChecks = await verifyRuntimeActionIntegrity(job.action, policy);
+      integrityChecks = await verifyRuntimeActionIntegrity(job.action, policy);
       const failures = integrityChecks.filter((entry) => !entry.passed);
       if (integrityChecks.length > 0) {
         appendRuntimeJobLog(job, `Integrity checks: ${integrityChecks.length} checked, ${failures.length} failed.`);
@@ -4806,7 +5181,12 @@ function startRuntimeJob(job: RuntimeJob): void {
       job.updatedAt = job.finishedAt;
       appendRuntimeJobLog(job, "Completed successfully.");
 
-      const integrityFailures: string[] = [];
+      const integrityFailures = integrityChecks
+        .filter((entry) => !entry.passed)
+        .map((entry) => `${entry.path}: ${entry.reason ?? "failed"}`);
+      const signedManifestVerified = integrityChecks.filter((entry) => entry.manifest?.present && entry.manifest.valid && entry.manifest.trusted).length;
+      const signedManifestMissing = integrityChecks.filter((entry) => entry.manifest?.required && !entry.manifest.present).length;
+      const signedManifestInvalid = integrityChecks.filter((entry) => entry.manifest?.present && (!entry.manifest.valid || !entry.manifest.trusted)).length;
       await appendRuntimeInstallAudit({
         id: crypto.randomUUID(),
         at: new Date().toISOString(),
@@ -4824,9 +5204,13 @@ function startRuntimeJob(job: RuntimeJob): void {
           : undefined,
         integrity: {
           checked: integrityChecks.length,
-          passed: integrityChecks.length,
-          failed: 0,
+          passed: integrityChecks.length - integrityFailures.length,
+          failed: integrityFailures.length,
           failures: integrityFailures,
+          signedManifestRequired: policy.requireSignedArtifactManifest,
+          signedManifestVerified,
+          signedManifestMissing,
+          signedManifestInvalid,
         },
       }).catch(() => undefined);
 
@@ -4882,6 +5266,20 @@ function startRuntimeJob(job: RuntimeJob): void {
             }
             : undefined,
           rollback,
+          integrity: integrityChecks.length > 0
+            ? {
+              checked: integrityChecks.length,
+              passed: integrityChecks.filter((entry) => entry.passed).length,
+              failed: integrityChecks.filter((entry) => !entry.passed).length,
+              failures: integrityChecks
+                .filter((entry) => !entry.passed)
+                .map((entry) => `${entry.path}: ${entry.reason ?? "failed"}`),
+              signedManifestRequired: integrityChecks.some((entry) => Boolean(entry.manifest?.required)),
+              signedManifestVerified: integrityChecks.filter((entry) => entry.manifest?.present && entry.manifest.valid && entry.manifest.trusted).length,
+              signedManifestMissing: integrityChecks.filter((entry) => entry.manifest?.required && !entry.manifest.present).length,
+              signedManifestInvalid: integrityChecks.filter((entry) => entry.manifest?.present && (!entry.manifest.valid || !entry.manifest.trusted)).length,
+            }
+            : undefined,
           error: job.error,
         }).catch(() => undefined);
 
@@ -8959,7 +9357,11 @@ app.get("/api/tools/runtimes/status", async (_req, res) => {
 
 app.get("/api/tools/runtimes/policy", async (_req, res) => {
   const state = await readSystemState();
-  const policy = getRuntimeTrustPolicy(state);
+  const normalized = ensureRuntimeTrustPolicyNormalized(state);
+  if (normalized.changed) {
+    await writeSystemState(state);
+  }
+  const policy = normalized.policy;
   return res.json({ ok: true, policy });
 });
 
@@ -8971,6 +9373,8 @@ app.post("/api/tools/runtimes/policy", async (req, res) => {
     pullModelAllowPattern?: string;
     allowedSourceDomains?: string[];
     expectedArtifactSha256?: Record<string, string>;
+    requireSignedArtifactManifest?: boolean;
+    trustedManifestKeyIds?: string[];
   };
   const state = await readSystemState();
   const policy = setRuntimeTrustPolicy(state, {
@@ -8982,6 +9386,8 @@ app.post("/api/tools/runtimes/policy", async (req, res) => {
     pullModelAllowPattern: body.pullModelAllowPattern,
     allowedSourceDomains: Array.isArray(body.allowedSourceDomains) ? body.allowedSourceDomains : undefined,
     expectedArtifactSha256: body.expectedArtifactSha256,
+    requireSignedArtifactManifest: body.requireSignedArtifactManifest,
+    trustedManifestKeyIds: Array.isArray(body.trustedManifestKeyIds) ? body.trustedManifestKeyIds : undefined,
   });
   await writeSystemState(state);
   return res.json({ ok: true, policy });
@@ -9026,7 +9432,7 @@ app.post("/api/tools/runtimes/jobs", async (req, res) => {
     model: body.model,
   });
   if (!validation.ok) {
-    return res.status(412).json({ error: validation.reason });
+    return res.status(412).json({ error: validation.reason, code: validation.code, details: validation.details });
   }
 
   const job = createRuntimeJob(body.action, body.model);
@@ -9069,7 +9475,7 @@ app.post("/api/tools/runtimes/jobs/:jobId/retry", async (req, res) => {
     model: job.model,
   });
   if (!validation.ok) {
-    return res.status(412).json({ error: validation.reason, job });
+    return res.status(412).json({ error: validation.reason, code: validation.code, details: validation.details, job });
   }
 
   const retryJob = createRuntimeJob(job.action, job.model, job.id);
@@ -9112,7 +9518,7 @@ app.post("/api/tools/runtimes/install", async (req, res) => {
       action: mappedAction,
     });
     if (!validation.ok) {
-      return res.status(412).json({ error: validation.reason });
+      return res.status(412).json({ error: validation.reason, code: validation.code, details: validation.details });
     }
 
     if (body.runtime === "ollama") {
@@ -9353,68 +9759,6 @@ function chooseWanModelFromInstalled(
 }
 
 function buildWanPreferenceTiers(recommendedProfile: number, mode: "image" | "video"): string[][] {
-type RuntimeInstallAuditRecord = {
-  id: string;
-  at: string;
-  jobId: string;
-  action: RuntimeJobAction;
-  status: "completed" | "failed" | "canceled";
-  model?: string;
-  durationMs?: number;
-  checkpoint?: {
-    capturedAt: string;
-    trackedPathCount: number;
-    existedCount: number;
-  };
-  rollback?: {
-    attempted: boolean;
-    restoredPaths?: string[];
-    error?: string;
-  };
-  integrity?: {
-    checked: number;
-    passed: number;
-    failed: number;
-    failures: string[];
-  };
-  error?: string;
-};
-
-type RuntimeInstallCheckpoint = {
-  capturedAt: string;
-  action: RuntimeJobAction;
-  trackedPaths: Array<{ path: string; existed: boolean }>;
-};
-
-type RuntimeIntegrityCheck = {
-  path: string;
-  exists: boolean;
-  expectedSha256?: string;
-  actualSha256?: string;
-  passed: boolean;
-  reason?: string;
-};
-
-const DEFAULT_RUNTIME_ALLOWED_SOURCE_DOMAINS = [
-  "github.com",
-  "objects.githubusercontent.com",
-  "download.pytorch.org",
-  "pypi.org",
-  "files.pythonhosted.org",
-  "huggingface.co",
-  "ollama.com",
-];
-
-const RUNTIME_ACTION_SOURCE_DOMAINS: Partial<Record<RuntimeJobAction, string[]>> = {
-  "install-acejam": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"],
-  "install-piper": ["github.com", "objects.githubusercontent.com"],
-  "install-default-piper-voice": ["huggingface.co"],
-  "install-wan2gp": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org", "download.pytorch.org"],
-  "install-hunyuan3d": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org", "download.pytorch.org"],
-  "install-animato": ["github.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"],
-  "install-ollama": ["ollama.com"],
-  "pull-ollama-model": ["ollama.com"],
-};
   const lowVramImage = ["flux_schnell", "alpha_sf", "alpha2_sf", "flux", "alpha2", "alpha"];
   const highVramImage = ["qwen_image_20B", "flux", "alpha2", "flux_schnell", "alpha_sf"];
   const lowVramVideo = ["t2v_1.3B", "t2v_sf", "fun_inp_1.3B", "hunyuan", "animate", "alpha2"];

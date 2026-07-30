@@ -43,7 +43,9 @@
       "huggingface.co",
       "ollama.com"
     ],
-    "runtimeExpectedArtifactSha256": {}
+    "runtimeExpectedArtifactSha256": {},
+    "runtimeRequireSignedArtifactManifest": false,
+    "runtimeTrustedManifestKeyIds": []
   },
   "activeWorkspaceId": "default",
   "selectedPane": {

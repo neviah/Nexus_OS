@@ -178,6 +178,8 @@ export type SystemState = {
     runtimePullModelAllowPattern?: string;
     runtimeAllowedSourceDomains?: string[];
     runtimeExpectedArtifactSha256?: Record<string, string>;
+    runtimeRequireSignedArtifactManifest?: boolean;
+    runtimeTrustedManifestKeyIds?: string[];
   };
   activeWorkspaceId: string;
   selectedPane: {

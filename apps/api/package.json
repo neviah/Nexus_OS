@@ -13,6 +13,7 @@
     "provision:hunyuan3d": "tsx src/scripts/provisionHunyuan3d.ts",
     "test:conformance": "tsx --test src/tests/conformanceProfiles.test.ts",
     "test:contract": "tsx --test src/tests/routerContract.test.ts",
+    "test:runtime-trust": "tsx --test src/tests/runtimeTrustPolicy.test.ts",
     "conformance": "tsx src/tests/runConformance.ts"
   },
   "dependencies": {

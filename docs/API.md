@@ -174,7 +174,7 @@ Example policy update request:
 - `GET /api/tools/runtimes/policy`
   - Returns runtime install/download policy settings.
 - `POST /api/tools/runtimes/policy`
-  - Updates runtime policy (`installEnabled`, `allowDirectInstallApi`, `allowedJobActions`, `pullModelAllowPattern`).
+  - Updates runtime policy (`installEnabled`, `allowDirectInstallApi`, `allowedJobActions`, `pullModelAllowPattern`, `allowedSourceDomains`, `expectedArtifactSha256`, `requireSignedArtifactManifest`, `trustedManifestKeyIds`).
 - `GET /api/tools/runtimes/audit?limit=<1..500>`
   - Returns recent runtime install/download audit records with checkpoint and rollback outcomes.
 
@@ -184,7 +184,27 @@ Runtime policy is enforced for:
 - `POST /api/tools/runtimes/jobs/:jobId/retry`
 - `POST /api/tools/runtimes/install`
 
-When blocked by policy, endpoints return HTTP `412` with a descriptive error message.
+When blocked by policy, endpoints return HTTP `412` with a descriptive error message plus structured diagnostics:
+
+```json
+{
+  "error": "Runtime action install-piper is blocked by trust policy.",
+  "code": "action_blocked",
+  "details": {
+    "action": "install-piper",
+    "allowedJobActions": ["start-ollama"]
+  }
+}
+```
+
+Supported denial codes include `install_disabled`, `action_blocked`, `domain_blocked`, `model_required`, `model_pattern_blocked`, and `policy_regex_invalid`.
+
+Signed-manifest verification reads from:
+
+- `config/runtime-trust-public-keys.json` (RSA-SHA256 public keys)
+- `config/runtime-artifact-manifests.json` (signed artifact manifest records)
+
+If `requireSignedArtifactManifest` is true, runtime install integrity checks fail when a required artifact lacks a valid trusted manifest signature.
 
 `POST /api/tools/unity/:action` may include a `rollback` object in failure responses when automatic project file rollback was attempted.
 
@@ -219,6 +239,8 @@ Example runtime policy update:
     "huggingface.co",
     "ollama.com"
   ],
-  "expectedArtifactSha256": {}
+  "expectedArtifactSha256": {},
+  "requireSignedArtifactManifest": false,
+  "trustedManifestKeyIds": []
 }
 ```
