@@ -742,6 +742,7 @@ type GameCreatorExecutionArtifact = {
   status: "pending" | "approved" | "rejected" | "auto-approved";
   relativePath: string;
   previewUrl?: string;
+  provenance?: string;
   createdAt: string;
   decidedAt?: string;
   decidedBy?: string;
@@ -2570,6 +2571,13 @@ function annotateQueueItemBlockers(input: {
   artifacts: GameCreatorExecutionArtifact[];
 }): GameCreatorQueueItem[] {
   const pendingArtifacts = input.artifacts.filter((artifact) => artifact.status === "pending");
+  const approvedWithoutProvenance = input.artifacts.filter((artifact) => {
+    if (!(artifact.status === "approved" || artifact.status === "auto-approved")) {
+      return false;
+    }
+    const provenance = typeof artifact.provenance === "string" ? artifact.provenance.trim() : "";
+    return provenance.length === 0;
+  });
   return input.items.map((item) => {
     if (item.status === "done") {
       return { ...item, blockers: [] };
@@ -2580,6 +2588,10 @@ function annotateQueueItemBlockers(input: {
       const foreignPending = pendingArtifacts.some((artifact) => artifact.queueItemId !== item.id);
       if (foreignPending) {
         blockers.push("Strict mode waiting on pending artifact approvals from earlier tasks.");
+      }
+      const foreignMissingProvenance = approvedWithoutProvenance.some((artifact) => artifact.queueItemId !== item.id);
+      if (foreignMissingProvenance) {
+        blockers.push("Strict mode requires provenance metadata on approved artifacts from earlier tasks.");
       }
     }
 
@@ -3916,6 +3928,7 @@ async function executeGameCreatorQueueItem(input: {
     relativePath: string;
     previewUrl?: string;
   }) => {
+    const provenance = `job:${input.jobId};queue:${input.item.id};lane:${input.item.lane};source:${input.item.sourceDocFile};generatedAt:${new Date().toISOString()}`;
     artifacts.push({
       id: crypto.randomUUID(),
       jobId: input.jobId,
@@ -3926,6 +3939,7 @@ async function executeGameCreatorQueueItem(input: {
       status: input.mode === "auto-produce" ? "auto-approved" : "pending",
       relativePath: entry.relativePath,
       previewUrl: entry.previewUrl,
+      provenance,
       createdAt: new Date().toISOString(),
     });
   };
@@ -4361,6 +4375,23 @@ async function runNextGameCreatorExecutionStep(input: {
   const state = await readSystemState();
   const workspace = await resolveWorkspaceContext(state, input.workspaceId ?? state.activeWorkspaceId);
   writeGameCreatorExecutionMode(state, input.mode);
+
+  if (input.mode === "strict-approval") {
+    const readiness = await evaluateGate2Readiness({
+      state,
+      workspacePath: workspace.path,
+      requireLocked: true,
+      requireApproved: true,
+    });
+    if (!readiness.ready) {
+      return {
+        ok: false,
+        mode: input.mode,
+        blocker: `Gate 2 is blocked: ${readiness.blockers.join(" | ")}`,
+        statusCode: 412,
+      };
+    }
+  }
 
   const queue = getGameCreatorExecutionQueueStore(state);
   const artifacts = getGameCreatorExecutionArtifacts(state);
@@ -6926,10 +6957,16 @@ async function runHarnessWorkspaceConversation(input: {
   githubLogin?: string;
 }): Promise<{ content: string; meta: AdapterMeta }> {
   const maxTurns = 4;
+  const maxCompileFixAttempts = 2;
+  const maxCompileNoProgressTurns = 2;
   let nextMessage = input.message;
   let nextHistory = [...input.history];
   let finalContent = "";
   let finalMeta: AdapterMeta | null = null;
+  let expectingCompileFixWrites = false;
+  let compileFixAttempts = 0;
+  let compileNoProgressTurns = 0;
+  let lastCompileFailureSignature = "";
 
   for (let turn = 0; turn < maxTurns; turn += 1) {
     const result = await invokeHarness({
@@ -6945,10 +6982,39 @@ async function runHarnessWorkspaceConversation(input: {
     finalMeta = result.meta;
 
     const actions = extractWorkspaceActions(result.content);
+    let writesAppliedThisTurn = 0;
+    let blockedCompileWriteReason: string | null = null;
     if (input.workspace.path && actions.writes.length > 0) {
-      const writeResult = await applyWorkspaceActionsFromHarnessOutput(result.content, input.workspace.path);
-      if (writeResult.applied > 0) {
-        finalContent = writeResult.output;
+      if (expectingCompileFixWrites) {
+        const unsafeWrites = actions.writes
+          .map((entry) => ({
+            original: entry.path,
+            normalized: entry.path.replace(/\\/g, "/").replace(/^\/+/, ""),
+          }))
+          .filter((entry) => {
+            if (entry.normalized.includes("../")) {
+              return true;
+            }
+            const allowedRoot = /^(Assets|Packages|ProjectSettings)\//i.test(entry.normalized);
+            const allowedExt = /\.(cs|asmdef|asmref|json)$/i.test(entry.normalized);
+            return !(allowedRoot && allowedExt);
+          })
+          .map((entry) => entry.original);
+        if (unsafeWrites.length > 0) {
+          blockedCompileWriteReason = `Compile self-heal writes were blocked by allowlist: ${unsafeWrites.slice(0, 5).join(", ")}`;
+        } else {
+          const writeResult = await applyWorkspaceActionsFromHarnessOutput(result.content, input.workspace.path);
+          writesAppliedThisTurn = writeResult.applied;
+          if (writeResult.applied > 0) {
+            finalContent = writeResult.output;
+          }
+        }
+      } else {
+        const writeResult = await applyWorkspaceActionsFromHarnessOutput(result.content, input.workspace.path);
+        writesAppliedThisTurn = writeResult.applied;
+        if (writeResult.applied > 0) {
+          finalContent = writeResult.output;
+        }
       }
     }
 
@@ -6960,17 +7026,47 @@ async function runHarnessWorkspaceConversation(input: {
       const toolResults = [workspaceToolResults, unityToolResults].filter(Boolean).join("\n\n");
       const compileFailed = /UNITY unity_compile[\s\S]*?ok=false/i.test(unityToolResults);
       const compileSucceeded = /UNITY unity_compile[\s\S]*?ok=true/i.test(unityToolResults);
+      const compileFailureSignature = compileFailed
+        ? (unityToolResults.match(/stderr=([\s\S]*?)(?:\n[A-Z ]+|$)/i)?.[1]?.trim().slice(0, 240) ?? unityToolResults.slice(-240))
+        : "";
+      if (compileFailed) {
+        compileFixAttempts += 1;
+        expectingCompileFixWrites = true;
+        const repeatedFailure = compileFailureSignature.length > 0 && compileFailureSignature === lastCompileFailureSignature;
+        const noProgress = writesAppliedThisTurn === 0 || repeatedFailure || Boolean(blockedCompileWriteReason);
+        compileNoProgressTurns = noProgress ? compileNoProgressTurns + 1 : 0;
+        lastCompileFailureSignature = compileFailureSignature || lastCompileFailureSignature;
+      }
+      if (compileSucceeded) {
+        expectingCompileFixWrites = false;
+        compileFixAttempts = 0;
+        compileNoProgressTurns = 0;
+        lastCompileFailureSignature = "";
+      }
       nextHistory = [
         ...nextHistory,
         { id: crypto.randomUUID(), role: "user", content: nextMessage, createdAt: new Date().toISOString() },
         { id: crypto.randomUUID(), role: "assistant", content: result.content, createdAt: new Date().toISOString() },
         { id: crypto.randomUUID(), role: "user", content: `Workspace tool results:\n${toolResults}\n\nContinue by updating your answer or emit write actions if needed.`, createdAt: new Date().toISOString() },
       ];
+      const compileLoopBlocked = compileFailed
+        && (compileFixAttempts >= maxCompileFixAttempts || compileNoProgressTurns >= maxCompileNoProgressTurns || Boolean(blockedCompileWriteReason));
       nextMessage = compileFailed
-        ? "Use the compile errors above to emit write_file fixes for the affected C# files, then emit [{\"action\":\"unity_compile\"}] to verify the fix."
+        ? (compileLoopBlocked
+          ? [
+            "Stop automated compile rewrites and return a final diagnosis.",
+            `Attempts used: ${compileFixAttempts}/${maxCompileFixAttempts}.`,
+            `No-progress turns: ${compileNoProgressTurns}/${maxCompileNoProgressTurns}.`,
+            blockedCompileWriteReason ? `Blocked write reason: ${blockedCompileWriteReason}` : "",
+            "Recommend the minimum manual edits needed, then wait for user confirmation before more writes.",
+          ].filter(Boolean).join("\n")
+          : "Use the compile errors above to emit write_file fixes for the affected C# files, then emit [{\"action\":\"unity_compile\"}] to verify the fix.")
         : (compileSucceeded
           ? "Compile passed. Continue with the next requested implementation steps or return final status."
           : "Continue using the workspace tool results above. Return updated write actions or final answer.");
+      if (compileLoopBlocked) {
+        break;
+      }
       continue;
     }
 
@@ -8114,6 +8210,13 @@ app.post("/api/tools/game-creator/canon-docs/:fileName/lock", async (req, res) =
   const store = getGameCreatorCanonDocsStore(state);
   const records = { ...store.records };
   const record = records[file.fileName] ?? createDefaultCanonDocRecord(file);
+  if (Boolean(body.locked) && record.reviewStatus !== "approved") {
+    return res.status(412).json({
+      error: "Canon doc must be approved before it can be locked.",
+      fileName: file.fileName,
+      reviewStatus: record.reviewStatus,
+    });
+  }
   records[file.fileName] = {
     ...record,
     locked: Boolean(body.locked),
@@ -8331,6 +8434,13 @@ app.get("/api/tools/game-creator/queue", async (req, res) => {
     blocked: items.filter((entry) => entry.status === "blocked").length,
     done: items.filter((entry) => entry.status === "done").length,
     backlog: items.filter((entry) => entry.status === "backlog").length,
+    approvedMissingProvenance: artifacts.filter((artifact) => {
+      if (!(artifact.status === "approved" || artifact.status === "auto-approved")) {
+        return false;
+      }
+      const provenance = typeof artifact.provenance === "string" ? artifact.provenance.trim() : "";
+      return provenance.length === 0;
+    }).length,
   };
 
   writeGameCreatorExecutionQueueStore(state, {
@@ -8418,6 +8528,33 @@ app.get("/api/tools/game-creator/execution", async (req, res) => {
   const artifacts = getGameCreatorExecutionArtifacts(state);
   const run = getGameCreatorExecutionRunState(state);
   const queue = getGameCreatorExecutionQueueStore(state);
+  const draft = readGameCreatorDraft(state);
+  const specPackage = buildGameCreatorSpecPackage(draft);
+  const canonRecords = Object.values(getGameCreatorCanonDocsStore(state).records);
+  const release = buildGameCreatorReleasePackage({
+    workspacePath: workspace.path,
+    specPackage,
+    canonDocs: canonRecords,
+    queueItems: queue.items,
+    artifacts,
+    jobs,
+    run,
+  });
+  const telemetrySummary = buildGameCreatorTelemetrySummary({ workspaceId: workspace.id, storageDir: gameCreatorTelemetryStorageDir });
+  const complianceSummary = buildGameCreatorComplianceSummary({
+    workspacePath: workspace.path,
+    artifacts,
+    canonDocs: canonRecords,
+    telemetryEntries: telemetrySummary.recentEvents,
+  });
+  const workflowSummary = buildGameCreatorWorkflowSummary({
+    hasSetupDraft: Boolean(draft && draft.target),
+    canonDocCount: canonRecords.length,
+    approvedLockedDocs: canonRecords.filter((record) => record.reviewStatus === "approved" && record.locked).length,
+    queueItemCount: queue.items.length,
+    releaseReady: release.readyForPackaging,
+    complianceStatus: complianceSummary.overallStatus,
+  });
   return res.json({
     ok: true,
     workspaceId: workspace.id,
@@ -8425,6 +8562,11 @@ app.get("/api/tools/game-creator/execution", async (req, res) => {
     jobs,
     artifacts,
     run,
+    releaseReadiness: {
+      release,
+      complianceSummary,
+      workflowSummary,
+    },
     queueSummary: {
       total: queue.items.length,
       ready: queue.items.filter((entry) => entry.status === "ready").length,
@@ -8747,9 +8889,18 @@ app.post("/api/tools/game-creator/execution/artifacts/:artifactId/decision", asy
       note: typeof body.note === "string" ? body.note.trim().slice(0, 1000) : entry.note,
     }
     : entry);
+  const selectedArtifact = nextArtifacts.find((entry) => entry.id === req.params.artifactId) ?? target;
+  if (decision === "approved") {
+    const provenance = typeof selectedArtifact.provenance === "string" ? selectedArtifact.provenance.trim() : "";
+    if (provenance.length === 0) {
+      return res.status(412).json({
+        error: "Cannot approve artifact without provenance metadata. Regenerate the artifact first.",
+        artifactId: selectedArtifact.id,
+      });
+    }
+  }
   writeGameCreatorExecutionArtifacts(state, nextArtifacts);
 
-  const selectedArtifact = nextArtifacts.find((entry) => entry.id === req.params.artifactId) ?? target;
   await appendGameCreatorWorkflowEvent(workspace.id, "artifact-decision", `Artifact ${selectedArtifact.id} marked ${decision}.`, decision === "approved" ? "info" : "warn", { artifactId: selectedArtifact.id, decision, queueItemId: selectedArtifact.queueItemId });
   let followUpQueueItem: GameCreatorQueueItem | null = null;
   if (decision === "rejected") {

@@ -134,6 +134,7 @@ export type GameCreatorState = {
     status: "pending" | "approved" | "rejected" | "auto-approved";
     relativePath: string;
     previewUrl?: string;
+    provenance?: string;
     createdAt: string;
     decidedAt?: string;
     decidedBy?: string;

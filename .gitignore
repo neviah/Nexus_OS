@@ -12,6 +12,8 @@ data/system-state.local.backup.json
 data/inflight-tasks.local.json
 data/startup-check.local.json
 data/runtime-jobs.local.json
+data/unity-approval-audit.local.jsonl
+data/unity-tool-audit.local.jsonl
 data/runtime-tools/
 data/workspaces.local.json
 data/workspaces/default/
