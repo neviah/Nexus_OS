@@ -1491,7 +1491,8 @@ function App() {
   });
   const [boot, setBoot] = useState<BootstrapPayload | null>(null);
   const [selectedPane, setSelectedPane] = useState<PaneSelection>({ type: "tool", id: "nexus-router" });
-  const [composer, setComposer] = useState("");
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [composerHasText, setComposerHasText] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [chatThreadsByHarness, setChatThreadsByHarness] = useState<Record<string, HarnessChatThread[]>>({});
@@ -5870,7 +5871,8 @@ function App() {
   }
 
   async function onSendMessage(resendText?: string) {
-    const textToSend = (resendText ?? composer).trim();
+    const composerValue = resendText ?? composerInputRef.current?.value ?? "";
+    const textToSend = composerValue.trim();
     if (!activeHarness || !textToSend || chatBusy) {
       return;
     }
@@ -5920,7 +5922,10 @@ function App() {
     };
     upsertThread(harnessId, threadId, () => threadSnapshot);
     await saveHarnessThread(harnessId, threadSnapshot);
-    setComposer("");
+    if (!resendText && composerInputRef.current) {
+      composerInputRef.current.value = "";
+      setComposerHasText(false);
+    }
     setStreamTrace("");
     setStreamTraceOpen(false);
     setChatBusy(true);
@@ -9180,7 +9185,10 @@ function App() {
                           }));
                           setActiveThreadByHarness((current) => ({ ...current, [activeHarness.id]: thread.id }));
                           void saveHarnessThread(activeHarness.id, thread);
-                          setComposer("");
+                          if (composerInputRef.current) {
+                            composerInputRef.current.value = "";
+                          }
+                          setComposerHasText(false);
                         }}
                       >
                         New Chat
@@ -9804,8 +9812,11 @@ function App() {
                       </div>
                     ) : null}
                     <textarea
-                      value={composer}
-                      onChange={(event) => setComposer(event.target.value)}
+                      ref={composerInputRef}
+                      onChange={(event) => {
+                        const hasText = event.target.value.trim().length > 0;
+                        setComposerHasText((current) => current === hasText ? current : hasText);
+                      }}
                       placeholder="Ask your selected harness..."
                       rows={4}
                     />
@@ -9877,7 +9888,7 @@ function App() {
                           Stop
                         </button>
                       ) : (
-                        <button type="button" onClick={() => void onSendMessage()} disabled={!composer.trim()}>
+                        <button type="button" onClick={() => void onSendMessage()} disabled={!composerHasText}>
                           Send
                         </button>
                       )}
