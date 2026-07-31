@@ -8,6 +8,7 @@ apps/api/node_modules/
 apps/api/dist/
 
 data/system-state.local.json
+data/system-state.local.backup.json
 data/inflight-tasks.local.json
 data/startup-check.local.json
 data/runtime-jobs.local.json
