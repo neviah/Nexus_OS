@@ -1505,6 +1505,7 @@ function App() {
   const [manualRunBusyHarnessId, setManualRunBusyHarnessId] = useState<string | null>(null);
   const [editingScheduleIdByHarness, setEditingScheduleIdByHarness] = useState<Record<string, string | null>>({});
   const [workspaceTree, setWorkspaceTree] = useState<WorkspaceTreeNode | null>(null);
+  const [collapsedTreePaths, setCollapsedTreePaths] = useState<Record<string, boolean>>({});
   const [failedTasks, setFailedTasks] = useState<FailedTask[]>([]);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [resumeBusyId, setResumeBusyId] = useState<string | null>(null);
@@ -6295,12 +6296,57 @@ function App() {
   }
 
   function renderTree(node: WorkspaceTreeNode): ReactElement {
+    const hasChildren = Boolean(node.children && node.children.length > 0);
+    const isDirectory = node.type === "directory";
+    const collapsed = isDirectory && hasChildren ? Boolean(collapsedTreePaths[node.path]) : false;
+
     return (
-      <li key={node.path} className={`tree-node ${node.type}`}>
-        <span>{treeNodeIcon(node)} {node.name}</span>
-        {node.children && node.children.length > 0 ? <ul>{node.children.map(renderTree)}</ul> : null}
+      <li key={node.path} className={`tree-node ${node.type} ${isDirectory && !collapsed ? "expanded" : ""}`}>
+        <div className="tree-node-row">
+          {isDirectory && hasChildren ? (
+            <button
+              type="button"
+              className="tree-toggle"
+              onClick={() => setCollapsedTreePaths((current) => ({ ...current, [node.path]: !current[node.path] }))}
+              aria-label={collapsed ? `Expand ${node.name}` : `Collapse ${node.name}`}
+              title={collapsed ? `Expand ${node.name}` : `Collapse ${node.name}`}
+            >
+              {collapsed ? "▸" : "▾"}
+            </button>
+          ) : (
+            <span className="tree-leaf-dot" aria-hidden="true">•</span>
+          )}
+          <span className="tree-node-label">{treeNodeIcon(node)} {node.name}</span>
+        </div>
+        {hasChildren && !collapsed ? <ul>{node.children?.map(renderTree)}</ul> : null}
       </li>
     );
+  }
+
+  function collectDirectoryPaths(node: WorkspaceTreeNode): string[] {
+    if (node.type !== "directory") {
+      return [];
+    }
+
+    const childPaths = (node.children ?? []).flatMap((child) => collectDirectoryPaths(child));
+    return [node.path, ...childPaths];
+  }
+
+  function collapseAllTreeFolders(): void {
+    if (!workspaceTree) {
+      return;
+    }
+    const next: Record<string, boolean> = {};
+    for (const folderPath of collectDirectoryPaths(workspaceTree)) {
+      if (folderPath !== workspaceTree.path) {
+        next[folderPath] = true;
+      }
+    }
+    setCollapsedTreePaths(next);
+  }
+
+  function expandAllTreeFolders(): void {
+    setCollapsedTreePaths({});
   }
 
   const onboardingRequired = boot?.onboardingRequired ?? true;
@@ -10041,6 +10087,12 @@ function App() {
                 <div className="tree-panel-head">
                   <h3>File Tree</h3>
                   <div className="tree-panel-actions">
+                    <button type="button" className="ghost" onClick={collapseAllTreeFolders} disabled={!workspaceTree}>
+                      Collapse All
+                    </button>
+                    <button type="button" className="ghost" onClick={expandAllTreeFolders} disabled={!workspaceTree}>
+                      Expand All
+                    </button>
                     <button type="button" className="ghost" onClick={() => void refreshActiveWorkspaceTree()}>
                       Refresh
                     </button>

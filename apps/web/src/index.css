@@ -2270,14 +2270,37 @@ textarea {
   margin-bottom: 6px;
 }
 
-.tree-node.directory > span::before {
-  content: "▸ ";
-  color: var(--signal);
+.tree-node-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.tree-node.file > span::before {
-  content: "• ";
+.tree-toggle {
+  border: none;
+  background: transparent;
+  color: var(--signal);
+  width: 16px;
+  min-width: 16px;
+  padding: 0;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tree-toggle:hover {
+  color: var(--ink-1);
+}
+
+.tree-leaf-dot {
   color: var(--ink-3);
+  width: 16px;
+  min-width: 16px;
+  text-align: center;
+  line-height: 1;
+}
+
+.tree-node-label {
+  color: var(--ink-2);
 }
 
 .tree-root ul {
