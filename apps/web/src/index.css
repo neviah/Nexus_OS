@@ -1945,6 +1945,10 @@ textarea {
   padding-right: 6px;
 }
 
+.chat-end-anchor {
+  height: 1px;
+}
+
 .stream-trace {
   border: 1px solid rgba(47, 71, 79, 0.35);
   border-radius: 10px;

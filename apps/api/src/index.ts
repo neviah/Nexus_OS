@@ -1823,6 +1823,59 @@ type UnityCliLoopRunResult = {
   stderr: string;
 };
 
+async function runUnityBatchCompileFallback(unityProjectPath: string): Promise<UnityCliLoopRunResult> {
+  const unityCli = await detectUnityCliStatus();
+  if (!unityCli.available || !unityCli.selectedPath) {
+    return {
+      ok: false,
+      command: [],
+      stdout: "",
+      stderr: "Unity Editor CLI not found. Set UNITY_EDITOR_PATH or install Unity Hub editor builds.",
+    };
+  }
+
+  const logPath = path.join(getRootDir(), "data", `unity-batch-compile-${Date.now()}.log`);
+  const args = [
+    "-batchmode",
+    "-quit",
+    "-nographics",
+    "-projectPath",
+    unityProjectPath,
+    "-logFile",
+    logPath,
+  ];
+
+  let stdout = "";
+  let stderr = "";
+  let ok = true;
+  try {
+    const result = await execFileAsync(unityCli.selectedPath, args, {
+      windowsHide: true,
+      maxBuffer: 1024 * 1024 * 8,
+    });
+    stdout = result.stdout ?? "";
+    stderr = result.stderr ?? "";
+  } catch (error) {
+    ok = false;
+    stderr = error instanceof Error ? error.message : String(error);
+  }
+
+  const logContent = await fs.readFile(logPath, "utf-8").catch(() => "");
+  const hasCompileErrors = /\berror\s+CS\d+\b|^\s*error\b/im.test(logContent);
+  if (hasCompileErrors) {
+    ok = false;
+  }
+
+  await fs.rm(logPath, { force: true }).catch(() => undefined);
+
+  return {
+    ok,
+    command: [unityCli.selectedPath, ...args],
+    stdout: [stdout, logContent].filter(Boolean).join("\n"),
+    stderr,
+  };
+}
+
 async function runUnityCliLoopCommand(input: {
   executable: string;
   action: UnityToolActionName;
@@ -6544,30 +6597,7 @@ async function executeUnityToolActions(input: {
   }
 
   const cli = await detectUnityCliLoopStatus();
-  if (!cli.available || !cli.executable) {
-    for (const action of input.actions.slice(0, Math.max(1, Math.min(input.actions.length, 3)))) {
-      void appendUnityActionAudit({
-        id: crypto.randomUUID(),
-        at: new Date().toISOString(),
-        source: "harness",
-        actor: input.harnessId ? `harness:${input.harnessId}` : "harness:unknown",
-        harnessId: input.harnessId,
-        workspaceId: input.workspaceId,
-        workspacePath: input.workspacePath,
-        action: action.action,
-        status: "failed",
-        reason: cli.error ?? "Unity CLI Loop not found.",
-        argsHash: hashUnityArgs(action.args),
-        argsPreview: sanitizeUnityArgsPreview(action),
-        policy: toUnityPolicyAuditSnapshot(policy),
-      }).catch(() => undefined);
-    }
-    return [
-      "UNITY TOOL EXECUTION UNAVAILABLE",
-      cli.error ?? "Unity CLI Loop not found.",
-      "Install Unity CLI Loop in the Unity project, then make sure the uloop command is available.",
-    ].join("\n");
-  }
+  const unityCli = await detectUnityCliStatus();
 
   const unityProjectPath = await resolveUnityProjectPathForWorkspace(input.workspacePath);
 
@@ -6611,12 +6641,29 @@ async function executeUnityToolActions(input: {
       continue;
     }
 
-    const result = await runUnityCliLoopWithRollback({
-      executable: cli.executable,
-      action: action.action,
-      unityProjectPath,
-      args: validation.args,
-    });
+    let result: UnityCliLoopRunResult & { rollback?: { attempted: boolean; restored: string[]; error?: string } };
+    let fallbackNote = "";
+    if (cli.available && cli.executable) {
+      result = await runUnityCliLoopWithRollback({
+        executable: cli.executable,
+        action: action.action,
+        unityProjectPath,
+        args: validation.args,
+      });
+    } else if (action.action === "unity_compile") {
+      result = await runUnityBatchCompileFallback(unityProjectPath);
+      fallbackNote = result.ok
+        ? "Unity CLI Loop unavailable; compile ran through Unity batch-mode fallback."
+        : "Unity CLI Loop unavailable and batch-mode fallback compile failed.";
+    } else {
+      result = {
+        ok: false,
+        command: [],
+        stdout: "",
+        stderr: cli.error ?? "Unity CLI Loop not found and no fallback is available for this action.",
+      };
+      fallbackNote = cli.error ?? "Unity CLI Loop not found.";
+    }
 
     void appendUnityActionAudit({
       id: crypto.randomUUID(),
@@ -6630,10 +6677,10 @@ async function executeUnityToolActions(input: {
       action: action.action,
       status: result.ok ? "executed" : "failed",
       reason: result.ok
-        ? undefined
+        ? (fallbackNote || undefined)
         : (result.rollback?.attempted
           ? `Unity CLI Loop command failed; rollback attempted${result.rollback.error ? ` (${result.rollback.error})` : ""}`
-          : "Unity CLI Loop command failed"),
+          : (fallbackNote || "Unity CLI Loop command failed")),
       command: result.command,
       stdoutChars: result.stdout.length,
       stderrChars: result.stderr.length,
@@ -6645,7 +6692,8 @@ async function executeUnityToolActions(input: {
     outputs.push([
       `UNITY ${action.action}`,
       `ok=${result.ok}`,
-      `cmd=${result.command.join(" ")}`,
+      result.command.length > 0 ? `cmd=${result.command.join(" ")}` : "",
+      fallbackNote,
       result.rollback?.attempted ? `rollback_restored=${result.rollback.restored.join(",") || "none"}` : "",
       result.rollback?.error ? `rollback_error=${result.rollback.error}` : "",
       result.stdout ? `stdout:\n${result.stdout.slice(0, 4000)}` : "",
@@ -6910,13 +6958,19 @@ async function runHarnessWorkspaceConversation(input: {
         ? await executeUnityToolActions({ workspacePath: input.workspace.path, workspaceId: input.workspace.id, actions: actions.unity, state: input.state, harnessId: input.harness.id })
         : "";
       const toolResults = [workspaceToolResults, unityToolResults].filter(Boolean).join("\n\n");
+      const compileFailed = /UNITY unity_compile[\s\S]*?ok=false/i.test(unityToolResults);
+      const compileSucceeded = /UNITY unity_compile[\s\S]*?ok=true/i.test(unityToolResults);
       nextHistory = [
         ...nextHistory,
         { id: crypto.randomUUID(), role: "user", content: nextMessage, createdAt: new Date().toISOString() },
         { id: crypto.randomUUID(), role: "assistant", content: result.content, createdAt: new Date().toISOString() },
         { id: crypto.randomUUID(), role: "user", content: `Workspace tool results:\n${toolResults}\n\nContinue by updating your answer or emit write actions if needed.`, createdAt: new Date().toISOString() },
       ];
-      nextMessage = "Continue using the workspace tool results above. Return updated write actions or final answer.";
+      nextMessage = compileFailed
+        ? "Use the compile errors above to emit write_file fixes for the affected C# files, then emit [{\"action\":\"unity_compile\"}] to verify the fix."
+        : (compileSucceeded
+          ? "Compile passed. Continue with the next requested implementation steps or return final status."
+          : "Continue using the workspace tool results above. Return updated write actions or final answer.");
       continue;
     }
 
@@ -9050,7 +9104,7 @@ app.post("/api/tools/unity/:action", async (req, res) => {
 
   const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
   const uloop = await detectUnityCliLoopStatus();
-  if (!uloop.available || !uloop.executable) {
+  if ((!uloop.available || !uloop.executable) && action !== "unity_compile") {
     void appendUnityActionAudit({
       id: crypto.randomUUID(),
       at: new Date().toISOString(),
@@ -9097,12 +9151,19 @@ app.post("/api/tools/unity/:action", async (req, res) => {
     });
   }
 
-  const result = await runUnityCliLoopWithRollback({
-    executable: uloop.executable,
-    action,
-    unityProjectPath,
-    args: validation.args,
-  });
+  let result: UnityCliLoopRunResult & { rollback?: { attempted: boolean; restored: string[]; error?: string } };
+  let mode: "unity-cli-loop" | "unity-batch" = "unity-cli-loop";
+  if (uloop.available && uloop.executable) {
+    result = await runUnityCliLoopWithRollback({
+      executable: uloop.executable,
+      action,
+      unityProjectPath,
+      args: validation.args,
+    });
+  } else {
+    result = await runUnityBatchCompileFallback(unityProjectPath);
+    mode = "unity-batch";
+  }
 
   void appendUnityActionAudit({
     id: crypto.randomUUID(),
@@ -9115,10 +9176,10 @@ app.post("/api/tools/unity/:action", async (req, res) => {
     action,
     status: result.ok ? "executed" : "failed",
     reason: result.ok
-      ? undefined
+      ? (mode === "unity-batch" ? "Unity CLI Loop unavailable; compile ran through Unity batch-mode fallback." : undefined)
       : (result.rollback?.attempted
         ? `Unity CLI Loop command failed; rollback attempted${result.rollback.error ? ` (${result.rollback.error})` : ""}`
-        : "Unity CLI Loop command failed"),
+        : (mode === "unity-batch" ? "Unity batch-mode fallback compile failed." : "Unity CLI Loop command failed")),
     command: result.command,
     stdoutChars: result.stdout.length,
     stderrChars: result.stderr.length,
@@ -9129,6 +9190,7 @@ app.post("/api/tools/unity/:action", async (req, res) => {
 
   return res.status(result.ok ? 200 : 500).json({
     ok: result.ok,
+    mode,
     workspaceId: workspace.id,
     action,
     command: result.command,

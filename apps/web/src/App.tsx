@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, FormEvent, ReactElement } from "react";
+import type { ChangeEvent, FormEvent, ReactElement, UIEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import * as THREE from "three";
@@ -1492,6 +1492,9 @@ function App() {
   const [boot, setBoot] = useState<BootstrapPayload | null>(null);
   const [selectedPane, setSelectedPane] = useState<PaneSelection>({ type: "tool", id: "nexus-router" });
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const chatLogRef = useRef<HTMLElement | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const chatAutoFollowRef = useRef(true);
   const [composerHasText, setComposerHasText] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
@@ -4604,6 +4607,34 @@ function App() {
     () => [...messages].reverse().find((message) => message.role === "assistant")?.id,
     [messages],
   );
+  const chatPaneHarnessSubTab: HarnessSubTab = selectedPane.type === "agent"
+    ? (harnessSubTabByHarness[selectedPane.id] ?? "chats")
+    : "chats";
+
+  useEffect(() => {
+    chatAutoFollowRef.current = true;
+    requestAnimationFrame(() => {
+      chatEndRef.current?.scrollIntoView({ block: "end" });
+    });
+  }, [activeThread?.id, chatPaneHarnessSubTab]);
+
+  useEffect(() => {
+    if (chatPaneHarnessSubTab !== "chats") {
+      return;
+    }
+    if (!chatAutoFollowRef.current) {
+      return;
+    }
+    requestAnimationFrame(() => {
+      chatEndRef.current?.scrollIntoView({ behavior: chatBusy ? "auto" : "smooth", block: "end" });
+    });
+  }, [messages, chatBusy, chatPaneHarnessSubTab]);
+
+  function onChatLogScroll(event: UIEvent<HTMLElement>): void {
+    const target = event.currentTarget;
+    const gap = target.scrollHeight - (target.scrollTop + target.clientHeight);
+    chatAutoFollowRef.current = gap < 48;
+  }
 
   const harnessDisplayModel = useMemo(() => {
     const modelByHarness: Record<string, string> = {};
@@ -9450,7 +9481,7 @@ function App() {
                     <pre>{streamTrace || (chatBusy ? "Waiting for first token..." : "No recent stream content.")}</pre>
                   </details>
 
-                  <section className="chat-log" aria-live="polite">
+                  <section className="chat-log" aria-live="polite" ref={chatLogRef} onScroll={onChatLogScroll}>
                     {messages.length === 0 ? (
                       <article className="message assistant">
                         <p>Send a prompt to start your unified harness session.</p>
@@ -9519,6 +9550,7 @@ function App() {
                         ) : null}
                       </article>
                     ))}
+                    <div ref={chatEndRef} className="chat-end-anchor" aria-hidden="true" />
                   </section>
 
                   <footer className="chat-composer">
