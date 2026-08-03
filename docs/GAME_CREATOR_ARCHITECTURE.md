@@ -267,14 +267,20 @@ Inputs:
 
 Outputs:
 - Playable vertical slice scene.
+- Unity shell staging that consumes the approved canon docs and creates the startup/menu flow.
 
 Approval checklist:
 - Controls, camera, and UX behavior match specs.
 - Encounter flow is playable end-to-end.
+- Splash screen, main menu, settings screen, pause overlay, and multi-level scene flow are represented in the Unity shell plan.
 
 Fail conditions:
 - Blocking gameplay bugs.
 - Performance below minimum target.
+
+Unity shell staging rule:
+- The generated Unity authoring project should read the canon docs Nexus produced and translate them into a concrete shell plan, including startup, menu, settings, pause, and multiple level scenes.
+- If the canon docs do not describe a surface explicitly, the shell plan may add a placeholder, but it must note that the decision came from the project baseline rather than the doc text.
 
 ### Gate 8: Polish and Release Candidate Approval
 
@@ -518,6 +524,26 @@ The Game Creator workflow should plug into existing NexusOS capabilities rather 
 - Workspace management: create and switch project workspaces for each generated game.
 - State persistence: store project spec packages, canon doc versions, gate status, and approval history in local state files.
 - Task resume engine: preserve long-running generation or review operations so they can continue after interruption.
+
+## 10) Doc-To-System Mapping
+
+The canon docs should directly shape the generated game shell and content defaults:
+
+- `GAME_BIBLE.md` defines the core loop, player fantasy, and menu-to-gameplay intent.
+- `UI_UX_SPEC.md` defines screen map, HUD layout, pause behavior, and menu flow.
+- `CONTROLS_CAMERA_SPEC.md` defines settings defaults, remapping, camera comfort, and pause/accessibility behavior.
+- `ART_BIBLE.md` defines menu styling, HUD styling, enemy silhouette language, and level presentation rules.
+- `ENEMY_ROSTER.md` defines enemy families, roles, and encounter-specific behavior expectations.
+- `DIFFICULTY_CURVE.md` defines how many levels or progression beats the shell should stage and how pacing changes between them.
+- `PRODUCTION_PLAN.md` defines what content must exist before a stage can be considered shippable.
+- `AUDIO_BIBLE.md` defines music direction, SFX taxonomy, and scene audio priorities.
+- `LORE_BOOK.md` defines world rules, faction naming, and character identity anchors.
+- `TECHNICAL_DESIGN.md` defines runtime systems, project structure, and build/export expectations.
+
+Implementation rule:
+- If a doc describes a layout, flow, or content contract, the generator should emit that structure explicitly rather than leaving it implied.
+- If a doc is silent, the generator may choose a baseline default, but it should record that the value came from the project template and not from canon text.
+- Enemy behavior and encounter wiring should be derived from the enemy roster plus the difficulty curve, then expressed as a manifest and runtime catalog so the gameplay scene can consume it directly.
 - Router and model orchestration: use Nexus Router for fallback-capable generation calls when content tasks need model switching.
 - Unity tool bridge: connect build, test, and log checks to the existing Unity execution policy layer.
 - Startup and conformance checks: verify that required tools, engines, and providers are available before starting a build workflow.
