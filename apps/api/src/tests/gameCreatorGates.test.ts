@@ -84,12 +84,14 @@ test('Gate 4 writes Unity-ready C# handoff scripts', async () => {
     'GameBuild/gates/gate4/unity-handoff/Scripts/Managers/GameManager.cs',
     'GameBuild/gates/gate4/unity-handoff/Scripts/Controllers/PlayerController.cs',
     'GameBuild/gates/gate4/unity-handoff/Scripts/Enemies/EnemyController.cs',
+    'GameBuild/gates/gate4/unity-handoff/Scripts/Enemies/EnemyFamilyDefinition.cs',
     'GameBuild/gates/gate4/unity-handoff/Scripts/Combat/CombatSystem.cs',
     'GameBuild/gates/gate4/unity-handoff/Scripts/Combat/Health.cs',
     'GameBuild/gates/gate4/unity-handoff/Scripts/Gameplay/GameplayLoopController.cs',
     'GameBuild/gates/gate4/unity-handoff/Scripts/Gameplay/EncounterDirector.cs',
     'GameBuild/gates/gate4/unity-handoff/Scripts/UI/HudController.cs',
     'GameBuild/gates/gate4/unity-handoff/Scripts/UI/MainMenuController.cs',
+    'GameBuild/gates/gate4/unity-handoff/Validation/PostImportValidator.cs',
   ];
 
   for (const relativePath of unityScripts) {
@@ -119,6 +121,24 @@ test('Gate 4 writes Unity-ready C# handoff scripts', async () => {
   const prefabWiringPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Prefabs/prefab-wiring-instructions.md');
   const prefabWiringContents = await fs.readFile(prefabWiringPath, 'utf8');
   assert.match(prefabWiringContents, /Generated enemy archetypes/);
+
+  const prefabWiringManifestPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Prefabs/prefab-wiring-manifest.json');
+  const prefabWiringManifest = JSON.parse(await fs.readFile(prefabWiringManifestPath, 'utf8')) as { references: Array<{ from: string; field: string }> };
+  assert.ok(prefabWiringManifest.references.some((entry) => entry.from === 'component.systems.loop' && entry.field === 'encounterDirector'));
+
+  const postImportReadinessPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Validation/post-import-readiness.json');
+  const postImportReadiness = JSON.parse(await fs.readFile(postImportReadinessPath, 'utf8')) as { checks: Array<{ id: string }>; baselineReadinessScore: number };
+  assert.ok(postImportReadiness.checks.some((entry) => entry.id === 'prefab.enemies.generated'));
+  assert.ok(postImportReadiness.baselineReadinessScore > 0);
+
+  const spawnTablesPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Data/SpawnTables/biome-spawn-tables.json');
+  const spawnTables = JSON.parse(await fs.readFile(spawnTablesPath, 'utf8')) as { spawnTableByBiome: Array<{ biomeId: string }> };
+  assert.ok(spawnTables.spawnTableByBiome.length >= 1);
+
+  const enemyFamilyDataPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Data/EnemyFamilies/enemy_type_01.json');
+  const enemyFamilyData = JSON.parse(await fs.readFile(enemyFamilyDataPath, 'utf8')) as { familyId: string; combat: { maxHealth: number } };
+  assert.equal(enemyFamilyData.familyId, 'enemy_type_01');
+  assert.ok(enemyFamilyData.combat.maxHealth > 0);
 
   const animationStateMapPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Animation/animation-state-map.json');
   const animationStateMap = JSON.parse(await fs.readFile(animationStateMapPath, 'utf8')) as { enemyArchetypes: Array<{ id: string }> };

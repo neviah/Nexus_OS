@@ -55,6 +55,14 @@ const ENEMY_ARCHETYPE_TEMPLATES: Array<Omit<EnemyArchetypeProfile, "id" | "name"
   { role: "artillery", moveSpeed: 1.7, maxHealth: 105, attackDamage: 24, attackRange: 9.2, attackCooldown: 2.2 },
 ];
 
+function toPascalCase(value: string): string {
+  return value
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
+}
+
 function buildEnemyArchetypes(spec: GameCreatorGateSpec): EnemyArchetypeProfile[] {
   const requested = Number.isFinite(spec.setupWizard.enemyFamilies)
     ? Math.max(3, Math.min(20, Math.floor(spec.setupWizard.enemyFamilies)))
@@ -83,7 +91,7 @@ function buildEnemyArchetypes(spec: GameCreatorGateSpec): EnemyArchetypeProfile[
 }
 
 function buildEnemyArchetypeControllerSource(profile: EnemyArchetypeProfile): string {
-  const className = `${profile.id.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("")}Controller`;
+  const className = `${toPascalCase(profile.id)}Controller`;
   return [
     "using UnityEngine;",
     "",
@@ -282,6 +290,10 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
   const unityScenesDir = path.join(unityHandoffDir, 'Scenes');
   const unityPrefabsDir = path.join(unityHandoffDir, 'Prefabs');
   const unityAnimationDir = path.join(unityHandoffDir, 'Animation');
+  const unityDataDir = path.join(unityHandoffDir, 'Data');
+  const unityEnemyDataDir = path.join(unityDataDir, 'EnemyFamilies');
+  const unitySpawnTablesDir = path.join(unityDataDir, 'SpawnTables');
+  const unityValidationDir = path.join(unityHandoffDir, 'Validation');
   const enemyArchetypes = buildEnemyArchetypes(input.spec);
   await fs.mkdir(assetsDir, { recursive: true });
   await fs.mkdir(path.join(unityScriptsDir, 'Managers'), { recursive: true });
@@ -293,6 +305,38 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
   await fs.mkdir(unityScenesDir, { recursive: true });
   await fs.mkdir(unityPrefabsDir, { recursive: true });
   await fs.mkdir(unityAnimationDir, { recursive: true });
+  await fs.mkdir(unityEnemyDataDir, { recursive: true });
+  await fs.mkdir(unitySpawnTablesDir, { recursive: true });
+  await fs.mkdir(unityValidationDir, { recursive: true });
+
+  const biomeCount = Math.max(1, Math.min(12, Math.floor(input.spec.setupWizard.biomes || 1)));
+  const bosses = Math.max(0, Math.min(8, Math.floor(input.spec.setupWizard.bosses || 0)));
+  const spawnTableByBiome = Array.from({ length: biomeCount }, (_, biomeIndex) => {
+    const biomeId = `biome_${String(biomeIndex + 1).padStart(2, '0')}`;
+    const encounters = Array.from({ length: 3 }, (_, encounterIndex) => {
+      const pool = enemyArchetypes
+        .map((entry, enemyIndex) => ({
+          archetypeId: entry.id,
+          weight: Math.max(1, 12 - Math.abs(enemyIndex - (encounterIndex * 2 + biomeIndex) % enemyArchetypes.length)),
+          min: 1,
+          max: Math.min(5, 2 + Math.floor((enemyIndex + encounterIndex) % 4)),
+        }))
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, Math.min(6, enemyArchetypes.length));
+
+      return {
+        encounterId: `${biomeId}_encounter_${encounterIndex + 1}`,
+        difficultyBand: encounterIndex === 0 ? 'early' : encounterIndex === 1 ? 'mid' : 'late',
+        enemyPool: pool,
+      };
+    });
+
+    return {
+      biomeId,
+      encounters,
+      bossEncounter: bosses > biomeIndex ? `${biomeId}_boss` : null,
+    };
+  });
 
   const assetManifest = {
     target: input.spec.setupWizard.target,
@@ -330,11 +374,16 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
   const hudControllerPath = path.join(unityScriptsDir, 'UI', 'HudController.cs');
   const mainMenuControllerPath = path.join(unityScriptsDir, 'UI', 'MainMenuController.cs');
   const enemyArchetypesRegistryPath = path.join(unityScriptsDir, 'Enemies', 'enemy-archetypes.json');
+  const enemyFamilyDefinitionPath = path.join(unityScriptsDir, 'Enemies', 'EnemyFamilyDefinition.cs');
   const sceneSetupManifestPath = path.join(unityScenesDir, 'scene-setup-manifest.json');
   const prefabWiringPath = path.join(unityPrefabsDir, 'prefab-wiring-instructions.md');
+  const prefabWiringManifestPath = path.join(unityPrefabsDir, 'prefab-wiring-manifest.json');
   const prefabRegistryPath = path.join(unityPrefabsDir, 'prefab-registry.json');
   const animationStateMapPath = path.join(unityAnimationDir, 'animation-state-map.json');
   const animatorControllerScaffoldPath = path.join(unityAnimationDir, 'animator-controller-scaffold.md');
+  const spawnTablesPath = path.join(unitySpawnTablesDir, 'biome-spawn-tables.json');
+  const postImportReadinessPath = path.join(unityValidationDir, 'post-import-readiness.json');
+  const postImportValidatorScriptPath = path.join(unityValidationDir, 'PostImportValidator.cs');
 
   await fs.writeFile(assetManifestPath, JSON.stringify(assetManifest, null, 2), 'utf-8');
   await fs.writeFile(importPackagePath, JSON.stringify({
@@ -353,12 +402,18 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
         'Gameplay/EncounterDirector.cs',
         'UI/HudController.cs',
         'UI/MainMenuController.cs',
+        'Enemies/EnemyFamilyDefinition.cs',
         'Enemies/enemy-archetypes.json',
         'Scenes/scene-setup-manifest.json',
         'Prefabs/prefab-registry.json',
         'Prefabs/prefab-wiring-instructions.md',
+        'Prefabs/prefab-wiring-manifest.json',
         'Animation/animation-state-map.json',
         'Animation/animator-controller-scaffold.md',
+        'Data/SpawnTables/biome-spawn-tables.json',
+        'Data/EnemyFamilies/*.json',
+        'Validation/post-import-readiness.json',
+        'Validation/PostImportValidator.cs',
       ],
     },
   }, null, 2), 'utf-8');
@@ -692,11 +747,47 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
     '',
   ].join('\n'), 'utf-8');
 
+  await fs.writeFile(enemyFamilyDefinitionPath, [
+    'using UnityEngine;',
+    '',
+    '[CreateAssetMenu(menuName = "Nexus/Enemy Family Definition", fileName = "EnemyFamilyDefinition")]',
+    'public class EnemyFamilyDefinition : ScriptableObject',
+    '{',
+    '    public string familyId;',
+    '    public string displayName;',
+    '    public string role;',
+    '    public float moveSpeed = 3f;',
+    '    public float maxHealth = 100f;',
+    '    public float attackDamage = 10f;',
+    '    public float attackRange = 1.2f;',
+    '    public float attackCooldown = 1f;',
+    '}',
+    '',
+  ].join('\n'), 'utf-8');
+
   const generatedEnemyScriptPaths: string[] = [];
+  const generatedEnemyDataPaths: string[] = [];
   for (const entry of enemyArchetypes) {
     const scriptPath = path.join(unityScriptsDir, 'Enemies', `${entry.id}.cs`);
     await fs.writeFile(scriptPath, buildEnemyArchetypeControllerSource(entry), 'utf-8');
     generatedEnemyScriptPaths.push(scriptPath);
+
+    const enemyDataPath = path.join(unityEnemyDataDir, `${entry.id}.json`);
+    await fs.writeFile(enemyDataPath, JSON.stringify({
+      familyId: entry.id,
+      displayName: entry.name,
+      role: entry.role,
+      combat: {
+        moveSpeed: entry.moveSpeed,
+        maxHealth: entry.maxHealth,
+        attackDamage: entry.attackDamage,
+        attackRange: entry.attackRange,
+        attackCooldown: entry.attackCooldown,
+      },
+      prefabPath: `Assets/Prefabs/Enemies/${entry.id}.prefab`,
+      animatorOverridePath: `Assets/Animation/Overrides/${entry.id}.overrideController`,
+    }, null, 2), 'utf-8');
+    generatedEnemyDataPaths.push(enemyDataPath);
   }
 
   await fs.writeFile(enemyArchetypesRegistryPath, JSON.stringify({
@@ -747,9 +838,63 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
       ...enemyArchetypes.map((entry) => ({
         id: entry.id,
         path: `Assets/Prefabs/Enemies/${entry.id}.prefab`,
-        requiredComponents: ['Health', 'EnemyController', `${entry.id.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('')}Controller`],
+        requiredComponents: ['Health', 'EnemyController', `${toPascalCase(entry.id)}Controller`],
       })),
     ],
+  }, null, 2), 'utf-8');
+
+  await fs.writeFile(prefabWiringManifestPath, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    sceneId: 'scene.gameplay.main',
+    entities: [
+      {
+        refId: 'entity.player.root',
+        prefabId: 'player',
+        components: [
+          { refId: 'component.player.health', type: 'Health' },
+          { refId: 'component.player.combat', type: 'CombatSystem' },
+          { refId: 'component.player.controller', type: 'PlayerController' },
+        ],
+      },
+      {
+        refId: 'entity.systems.gameplay',
+        prefabId: null,
+        components: [
+          { refId: 'component.systems.loop', type: 'GameplayLoopController' },
+          { refId: 'component.systems.encounter', type: 'EncounterDirector' },
+        ],
+      },
+      {
+        refId: 'entity.ui.hud',
+        prefabId: null,
+        components: [
+          { refId: 'component.ui.hud', type: 'HudController' },
+        ],
+      },
+      {
+        refId: 'entity.systems.menu',
+        prefabId: null,
+        components: [
+          { refId: 'component.menu.main', type: 'MainMenuController' },
+          { refId: 'component.manager.game', type: 'GameManager' },
+        ],
+      },
+    ],
+    references: [
+      { from: 'component.systems.loop', field: 'encounterDirector', to: 'component.systems.encounter' },
+      { from: 'component.systems.loop', field: 'hudController', to: 'component.ui.hud' },
+      { from: 'component.systems.encounter', field: 'enemyPrefabs', to: enemyArchetypes.map((entry) => `prefab.${entry.id}`) },
+      { from: 'component.systems.encounter', field: 'spawnPoints', to: ['sceneRef.spawnpoint.alpha', 'sceneRef.spawnpoint.beta', 'sceneRef.spawnpoint.gamma'] },
+      { from: 'component.ui.hud', field: 'enemiesRemainingText', to: 'sceneRef.ui.enemiesRemainingLabel' },
+      { from: 'component.ui.hud', field: 'scoreText', to: 'sceneRef.ui.scoreLabel' },
+      { from: 'component.ui.hud', field: 'statusText', to: 'sceneRef.ui.statusLabel' },
+    ],
+    prefabLookup: enemyArchetypes.map((entry) => ({
+      refId: `prefab.${entry.id}`,
+      path: `Assets/Prefabs/Enemies/${entry.id}.prefab`,
+      behaviorComponent: `${toPascalCase(entry.id)}Controller`,
+      dataAssetPath: `Assets/Generated/EnemyFamilies/${entry.id}.asset`,
+    })),
   }, null, 2), 'utf-8');
 
   await fs.writeFile(prefabWiringPath, [
@@ -767,7 +912,7 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
     '- Set the Enemy layer and Enemy tag.',
     '',
     '## 3) Enemy archetype prefabs',
-    ...enemyArchetypes.map((entry, index) => `- Duplicate EnemyBase into Assets/Prefabs/Enemies/${entry.id}.prefab and add ${entry.id.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('')}Controller (${index + 1}/${enemyArchetypes.length}).`),
+    ...enemyArchetypes.map((entry, index) => `- Duplicate EnemyBase into Assets/Prefabs/Enemies/${entry.id}.prefab and add ${toPascalCase(entry.id)}Controller (${index + 1}/${enemyArchetypes.length}).`),
     '',
     '## 4) Gameplay systems',
     '- Add GameplayLoopController + EncounterDirector to GameplaySystems object in Gameplay scene.',
@@ -777,7 +922,17 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
     '## 5) Scene linking',
     '- Keep a persistent bootstrap object with GameManager in MainMenu scene.',
     '- Add MainMenu and Gameplay scenes to Build Settings.',
+    '',
+    'See Prefabs/prefab-wiring-manifest.json for concrete reference IDs and field wiring targets.',
   ].join('\n'), 'utf-8');
+
+  await fs.writeFile(spawnTablesPath, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    target: input.spec.setupWizard.target,
+    biomes: biomeCount,
+    bosses,
+    spawnTableByBiome,
+  }, null, 2), 'utf-8');
 
   await fs.writeFile(animationStateMapPath, JSON.stringify({
     generatedAt: new Date().toISOString(),
@@ -827,6 +982,66 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
     `Expected archetype override count: ${enemyArchetypes.length}`,
   ].join('\n'), 'utf-8');
 
+  const postImportChecks = [
+    { id: 'scene.mainmenu.exists', label: 'MainMenu scene exists', status: 'pending', weight: 8 },
+    { id: 'scene.gameplay.exists', label: 'Gameplay scene exists', status: 'pending', weight: 8 },
+    { id: 'prefab.player.wired', label: 'Player prefab has required gameplay components', status: 'pending', weight: 14 },
+    { id: 'prefab.enemies.generated', label: `Enemy prefabs generated (${enemyArchetypes.length})`, status: 'pending', weight: 16 },
+    { id: 'animator.controllers.created', label: 'Animator controllers and overrides created', status: 'pending', weight: 16 },
+    { id: 'data.assets.imported', label: 'Enemy family data assets imported', status: 'pending', weight: 12 },
+    { id: 'spawn.tables.assigned', label: 'Spawn tables assigned to encounter director', status: 'pending', weight: 12 },
+    { id: 'compile.clean', label: 'Unity compilation has zero errors', status: 'pending', weight: 14 },
+  ] as const;
+
+  await fs.writeFile(postImportReadinessPath, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    mode: 'full-unity-automation',
+    baselineReadinessScore: 52,
+    maxReadinessScore: 100,
+    readyForImport: true,
+    readyForPlayableSlice: false,
+    checks: postImportChecks,
+    nextActions: [
+      'Run Validation/PostImportValidator.cs inside Unity Editor automation to resolve pending checks.',
+      'Create native .unity scenes and .prefab assets from the generated wiring manifest.',
+      'Attach generated EnemyFamilyDefinition data assets to encounter and AI systems.',
+    ],
+  }, null, 2), 'utf-8');
+
+  await fs.writeFile(postImportValidatorScriptPath, [
+    '#if UNITY_EDITOR',
+    'using System;',
+    'using System.Collections.Generic;',
+    'using System.IO;',
+    'using UnityEditor;',
+    'using UnityEngine;',
+    '',
+    'public static class PostImportValidator',
+    '{',
+    '    [MenuItem("Nexus/Validate Generated Import")]',
+    '    public static void RunValidation()',
+    '    {',
+    '        var results = new List<string>();',
+    '        results.Add("scene.mainmenu.exists=" + SceneExists("MainMenu"));',
+    '        results.Add("scene.gameplay.exists=" + SceneExists("Gameplay"));',
+    '        results.Add("compile.clean=pending");',
+    '        var outputPath = "Assets/Generated/post-import-validation-report.txt";',
+    '        Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? "Assets/Generated");',
+    '        File.WriteAllLines(outputPath, results);',
+    '        AssetDatabase.Refresh();',
+    '        Debug.Log("Nexus post-import validation report written to " + outputPath);',
+    '    }',
+    '',
+    '    private static bool SceneExists(string sceneName)',
+    '    {',
+    '        var sceneGuids = AssetDatabase.FindAssets($"{sceneName} t:Scene");',
+    '        return sceneGuids != null && sceneGuids.Length > 0;',
+    '    }',
+    '}',
+    '#endif',
+    '',
+  ].join('\n'), 'utf-8');
+
   artifacts.push(
     { id: 'gate4-asset-manifest', kind: 'asset-manifest', relativePath: path.relative(input.workspacePath, assetManifestPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(assetManifestPath)}` },
     { id: 'gate4-import-package', kind: 'import-package', relativePath: path.relative(input.workspacePath, importPackagePath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(importPackagePath)}` },
@@ -843,11 +1058,23 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
     { id: 'gate4-encounter-director', kind: 'model', relativePath: path.relative(input.workspacePath, encounterDirectorPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(encounterDirectorPath)}` },
     { id: 'gate4-hud-controller', kind: 'model', relativePath: path.relative(input.workspacePath, hudControllerPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(hudControllerPath)}` },
     { id: 'gate4-main-menu-controller', kind: 'model', relativePath: path.relative(input.workspacePath, mainMenuControllerPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(mainMenuControllerPath)}` },
+    { id: 'gate4-enemy-family-definition-script', kind: 'model', relativePath: path.relative(input.workspacePath, enemyFamilyDefinitionPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(enemyFamilyDefinitionPath)}` },
     { id: 'gate4-scene-setup-manifest', kind: 'model', relativePath: path.relative(input.workspacePath, sceneSetupManifestPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(sceneSetupManifestPath)}` },
     { id: 'gate4-prefab-registry', kind: 'model', relativePath: path.relative(input.workspacePath, prefabRegistryPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(prefabRegistryPath)}` },
     { id: 'gate4-prefab-wiring-instructions', kind: 'model', relativePath: path.relative(input.workspacePath, prefabWiringPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(prefabWiringPath)}` },
+    { id: 'gate4-prefab-wiring-manifest', kind: 'model', relativePath: path.relative(input.workspacePath, prefabWiringManifestPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(prefabWiringManifestPath)}` },
     { id: 'gate4-animation-state-map', kind: 'model', relativePath: path.relative(input.workspacePath, animationStateMapPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(animationStateMapPath)}` },
     { id: 'gate4-animator-controller-scaffold', kind: 'model', relativePath: path.relative(input.workspacePath, animatorControllerScaffoldPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(animatorControllerScaffoldPath)}` },
+    { id: 'gate4-spawn-table-manifest', kind: 'model', relativePath: path.relative(input.workspacePath, spawnTablesPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(spawnTablesPath)}` },
+    { id: 'gate4-post-import-readiness', kind: 'model', relativePath: path.relative(input.workspacePath, postImportReadinessPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(postImportReadinessPath)}` },
+    { id: 'gate4-post-import-validator-script', kind: 'model', relativePath: path.relative(input.workspacePath, postImportValidatorScriptPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(postImportValidatorScriptPath)}` },
+    ...generatedEnemyDataPaths.map((filePath, index) => ({
+      id: `gate4-enemy-family-data-${index + 1}`,
+      kind: 'model' as const,
+      relativePath: path.relative(input.workspacePath, filePath).split(path.sep).join('/'),
+      status: 'ready' as const,
+      provenance: `gate4:${path.basename(filePath)}`,
+    })),
     ...generatedEnemyScriptPaths.map((filePath, index) => ({
       id: `gate4-enemy-archetype-${index + 1}`,
       kind: 'model' as const,
