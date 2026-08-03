@@ -110,6 +110,9 @@ test("Game Creator stages a Unity authoring project from Gate 4 manifests", asyn
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/TechnicalRuntimeProfile.cs")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/ProductionMilestones.cs")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/EncounterWiringProfile.cs")));
+  assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/EncounterRuntimeDirector.cs")));
+  assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/SceneAudioBootstrap.cs")));
+  assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/UiAudioTrigger.cs")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/LevelFlowController.cs")));
   assert.ok(result.plan.shell.scenes.some((scene) => scene.name === "Splash"));
   assert.ok(result.plan.shell.scenes.some((scene) => scene.name === "Settings"));
