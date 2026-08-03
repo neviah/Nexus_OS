@@ -4,6 +4,74 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const launchUrlPath = path.resolve(process.cwd(), ".nexus-launch-url");
+const lockFilePath = path.resolve(process.cwd(), ".nexus-dev.lock");
+
+function isProcessRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readExistingLaunchUrl() {
+  try {
+    return fs.readFileSync(launchUrlPath, "utf-8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function ensureSingleOrchestrator() {
+  if (!fs.existsSync(lockFilePath)) {
+    return false;
+  }
+
+  try {
+    const raw = fs.readFileSync(lockFilePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    const existingPid = Number(parsed?.pid);
+    if (isProcessRunning(existingPid)) {
+      process.stdout.write(`[dev] Existing dev orchestrator detected (pid ${existingPid}). Reusing running instance.\n`);
+      const existingUrl = readExistingLaunchUrl();
+      if (existingUrl) {
+        process.stdout.write(`[dev] NEXUS_WEB_URL=${existingUrl}\n`);
+      }
+      return true;
+    }
+  } catch {
+    // If the lock file is malformed, treat it as stale and replace it.
+  }
+
+  try {
+    fs.unlinkSync(lockFilePath);
+  } catch {
+    // Ignore stale lock cleanup failures.
+  }
+  return false;
+}
+
+function writeLockFile() {
+  const payload = {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(lockFilePath, JSON.stringify(payload, null, 2), "utf-8");
+}
+
+function removeLockFile() {
+  try {
+    if (fs.existsSync(lockFilePath)) {
+      fs.unlinkSync(lockFilePath);
+    }
+  } catch {
+    // Ignore cleanup errors.
+  }
+}
 
 function isPortFree(port) {
   return new Promise((resolve) => {
@@ -11,7 +79,7 @@ function isPortFree(port) {
 
     server.unref();
     server.on("error", () => resolve(false));
-    server.listen(port, "127.0.0.1", () => {
+    server.listen(port, () => {
       server.close(() => resolve(true));
     });
   });
@@ -44,6 +112,12 @@ function stripAnsi(input) {
 }
 
 async function main() {
+  if (ensureSingleOrchestrator()) {
+    return;
+  }
+
+  writeLockFile();
+
   const apiPort = await pickApiPort();
   const npmCmd = "npm";
   const useShell = process.platform === "win32";
@@ -122,6 +196,7 @@ async function main() {
     if (!web.killed) {
       web.kill("SIGTERM");
     }
+    removeLockFile();
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));
@@ -138,6 +213,7 @@ async function main() {
 }
 
 main().catch((error) => {
+  removeLockFile();
   process.stderr.write(`[dev] Failed to start development services: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
 });

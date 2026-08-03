@@ -58,3 +58,45 @@ test('Gate 3 and Gate 4 artifacts become production-ready', async () => {
 
   await fs.rm(tempDir, { recursive: true, force: true });
 });
+
+test('Gate 4 writes Unity-ready C# handoff scripts', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-gate-unity-'));
+  const spec = {
+    setupWizard: {
+      target: 'unity-3d',
+      genre: 'action-adventure',
+      perspective: 'third-person',
+      scopeTier: 'medium-prototype',
+      artStyle: 'stylized low-poly',
+      controls: 'keyboard+mouse',
+      coreLoopPriority: 'combat',
+      difficultyTarget: 'normal',
+      enemyFamilies: 2,
+      biomes: 1,
+      bosses: 0,
+    },
+  } as any;
+
+  const gate4 = await buildGate4Artifacts({ workspacePath: tempDir, spec, gate3Artifacts: [] });
+
+  const unityScripts = [
+    'GameBuild/gates/gate4/unity-handoff/Scripts/Managers/GameManager.cs',
+    'GameBuild/gates/gate4/unity-handoff/Scripts/Controllers/PlayerController.cs',
+    'GameBuild/gates/gate4/unity-handoff/Scripts/Enemies/EnemyController.cs',
+    'GameBuild/gates/gate4/unity-handoff/Scripts/Combat/CombatSystem.cs',
+    'GameBuild/gates/gate4/unity-handoff/Scripts/Combat/Health.cs',
+    'GameBuild/gates/gate4/unity-handoff/Scripts/Gameplay/GameplayLoopController.cs',
+    'GameBuild/gates/gate4/unity-handoff/Scripts/Gameplay/EncounterDirector.cs',
+    'GameBuild/gates/gate4/unity-handoff/Scripts/UI/HudController.cs',
+    'GameBuild/gates/gate4/unity-handoff/Scripts/UI/MainMenuController.cs',
+  ];
+
+  for (const relativePath of unityScripts) {
+    const fullPath = path.join(tempDir, relativePath);
+    const contents = await fs.readFile(fullPath, 'utf8');
+    assert.ok(contents.includes('class'));
+    assert.ok(gate4.artifacts.some((entry) => entry.relativePath === relativePath));
+  }
+
+  await fs.rm(tempDir, { recursive: true, force: true });
+});

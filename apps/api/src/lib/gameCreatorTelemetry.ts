@@ -50,10 +50,28 @@ export async function appendGameCreatorTelemetryEvent(input: AppendGameCreatorTe
 
 export function buildGameCreatorTelemetrySummary(input: { workspaceId: string; storageDir: string }): GameCreatorTelemetrySummary {
   const filePath = path.join(path.resolve(input.storageDir), "game-creator-telemetry.jsonl");
+  if (!fssync.existsSync(filePath)) {
+    return {
+      workspaceId: input.workspaceId,
+      totalEvents: 0,
+      bySeverity: { info: 0, warn: 0, error: 0 },
+      recentEvents: [],
+    };
+  }
+
   const lines = fssync.readFileSync(filePath, "utf-8").split(/\n/).filter(Boolean);
-  const entries = lines
-    .map((line: string) => JSON.parse(line) as GameCreatorTelemetryEntry)
-    .filter((entry: GameCreatorTelemetryEntry) => entry.workspaceId === input.workspaceId);
+  const entries: GameCreatorTelemetryEntry[] = [];
+
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line) as GameCreatorTelemetryEntry;
+      if (parsed.workspaceId === input.workspaceId) {
+        entries.push(parsed);
+      }
+    } catch {
+      // Skip malformed lines to keep telemetry ingestion resilient.
+    }
+  }
 
   return {
     workspaceId: input.workspaceId,

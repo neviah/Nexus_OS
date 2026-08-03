@@ -5,7 +5,7 @@ module.exports = {
       params: {
         path: ".",
         message: [
-          "git pull",
+          "git pull --rebase --autostash",
           "npm install",
           "npm --prefix apps/api install",
           "npm --prefix apps/web install",
