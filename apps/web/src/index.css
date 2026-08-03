@@ -1310,6 +1310,37 @@ button:disabled {
   gap: 10px;
 }
 
+.game-creator-setup-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+}
+
+.game-creator-setup-span {
+  grid-column: 1 / -1;
+}
+
+.game-creator-setup-metrics {
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1200px) {
+  .game-creator-setup-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .game-creator-setup-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .game-creator-setup-grid,
+  .game-creator-setup-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .stable-audio-form label {
   display: grid;
   gap: 6px;

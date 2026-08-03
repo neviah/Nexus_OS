@@ -33,6 +33,83 @@ export type GameCreatorGateSpec = {
   };
 };
 
+type EnemyArchetypeProfile = {
+  id: string;
+  name: string;
+  role: string;
+  moveSpeed: number;
+  maxHealth: number;
+  attackDamage: number;
+  attackRange: number;
+  attackCooldown: number;
+};
+
+const ENEMY_ARCHETYPE_TEMPLATES: Array<Omit<EnemyArchetypeProfile, "id" | "name">> = [
+  { role: "chaser", moveSpeed: 3.4, maxHealth: 90, attackDamage: 10, attackRange: 1.1, attackCooldown: 0.85 },
+  { role: "bruiser", moveSpeed: 2.1, maxHealth: 165, attackDamage: 18, attackRange: 1.3, attackCooldown: 1.3 },
+  { role: "ranged", moveSpeed: 2.5, maxHealth: 75, attackDamage: 12, attackRange: 7.5, attackCooldown: 1.5 },
+  { role: "support", moveSpeed: 2.9, maxHealth: 80, attackDamage: 8, attackRange: 4.4, attackCooldown: 1.0 },
+  { role: "tank", moveSpeed: 1.8, maxHealth: 220, attackDamage: 16, attackRange: 1.0, attackCooldown: 1.6 },
+  { role: "assassin", moveSpeed: 4.1, maxHealth: 70, attackDamage: 20, attackRange: 1.05, attackCooldown: 0.7 },
+  { role: "summoner", moveSpeed: 2.2, maxHealth: 95, attackDamage: 9, attackRange: 6.0, attackCooldown: 1.7 },
+  { role: "artillery", moveSpeed: 1.7, maxHealth: 105, attackDamage: 24, attackRange: 9.2, attackCooldown: 2.2 },
+];
+
+function buildEnemyArchetypes(spec: GameCreatorGateSpec): EnemyArchetypeProfile[] {
+  const requested = Number.isFinite(spec.setupWizard.enemyFamilies)
+    ? Math.max(3, Math.min(20, Math.floor(spec.setupWizard.enemyFamilies)))
+    : 3;
+  const archetypes: EnemyArchetypeProfile[] = [];
+
+  for (let index = 0; index < requested; index += 1) {
+    const template = ENEMY_ARCHETYPE_TEMPLATES[index % ENEMY_ARCHETYPE_TEMPLATES.length];
+    const tierScale = 1 + Math.floor(index / ENEMY_ARCHETYPE_TEMPLATES.length) * 0.12;
+    const id = `enemy_type_${String(index + 1).padStart(2, "0")}`;
+    const name = `${template.role.replace(/(^\w)/, (char) => char.toUpperCase())} ${index + 1}`;
+
+    archetypes.push({
+      id,
+      name,
+      role: template.role,
+      moveSpeed: Number((template.moveSpeed * tierScale).toFixed(2)),
+      maxHealth: Math.round(template.maxHealth * tierScale),
+      attackDamage: Math.round(template.attackDamage * tierScale),
+      attackRange: Number((template.attackRange * Math.min(1.25, tierScale)).toFixed(2)),
+      attackCooldown: Number((template.attackCooldown * Math.max(0.72, 1 - (tierScale - 1) * 0.3)).toFixed(2)),
+    });
+  }
+
+  return archetypes;
+}
+
+function buildEnemyArchetypeControllerSource(profile: EnemyArchetypeProfile): string {
+  const className = `${profile.id.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("")}Controller`;
+  return [
+    "using UnityEngine;",
+    "",
+    `public class ${className} : EnemyController`,
+    "{",
+    `    [Header(\"Generated Archetype\")] public string archetypeId = \"${profile.id}\";`,
+    `    [Header(\"Generated Archetype\")] public string role = \"${profile.role}\";`,
+    "",
+    "    private void Reset()",
+    "    {",
+    `        chaseSpeed = ${profile.moveSpeed.toFixed(2)}f;`,
+    `        attackDistance = ${profile.attackRange.toFixed(2)}f;`,
+    `        contactDamage = ${profile.attackDamage.toFixed(1)}f;`,
+    `        attackCooldown = ${profile.attackCooldown.toFixed(2)}f;`,
+    "",
+    "        var health = GetComponent<Health>();",
+    "        if (health != null)",
+    "        {",
+    `            health.maxHealth = ${profile.maxHealth.toFixed(1)}f;`,
+    "        }",
+    "    }",
+    "}",
+    "",
+  ].join("\n");
+}
+
 export async function buildGate3Artifacts(input: { workspacePath: string; spec: GameCreatorGateSpec }): Promise<{ ready: boolean; artifacts: Gate3Artifact[] }> {
   const artifacts: Gate3Artifact[] = [];
   const gateDir = path.join(input.workspacePath, 'GameBuild', 'gates', 'gate3');
@@ -202,6 +279,10 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
   const assetsDir = path.join(gateDir, 'assets');
   const unityHandoffDir = path.join(gateDir, 'unity-handoff');
   const unityScriptsDir = path.join(unityHandoffDir, 'Scripts');
+  const unityScenesDir = path.join(unityHandoffDir, 'Scenes');
+  const unityPrefabsDir = path.join(unityHandoffDir, 'Prefabs');
+  const unityAnimationDir = path.join(unityHandoffDir, 'Animation');
+  const enemyArchetypes = buildEnemyArchetypes(input.spec);
   await fs.mkdir(assetsDir, { recursive: true });
   await fs.mkdir(path.join(unityScriptsDir, 'Managers'), { recursive: true });
   await fs.mkdir(path.join(unityScriptsDir, 'Controllers'), { recursive: true });
@@ -209,6 +290,9 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
   await fs.mkdir(path.join(unityScriptsDir, 'Combat'), { recursive: true });
   await fs.mkdir(path.join(unityScriptsDir, 'Gameplay'), { recursive: true });
   await fs.mkdir(path.join(unityScriptsDir, 'UI'), { recursive: true });
+  await fs.mkdir(unityScenesDir, { recursive: true });
+  await fs.mkdir(unityPrefabsDir, { recursive: true });
+  await fs.mkdir(unityAnimationDir, { recursive: true });
 
   const assetManifest = {
     target: input.spec.setupWizard.target,
@@ -216,6 +300,12 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
     assets: [
       { id: 'hero', kind: 'character', file: 'assets/hero.fbx', importStatus: 'ready' },
       { id: 'enemy_slime', kind: 'enemy', file: 'assets/enemy_slime.fbx', importStatus: 'ready' },
+      ...enemyArchetypes.map((entry) => ({
+        id: entry.id,
+        kind: 'enemy-archetype',
+        file: `unity-handoff/Scripts/Enemies/${entry.id}.cs`,
+        importStatus: 'ready',
+      })),
     ],
     namingConvention: 'lowercase-with-underscores',
     importRules: {
@@ -239,6 +329,12 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
   const encounterDirectorPath = path.join(unityScriptsDir, 'Gameplay', 'EncounterDirector.cs');
   const hudControllerPath = path.join(unityScriptsDir, 'UI', 'HudController.cs');
   const mainMenuControllerPath = path.join(unityScriptsDir, 'UI', 'MainMenuController.cs');
+  const enemyArchetypesRegistryPath = path.join(unityScriptsDir, 'Enemies', 'enemy-archetypes.json');
+  const sceneSetupManifestPath = path.join(unityScenesDir, 'scene-setup-manifest.json');
+  const prefabWiringPath = path.join(unityPrefabsDir, 'prefab-wiring-instructions.md');
+  const prefabRegistryPath = path.join(unityPrefabsDir, 'prefab-registry.json');
+  const animationStateMapPath = path.join(unityAnimationDir, 'animation-state-map.json');
+  const animatorControllerScaffoldPath = path.join(unityAnimationDir, 'animator-controller-scaffold.md');
 
   await fs.writeFile(assetManifestPath, JSON.stringify(assetManifest, null, 2), 'utf-8');
   await fs.writeFile(importPackagePath, JSON.stringify({
@@ -257,6 +353,12 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
         'Gameplay/EncounterDirector.cs',
         'UI/HudController.cs',
         'UI/MainMenuController.cs',
+        'Enemies/enemy-archetypes.json',
+        'Scenes/scene-setup-manifest.json',
+        'Prefabs/prefab-registry.json',
+        'Prefabs/prefab-wiring-instructions.md',
+        'Animation/animation-state-map.json',
+        'Animation/animator-controller-scaffold.md',
       ],
     },
   }, null, 2), 'utf-8');
@@ -590,12 +692,148 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
     '',
   ].join('\n'), 'utf-8');
 
+  const generatedEnemyScriptPaths: string[] = [];
+  for (const entry of enemyArchetypes) {
+    const scriptPath = path.join(unityScriptsDir, 'Enemies', `${entry.id}.cs`);
+    await fs.writeFile(scriptPath, buildEnemyArchetypeControllerSource(entry), 'utf-8');
+    generatedEnemyScriptPaths.push(scriptPath);
+  }
+
+  await fs.writeFile(enemyArchetypesRegistryPath, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    count: enemyArchetypes.length,
+    archetypes: enemyArchetypes,
+  }, null, 2), 'utf-8');
+
+  await fs.writeFile(sceneSetupManifestPath, JSON.stringify({
+    target: input.spec.setupWizard.target,
+    generatedAt: new Date().toISOString(),
+    scenes: [
+      {
+        name: 'MainMenu',
+        rootObjects: ['MainMenuCanvas', 'EventSystem', 'PersistentBootstrap'],
+        requiredComponents: {
+          PersistentBootstrap: ['GameManager'],
+          MainMenuCanvas: ['MainMenuController'],
+        },
+      },
+      {
+        name: 'Gameplay',
+        rootObjects: ['Player', 'GameplaySystems', 'EncounterRoot', 'HudCanvas', 'EnvironmentRoot'],
+        requiredComponents: {
+          Player: ['CharacterController', 'Health', 'CombatSystem', 'PlayerController'],
+          GameplaySystems: ['GameplayLoopController', 'EncounterDirector'],
+          HudCanvas: ['HudController'],
+        },
+      },
+    ],
+    tags: ['Player', 'Enemy', 'SpawnPoint', 'DamageVolume'],
+    layers: ['Player', 'Enemy', 'Projectile', 'Environment', 'Interactable'],
+  }, null, 2), 'utf-8');
+
+  await fs.writeFile(prefabRegistryPath, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    prefabs: [
+      {
+        id: 'player',
+        path: 'Assets/Prefabs/Player.prefab',
+        requiredComponents: ['CharacterController', 'Health', 'CombatSystem', 'PlayerController'],
+      },
+      {
+        id: 'enemy_base',
+        path: 'Assets/Prefabs/Enemies/EnemyBase.prefab',
+        requiredComponents: ['Health', 'EnemyController'],
+      },
+      ...enemyArchetypes.map((entry) => ({
+        id: entry.id,
+        path: `Assets/Prefabs/Enemies/${entry.id}.prefab`,
+        requiredComponents: ['Health', 'EnemyController', `${entry.id.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('')}Controller`],
+      })),
+    ],
+  }, null, 2), 'utf-8');
+
+  await fs.writeFile(prefabWiringPath, [
+    '# Prefab Wiring Instructions',
+    '',
+    `Generated enemy archetypes: ${enemyArchetypes.length}`,
+    '',
+    '## 1) Player prefab',
+    '- Create Assets/Prefabs/Player.prefab from your player model.',
+    '- Add components: CharacterController, Health, CombatSystem, PlayerController.',
+    '- Tag this prefab as Player.',
+    '',
+    '## 2) Enemy base prefab',
+    '- Create Assets/Prefabs/Enemies/EnemyBase.prefab with Health + EnemyController.',
+    '- Set the Enemy layer and Enemy tag.',
+    '',
+    '## 3) Enemy archetype prefabs',
+    ...enemyArchetypes.map((entry, index) => `- Duplicate EnemyBase into Assets/Prefabs/Enemies/${entry.id}.prefab and add ${entry.id.split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('')}Controller (${index + 1}/${enemyArchetypes.length}).`),
+    '',
+    '## 4) Gameplay systems',
+    '- Add GameplayLoopController + EncounterDirector to GameplaySystems object in Gameplay scene.',
+    '- Assign enemy prefab array in EncounterDirector using generated archetype prefabs.',
+    '- Add HudController to HudCanvas and map TMP labels for enemies, score, and status.',
+    '',
+    '## 5) Scene linking',
+    '- Keep a persistent bootstrap object with GameManager in MainMenu scene.',
+    '- Add MainMenu and Gameplay scenes to Build Settings.',
+  ].join('\n'), 'utf-8');
+
+  await fs.writeFile(animationStateMapPath, JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    controllerParameters: [
+      { name: 'Speed', type: 'float' },
+      { name: 'Attack', type: 'trigger' },
+      { name: 'Hit', type: 'trigger' },
+      { name: 'Dead', type: 'bool' },
+    ],
+    playerStates: [
+      { state: 'Idle', clip: 'player_idle', transitions: ['Move', 'Attack', 'Hit', 'Dead'] },
+      { state: 'Move', clip: 'player_move', transitions: ['Idle', 'Attack', 'Hit', 'Dead'] },
+      { state: 'Attack', clip: 'player_attack_01', transitions: ['Idle', 'Move', 'Hit', 'Dead'] },
+      { state: 'Hit', clip: 'player_hit', transitions: ['Idle', 'Move', 'Dead'] },
+      { state: 'Dead', clip: 'player_death', transitions: [] },
+    ],
+    enemyStateTemplate: {
+      states: [
+        { state: 'Idle', clip: '{enemy}_idle' },
+        { state: 'Move', clip: '{enemy}_move' },
+        { state: 'Attack', clip: '{enemy}_attack_01' },
+        { state: 'Hit', clip: '{enemy}_hit' },
+        { state: 'Dead', clip: '{enemy}_death' },
+      ],
+      transitions: ['Idle->Move', 'Move->Attack', 'Any->Hit', 'Any->Dead'],
+    },
+    enemyArchetypes: enemyArchetypes.map((entry) => ({
+      id: entry.id,
+      expectedClipPrefix: entry.id,
+    })),
+  }, null, 2), 'utf-8');
+
+  await fs.writeFile(animatorControllerScaffoldPath, [
+    '# Animator Controller Scaffold',
+    '',
+    'Create the following controllers under Assets/Animation/Controllers:',
+    '- Player.controller with states: Idle, Move, Attack, Hit, Dead',
+    '- EnemyBase.controller with states: Idle, Move, Attack, Hit, Dead',
+    '',
+    'Use parameters:',
+    '- Speed (float)',
+    '- Attack (trigger)',
+    '- Hit (trigger)',
+    '- Dead (bool)',
+    '',
+    'Bind generated clips according to Animation/animation-state-map.json and create per-archetype AnimatorOverrideController assets.',
+    `Expected archetype override count: ${enemyArchetypes.length}`,
+  ].join('\n'), 'utf-8');
+
   artifacts.push(
     { id: 'gate4-asset-manifest', kind: 'asset-manifest', relativePath: path.relative(input.workspacePath, assetManifestPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(assetManifestPath)}` },
     { id: 'gate4-import-package', kind: 'import-package', relativePath: path.relative(input.workspacePath, importPackagePath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(importPackagePath)}` },
     { id: 'gate4-validation-report', kind: 'validation-report', relativePath: path.relative(input.workspacePath, validationReportPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(validationReportPath)}` },
     { id: 'gate4-hero-object', kind: 'model', relativePath: path.relative(input.workspacePath, heroObjectPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(heroObjectPath)}` },
     { id: 'gate4-enemy-object', kind: 'model', relativePath: path.relative(input.workspacePath, enemyObjectPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(enemyObjectPath)}` },
+    { id: 'gate4-enemy-archetypes-registry', kind: 'model', relativePath: path.relative(input.workspacePath, enemyArchetypesRegistryPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(enemyArchetypesRegistryPath)}` },
     { id: 'gate4-game-manager', kind: 'model', relativePath: path.relative(input.workspacePath, gameManagerPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(gameManagerPath)}` },
     { id: 'gate4-player-controller', kind: 'model', relativePath: path.relative(input.workspacePath, playerControllerPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(playerControllerPath)}` },
     { id: 'gate4-enemy-controller', kind: 'model', relativePath: path.relative(input.workspacePath, enemyControllerPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(enemyControllerPath)}` },
@@ -605,6 +843,18 @@ export async function buildGate4Artifacts(input: { workspacePath: string; spec: 
     { id: 'gate4-encounter-director', kind: 'model', relativePath: path.relative(input.workspacePath, encounterDirectorPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(encounterDirectorPath)}` },
     { id: 'gate4-hud-controller', kind: 'model', relativePath: path.relative(input.workspacePath, hudControllerPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(hudControllerPath)}` },
     { id: 'gate4-main-menu-controller', kind: 'model', relativePath: path.relative(input.workspacePath, mainMenuControllerPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(mainMenuControllerPath)}` },
+    { id: 'gate4-scene-setup-manifest', kind: 'model', relativePath: path.relative(input.workspacePath, sceneSetupManifestPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(sceneSetupManifestPath)}` },
+    { id: 'gate4-prefab-registry', kind: 'model', relativePath: path.relative(input.workspacePath, prefabRegistryPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(prefabRegistryPath)}` },
+    { id: 'gate4-prefab-wiring-instructions', kind: 'model', relativePath: path.relative(input.workspacePath, prefabWiringPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(prefabWiringPath)}` },
+    { id: 'gate4-animation-state-map', kind: 'model', relativePath: path.relative(input.workspacePath, animationStateMapPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(animationStateMapPath)}` },
+    { id: 'gate4-animator-controller-scaffold', kind: 'model', relativePath: path.relative(input.workspacePath, animatorControllerScaffoldPath).split(path.sep).join('/'), status: 'ready', provenance: `gate4:${path.basename(animatorControllerScaffoldPath)}` },
+    ...generatedEnemyScriptPaths.map((filePath, index) => ({
+      id: `gate4-enemy-archetype-${index + 1}`,
+      kind: 'model' as const,
+      relativePath: path.relative(input.workspacePath, filePath).split(path.sep).join('/'),
+      status: 'ready' as const,
+      provenance: `gate4:${path.basename(filePath)}`,
+    })),
   );
 
   return { ready: true, artifacts };

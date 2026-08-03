@@ -7952,7 +7952,7 @@ function App() {
 
               <section className="tool-section">
                 <h3>Project Setup Wizard</h3>
-                <div className="stable-audio-form">
+                <div className="stable-audio-form game-creator-setup-grid">
                   <label>
                     <span>Target</span>
                     <select
@@ -8076,7 +8076,7 @@ function App() {
                     </select>
                   </label>
 
-                  <div className="image-size-grid">
+                  <div className="image-size-grid game-creator-setup-metrics">
                     <label>
                       <span>Enemy Families</span>
                       <input
@@ -8097,20 +8097,19 @@ function App() {
                         onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, biomes: Math.max(0, Math.min(12, Number(event.target.value || 0))) }))}
                       />
                     </label>
+                    <label>
+                      <span>Bosses</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={8}
+                        value={gameCreatorWizardDraft.bosses}
+                        onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, bosses: Math.max(0, Math.min(8, Number(event.target.value || 0))) }))}
+                      />
+                    </label>
                   </div>
 
-                  <label>
-                    <span>Bosses</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={8}
-                      value={gameCreatorWizardDraft.bosses}
-                      onChange={(event) => setGameCreatorWizardDraft((current) => ({ ...current, bosses: Math.max(0, Math.min(8, Number(event.target.value || 0))) }))}
-                    />
-                  </label>
-
-                  <div>
+                  <div className="game-creator-setup-span">
                     <span>Preferred Harnesses For Step 2 (Doc Generation)</span>
                     <div className="tool-list">
                       {(boot?.harnesses ?? []).map((harness) => {
@@ -8143,7 +8142,7 @@ function App() {
                     </div>
                   </div>
 
-                  <label>
+                  <label className="game-creator-setup-span">
                     <span>Notes</span>
                     <textarea
                       rows={4}
@@ -8153,7 +8152,7 @@ function App() {
                     />
                   </label>
 
-                  <div className="tool-action-row">
+                  <div className="tool-action-row game-creator-setup-span">
                     <button type="button" onClick={() => void saveGameCreatorSetupWizard()} disabled={gameCreatorBusyAction !== null}>
                       {gameCreatorBusyAction === "save" ? "Saving..." : "Save Setup Wizard"}
                     </button>

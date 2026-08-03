@@ -61,6 +61,7 @@ test('Gate 3 and Gate 4 artifacts become production-ready', async () => {
 
 test('Gate 4 writes Unity-ready C# handoff scripts', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nexus-gate-unity-'));
+  const expectedEnemyFamilies = 7;
   const spec = {
     setupWizard: {
       target: 'unity-3d',
@@ -71,7 +72,7 @@ test('Gate 4 writes Unity-ready C# handoff scripts', async () => {
       controls: 'keyboard+mouse',
       coreLoopPriority: 'combat',
       difficultyTarget: 'normal',
-      enemyFamilies: 2,
+      enemyFamilies: expectedEnemyFamilies,
       biomes: 1,
       bosses: 0,
     },
@@ -97,6 +98,35 @@ test('Gate 4 writes Unity-ready C# handoff scripts', async () => {
     assert.ok(contents.includes('class'));
     assert.ok(gate4.artifacts.some((entry) => entry.relativePath === relativePath));
   }
+
+  const enemyArchetypeRegistryPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Scripts/Enemies/enemy-archetypes.json');
+  const enemyArchetypeRegistry = JSON.parse(await fs.readFile(enemyArchetypeRegistryPath, 'utf8')) as { count: number; archetypes: Array<{ id: string }> };
+  assert.equal(enemyArchetypeRegistry.count, expectedEnemyFamilies);
+  assert.equal(enemyArchetypeRegistry.archetypes.length, expectedEnemyFamilies);
+
+  for (const archetype of enemyArchetypeRegistry.archetypes) {
+    const scriptPath = path.join(tempDir, `GameBuild/gates/gate4/unity-handoff/Scripts/Enemies/${archetype.id}.cs`);
+    const scriptBody = await fs.readFile(scriptPath, 'utf8');
+    assert.match(scriptBody, /class/);
+    assert.ok(gate4.artifacts.some((entry) => entry.relativePath.endsWith(`/Enemies/${archetype.id}.cs`)));
+  }
+
+  const sceneSetupManifestPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Scenes/scene-setup-manifest.json');
+  const sceneSetupManifest = JSON.parse(await fs.readFile(sceneSetupManifestPath, 'utf8')) as { scenes: Array<{ name: string }> };
+  assert.ok(sceneSetupManifest.scenes.some((scene) => scene.name === 'MainMenu'));
+  assert.ok(sceneSetupManifest.scenes.some((scene) => scene.name === 'Gameplay'));
+
+  const prefabWiringPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Prefabs/prefab-wiring-instructions.md');
+  const prefabWiringContents = await fs.readFile(prefabWiringPath, 'utf8');
+  assert.match(prefabWiringContents, /Generated enemy archetypes/);
+
+  const animationStateMapPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Animation/animation-state-map.json');
+  const animationStateMap = JSON.parse(await fs.readFile(animationStateMapPath, 'utf8')) as { enemyArchetypes: Array<{ id: string }> };
+  assert.equal(animationStateMap.enemyArchetypes.length, expectedEnemyFamilies);
+
+  const animatorScaffoldPath = path.join(tempDir, 'GameBuild/gates/gate4/unity-handoff/Animation/animator-controller-scaffold.md');
+  const animatorScaffoldContents = await fs.readFile(animatorScaffoldPath, 'utf8');
+  assert.match(animatorScaffoldContents, /Animator Controller Scaffold/);
 
   await fs.rm(tempDir, { recursive: true, force: true });
 });
