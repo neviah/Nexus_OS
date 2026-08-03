@@ -919,6 +919,10 @@ type GameCreatorStartProcessResponse = GameCreatorGate2Status & {
   message?: string;
   error?: string;
   mode?: "strict-approval" | "auto-produce";
+  plan?: {
+    steps: string[];
+    summary: string;
+  };
 };
 
 type GameCreatorExecutionMode = "strict-approval" | "auto-produce";
@@ -2972,7 +2976,34 @@ function App() {
       }
 
       setStatusMessage(payload.message ?? "Game Creator process start approved.");
-      pushToast("Gate 2 passed. Process approved.", "ok");
+      pushToast(`Gate 2 passed. Workflow plan: ${payload.plan?.steps.join(" → ") ?? "ready"}`, "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorStartBusy(false);
+    }
+  }
+
+  async function runFullGameCreatorWorkflow() {
+    setGameCreatorStartBusy(true);
+    try {
+      const response = await fetch("/api/tools/game-creator/workflow/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          mode: gameCreatorExecutionMode,
+        }),
+      });
+      const payload = (await response.json()) as { error?: string; plan?: { steps: string[]; summary: string } };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to start the full workflow.");
+      }
+      pushToast(`Workflow ready: ${payload.plan?.summary ?? "starting"}`, "ok");
+      await loadGameCreatorQueue();
+      await loadGameCreatorExecutionStatus();
+      await loadGameCreatorReleaseStatus();
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -7783,6 +7814,14 @@ function App() {
                     disabled={gameCreatorStartBusy}
                   >
                     {gameCreatorStartBusy ? "Checking Gate 2..." : "Start Game Creator Process"}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void runFullGameCreatorWorkflow()}
+                    disabled={gameCreatorStartBusy}
+                  >
+                    {gameCreatorStartBusy ? "Preparing Workflow..." : "Run Full Workflow"}
                   </button>
                   <button type="button" className="ghost" onClick={() => void loadGameCreatorSetupWizard()} disabled={gameCreatorBusyAction !== null}>
                     {gameCreatorBusyAction === "load" ? "Refreshing..." : "Refresh"}

@@ -116,6 +116,7 @@ import { buildGameCreatorReleasePackage, writeGameCreatorReleasePackage } from "
 import { appendGameCreatorTelemetryEvent, buildGameCreatorTelemetrySummary } from "./lib/gameCreatorTelemetry.js";
 import { buildGameCreatorComplianceSummary } from "./lib/gameCreatorCompliance.js";
 import { buildGameCreatorWorkflowSummary } from "./lib/gameCreatorWorkflowSummary.js";
+import { buildGameCreatorWorkflowPlan } from "./lib/gameCreatorWorkflow.js";
 import { buildAnimationReadinessManifest, buildArtifactPreviewMetadata, buildGate3Artifacts, buildGate4Artifacts, evaluateGate3Readiness, evaluateGate4Readiness } from "./lib/gameCreatorGates.js";
 
 const app = express();
@@ -8504,7 +8505,19 @@ app.post("/api/tools/game-creator/process/start", async (req, res) => {
     });
   }
 
-  await appendGameCreatorWorkflowEvent(workspace.id, "process-start", "Game Creator process start was approved.", "info", { mode: requestedMode, requiredDocs: readiness.summary.requiredDocs, approvedDocs: readiness.summary.approvedDocs, lockedDocs: readiness.summary.lockedDocs });
+  const canonStore = getGameCreatorCanonDocsStore(state);
+  const queueStore = getGameCreatorExecutionQueueStore(state);
+  const workflowPlan = buildGameCreatorWorkflowPlan({
+    mode: requestedMode,
+    gate2Ready: readiness.ready,
+    canonDocCount: Object.keys(canonStore.records).length,
+    approvedLockedDocs: Object.values(canonStore.records).filter((record) => record.reviewStatus === "approved" && record.locked).length,
+    queueItemCount: queueStore.items.length,
+    releaseReady: false,
+    queueCompleted: queueStore.items.every((item) => item.status === "done"),
+  });
+
+  await appendGameCreatorWorkflowEvent(workspace.id, "process-start", "Game Creator process start was approved.", "info", { mode: requestedMode, requiredDocs: readiness.summary.requiredDocs, approvedDocs: readiness.summary.approvedDocs, lockedDocs: readiness.summary.lockedDocs, plan: workflowPlan.steps });
 
   return res.json({
     ok: true,
@@ -8513,9 +8526,53 @@ app.post("/api/tools/game-creator/process/start", async (req, res) => {
     workspacePath: workspace.path,
     started: true,
     message: "Gate 2 passed. Pipeline start is approved (execution stages can be connected next).",
+    plan: workflowPlan,
     ...readiness,
     mode: requestedMode,
   });
+});
+
+app.post("/api/tools/game-creator/workflow/run", async (req, res) => {
+  const body = req.body as { workspaceId?: string; mode?: GameCreatorExecutionMode };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const requestedMode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
+  writeGameCreatorExecutionMode(state, requestedMode);
+  await writeSystemState(state);
+
+  const canonStore = getGameCreatorCanonDocsStore(state);
+  const queueStore = getGameCreatorExecutionQueueStore(state);
+  const readiness = await evaluateGate2Readiness({
+    state,
+    workspacePath: workspace.path,
+    requireLocked: requestedMode === "strict-approval",
+    requireApproved: requestedMode === "strict-approval",
+  });
+
+  if (!readiness.ready) {
+    return res.status(412).json({
+      error: "Gate 2 is blocked. Resolve blockers before running the workflow.",
+      gateId: "gate-2-preproduction-docs",
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      ...readiness,
+      mode: requestedMode,
+    });
+  }
+
+  const plan = buildGameCreatorWorkflowPlan({
+    mode: requestedMode,
+    gate2Ready: readiness.ready,
+    canonDocCount: Object.keys(canonStore.records).length,
+    approvedLockedDocs: Object.values(canonStore.records).filter((record) => record.reviewStatus === "approved" && record.locked).length,
+    queueItemCount: queueStore.items.length,
+    releaseReady: false,
+    queueCompleted: queueStore.items.every((item) => item.status === "done"),
+  });
+
+  await appendGameCreatorWorkflowEvent(workspace.id, "workflow-run", `Workflow run initiated with plan: ${plan.steps.join(" → ")}`, "info", { plan });
+
+  return res.json({ ok: true, workspaceId: workspace.id, workspacePath: workspace.path, mode: requestedMode, plan });
 });
 
 app.get("/api/tools/game-creator/queue", async (req, res) => {
