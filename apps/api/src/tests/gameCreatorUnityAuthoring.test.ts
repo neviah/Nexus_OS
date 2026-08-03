@@ -91,6 +91,7 @@ test("Game Creator stages a Unity authoring project from Gate 4 manifests", asyn
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorLevelManifest.json")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorUiLayoutManifest.json")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorEnemyBehaviorManifest.json")));
+  assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorPrefabStyleManifest.json")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorArtDirectionManifest.json")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorAudioPlanManifest.json")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorLoreProfileManifest.json")));
@@ -128,6 +129,7 @@ test("Game Creator stages a Unity authoring project from Gate 4 manifests", asyn
   assert.equal(result.levelManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorLevelManifest.json");
   assert.equal(result.uiLayoutManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorUiLayoutManifest.json");
   assert.equal(result.enemyBehaviorManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorEnemyBehaviorManifest.json");
+  assert.equal(result.prefabStyleManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorPrefabStyleManifest.json");
   assert.equal(result.artDirectionManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorArtDirectionManifest.json");
   assert.equal(result.audioPlanManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorAudioPlanManifest.json");
   assert.equal(result.loreProfileManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorLoreProfileManifest.json");
@@ -148,6 +150,15 @@ test("Game Creator stages a Unity authoring project from Gate 4 manifests", asyn
 
   const enemyManifest = JSON.parse(await fs.readFile(path.join(tempDir, result.enemyBehaviorManifestRelativePath), "utf8")) as { enemyLayout: { roles: string[] } };
   assert.ok(enemyManifest.enemyLayout.roles.length >= 1);
+
+  const prefabStyleManifest = JSON.parse(await fs.readFile(path.join(tempDir, result.prefabStyleManifestRelativePath), "utf8")) as {
+    prefabStylePlan: {
+      player: { materialRole: string };
+      enemyBase: { materialRole: string };
+    };
+  };
+  assert.equal(prefabStyleManifest.prefabStylePlan.player.materialRole, "player-primary");
+  assert.equal(prefabStyleManifest.prefabStylePlan.enemyBase.materialRole, "enemy-primary");
 
   const artManifest = JSON.parse(await fs.readFile(path.join(tempDir, result.artDirectionManifestRelativePath), "utf8")) as { artDirection: { visualPillars: string[] } };
   assert.ok(artManifest.artDirection.visualPillars.length >= 1);

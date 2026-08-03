@@ -118,6 +118,7 @@ import { buildGameCreatorComplianceSummary } from "./lib/gameCreatorCompliance.j
 import { buildGameCreatorWorkflowSummary } from "./lib/gameCreatorWorkflowSummary.js";
 import { buildGameCreatorWorkflowPlan } from "./lib/gameCreatorWorkflow.js";
 import { buildAnimationReadinessManifest, buildArtifactPreviewMetadata, buildGate3Artifacts, buildGate4Artifacts, evaluateGate3Readiness, evaluateGate4Readiness } from "./lib/gameCreatorGates.js";
+import { buildGameCreatorUnityAuthoringProject, type GameCreatorCanonDocSource } from "./lib/gameCreatorUnityAuthoring.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -2442,6 +2443,36 @@ function buildCanonDocTemplateFiles(spec: GameCreatorSpecPackage): CanonDocFile[
     make("DIFFICULTY_CURVE.md", "Difficulty Curve", `## Curve Goals\n- Target difficulty: ${d.difficultyTarget}.\n- Keep early onboarding readable; scale complexity per scope tier ${d.scopeTier}.\n\n## Encounter Density\n- Tie wave density and composition to enemy family count (${d.enemyFamilies}).\n\n## Failure/Recovery\n- Define failure costs and recovery windows by progression phase.\n\nGenerated from Setup Wizard v${d.version} at ${generatedAt}.`),
     make("CANON_DOC_INDEX.md", "Canon Doc Index", `## Canon Files\n- GAME_BIBLE.md\n- TECHNICAL_DESIGN.md\n- UI_UX_SPEC.md\n- CONTROLS_CAMERA_SPEC.md\n- ART_BIBLE.md\n- LORE_BOOK.md\n- AUDIO_BIBLE.md\n- PRODUCTION_PLAN.md\n- ENEMY_ROSTER.md\n- DIFFICULTY_CURVE.md\n\n## Source\n- Setup wizard version: ${d.version}\n- Generated: ${generatedAt}\n- Target: ${d.target}\n\n## Warnings\n${spec.scopeWarnings.length ? spec.scopeWarnings.map((w) => `- ${w}`).join("\n") : "- none"}`),
   ];
+}
+
+async function loadCanonDocsForUnityAuthoring(input: {
+  workspacePath: string;
+  specPackage: GameCreatorSpecPackage;
+  records: Record<string, GameCreatorCanonDocRecord>;
+  snapshots: GameCreatorCanonDocSnapshot[];
+}): Promise<GameCreatorCanonDocSource[]> {
+  const files = buildCanonDocTemplateFiles(input.specPackage);
+  const status = await readCanonDocStatus({
+    workspacePath: input.workspacePath,
+    files,
+    records: input.records,
+    snapshots: input.snapshots,
+    includeContent: true,
+    scopeTier: input.specPackage.setupWizard.scopeTier,
+  });
+
+  return status.filter((entry) => entry.fileName !== "CANON_DOC_INDEX.md").map((entry) => {
+    const template = files.find((file) => file.fileName === entry.fileName);
+    return {
+      fileName: entry.fileName,
+      title: entry.title,
+      relativePath: entry.relativePath,
+      content: entry.content.trim() || template?.content || "",
+      exists: entry.exists,
+      locked: entry.record.locked,
+      reviewStatus: entry.record.reviewStatus,
+    };
+  });
 }
 
 function getGameCreatorCanonDocsStore(state: SystemState): {
@@ -9547,6 +9578,64 @@ app.post("/api/tools/game-creator/unity/run", async (req, res) => {
   const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
   const unity = await detectUnityCliStatus();
   const unityPath = body.unityPath?.trim() || unity.selectedPath;
+  if (action === "generate") {
+    const draft = readGameCreatorDraft(state);
+    const spec = buildGameCreatorSpecPackage(draft);
+    const canonStore = getGameCreatorCanonDocsStore(state);
+    const canonDocs = await loadCanonDocsForUnityAuthoring({
+      workspacePath: workspace.path,
+      specPackage: spec,
+      records: canonStore.records,
+      snapshots: canonStore.snapshots,
+    });
+    const authoring = await buildGameCreatorUnityAuthoringProject({
+      workspacePath: workspace.path,
+      spec: spec.setupWizard,
+      canonDocs,
+    });
+
+    if (!unityPath) {
+      return res.json({
+        ok: true,
+        workspaceId: workspace.id,
+        action,
+        unityPath: null,
+        executed: false,
+        projectPath: authoring.unityProjectPath,
+        method: authoring.methodName,
+        logRelativePath: authoring.logRelativePath,
+        planRelativePath: authoring.planRelativePath,
+        stagedFiles: authoring.stagedFiles,
+        message: "Unity project staged. Set UNITY_EDITOR_PATH to run the headless authoring step.",
+      });
+    }
+
+    const logPath = safeWorkspaceJoin(workspace.path, authoring.logRelativePath);
+    await fs.mkdir(path.dirname(logPath), { recursive: true });
+    const result = await runUnityBatchMethod({
+      unityPath,
+      projectPath: authoring.unityProjectPath,
+      method: authoring.methodName,
+      logPath,
+    });
+
+    return res.status(result.ok ? 200 : 500).json({
+      ok: result.ok,
+      workspaceId: workspace.id,
+      action,
+      executed: true,
+      method: authoring.methodName,
+      unityPath,
+      projectPath: authoring.unityProjectPath,
+      command: result.command,
+      logRelativePath: authoring.logRelativePath,
+      planRelativePath: authoring.planRelativePath,
+      stagedFiles: authoring.stagedFiles,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+  }
+
   if (!unityPath) {
     return res.status(409).json({
       error: "Unity CLI is unavailable. Set UNITY_EDITOR_PATH or install Unity Editor.",
@@ -9564,7 +9653,7 @@ app.post("/api/tools/game-creator/unity/run", async (req, res) => {
       ? "NexusGenerated.ProjectAutomation.ValidateAssetPipeline"
       : action === "validate-performance"
         ? "NexusGenerated.ProjectAutomation.ValidatePerformanceGate"
-    : action === "smoke"
+      : action === "smoke"
       ? "NexusGenerated.ProjectAutomation.RunDeterminismSmoke"
       : "NexusGenerated.ProjectAutomation.GenerateFromSpec";
   const logRelativePath = `GameBuild/unity/Logs/${action}-${Date.now()}.log`;

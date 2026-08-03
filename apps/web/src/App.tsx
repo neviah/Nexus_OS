@@ -1410,6 +1410,7 @@ function App() {
   const [gameCreatorReviewBusyKey, setGameCreatorReviewBusyKey] = useState<string | null>(null);
   const [gameCreatorGate2Status, setGameCreatorGate2Status] = useState<GameCreatorGate2Status | null>(null);
   const [gameCreatorStartBusy, setGameCreatorStartBusy] = useState(false);
+  const [gameCreatorUnityAuthoringBusy, setGameCreatorUnityAuthoringBusy] = useState(false);
   const [gameCreatorGateSectionsExpanded, setGameCreatorGateSectionsExpanded] = useState<Record<string, boolean>>({
     gate2: true,
     gate3: true,
@@ -3009,6 +3010,31 @@ function App() {
       pushToast(String(error), "err");
     } finally {
       setGameCreatorStartBusy(false);
+    }
+  }
+
+  async function runGameCreatorUnityAuthoring() {
+    setGameCreatorUnityAuthoringBusy(true);
+    try {
+      const response = await fetch("/api/tools/game-creator/unity/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          action: "generate",
+        }),
+      });
+      const payload = (await response.json()) as { error?: string; message?: string; executed?: boolean; logRelativePath?: string; planRelativePath?: string; stagedFiles?: string[] };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to run Unity authoring.");
+      }
+      pushToast(payload.message ?? (payload.executed ? "Unity authoring started." : "Unity project staged."), "ok");
+      setStatusMessage(payload.message ?? (payload.executed ? "Unity authoring started." : "Unity project staged."));
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setGameCreatorUnityAuthoringBusy(false);
     }
   }
 
@@ -7822,6 +7848,14 @@ function App() {
                     disabled={gameCreatorStartBusy}
                   >
                     {gameCreatorStartBusy ? "Preparing Workflow..." : "Run Full Workflow"}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void runGameCreatorUnityAuthoring()}
+                    disabled={gameCreatorUnityAuthoringBusy}
+                  >
+                    {gameCreatorUnityAuthoringBusy ? "Staging Unity..." : "Run Unity Authoring"}
                   </button>
                   <button type="button" className="ghost" onClick={() => void loadGameCreatorSetupWizard()} disabled={gameCreatorBusyAction !== null}>
                     {gameCreatorBusyAction === "load" ? "Refreshing..." : "Refresh"}
