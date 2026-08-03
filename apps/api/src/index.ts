@@ -111,7 +111,7 @@ import {
 } from "./lib/wan2gpRuntime.js";
 import { listProviderCatalog, listRouterFallbackTemplates } from "./lib/providerCatalog.js";
 import { getHarnessCapabilities, updateHarnessCapabilities } from "./lib/harnessCapabilities.js";
-import { buildPrototype } from "./lib/prototypeGenerator.js";
+import { buildPrototype, buildPrototypeFromAnimationReadiness } from "./lib/prototypeGenerator.js";
 import { buildGameCreatorReleasePackage, writeGameCreatorReleasePackage } from "./lib/gameCreatorRelease.js";
 import { appendGameCreatorTelemetryEvent, buildGameCreatorTelemetrySummary } from "./lib/gameCreatorTelemetry.js";
 import { buildGameCreatorComplianceSummary } from "./lib/gameCreatorCompliance.js";
@@ -3961,6 +3961,23 @@ async function executeGameCreatorQueueItem(input: {
       }
       outputs.push(animationReadiness.relativePath);
       createArtifact({ kind: 'code', relativePath: animationReadiness.relativePath });
+
+      const prototypeManifestPath = safeWorkspaceJoin(input.workspacePath, animationReadiness.relativePath);
+      const prototypeSlug = input.spec.setupWizard.genre.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "prototype";
+      const prototypeProjectRoot = safeWorkspaceJoin(input.workspacePath, path.join("GameBuild", "prototypes", prototypeSlug));
+      const prototypeProject = await buildPrototypeFromAnimationReadiness({
+        title: `${input.spec.setupWizard.genre} Prototype`,
+        manifestPath: prototypeManifestPath,
+      });
+      await fs.mkdir(prototypeProjectRoot, { recursive: true });
+      for (const file of prototypeProject.files) {
+        const relativePath = file.path.replace(/^projects\/[^/]+\//, "");
+        const targetPath = safeWorkspaceJoin(prototypeProjectRoot, relativePath);
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        await fs.writeFile(targetPath, file.content, "utf-8");
+        outputs.push(path.posix.join("GameBuild", "prototypes", prototypeSlug, relativePath));
+        createArtifact({ kind: 'code', relativePath: path.posix.join("GameBuild", "prototypes", prototypeSlug, relativePath) });
+      }
     }
 
     const files = buildGameCreatorScaffoldFiles({ spec: input.spec, item: input.item });
@@ -7791,7 +7808,18 @@ app.post("/api/tools/game-creator/prototype/generate", async (req, res) => {
     mood: typeof body.mood === "string" && body.mood.trim() ? body.mood.trim() : "bright and energetic",
   };
 
-  const project = buildPrototype(spec);
+  const manifestPath = safeWorkspaceJoin(workspace.path, path.join("GameBuild", "animation-readiness.json"));
+  let project = buildPrototype(spec);
+  let usedManifest = false;
+
+  try {
+    await fs.access(manifestPath);
+    project = await buildPrototypeFromAnimationReadiness({ title: spec.title, manifestPath });
+    usedManifest = true;
+  } catch {
+    project = buildPrototype(spec);
+  }
+
   const slug = spec.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "prototype";
   const projectRoot = safeWorkspaceJoin(workspace.path, path.join("GameBuild", "prototypes", slug));
   await fs.mkdir(projectRoot, { recursive: true });
@@ -7812,6 +7840,7 @@ app.post("/api/tools/game-creator/prototype/generate", async (req, res) => {
     spec,
     project,
     writtenFiles,
+    usedManifest,
   });
 });
 
