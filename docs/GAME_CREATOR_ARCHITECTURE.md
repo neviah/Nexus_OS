@@ -7,6 +7,27 @@ Goals:
 - Prevent agent drift by enforcing canonical docs and versioned approvals.
 - Support iterative expansion ("add more enemies", "add new enemy types") without restarting the whole project.
 
+## Executive Summary
+
+This architecture treats game creation as a governed production pipeline rather than a freeform prompt loop. The core idea is simple: every major stage must produce a versioned artifact bundle, pass approval gates, and leave behind a clear record of what changed.
+
+That gives NexusOS a practical path to support game-generation workflows without turning the system into an unbounded content generator. The result is a product that can grow from a vertical slice into a larger content pipeline while staying understandable to both humans and agents.
+
+## V1 Scope Boundaries
+
+### In scope
+- A single-target first-pass workflow for Unity-based games.
+- A setup wizard that produces a structured project spec package.
+- Canon docs generation and review gates.
+- Enemy-focused expansion workflows after the first playable pass.
+- Basic integration with Unity build and test validation.
+
+### Out of scope for V1
+- Full multiplayer/live-service game systems.
+- Cross-platform content generation for every engine at once.
+- Fully autonomous art production with no human review.
+- Advanced procedural narrative systems.
+
 ## 1) Delivery Strategy
 
 Recommended rollout:
@@ -138,34 +159,75 @@ Fail conditions:
 
 ### Gate 3: Art Direction Approval
 
+Purpose:
+- Make the visual direction production-ready so downstream asset generation can begin without rework.
+
 Inputs:
 - Mood boards and concept sheets.
+- Scope constraints and target platform details.
+- Initial narrative and gameplay tone notes.
 
 Outputs:
-- Approved style kit and reference pack.
+- Approved style kit.
+- Reference pack with approved examples.
+- Visual production brief covering palette, silhouette, material language, and rendering constraints.
 
 Approval checklist:
 - Style is consistent across character/environment/UI.
-- Color and silhouette readability meets targets.
+- Color, silhouette, and readability rules are explicit and testable.
+- Material, lighting, and texture expectations are defined for the target platform.
+- The style kit is specific enough that a generator can produce assets without guessing.
 
 Fail conditions:
 - Visual inconsistency with art bible.
+- Missing platform-specific rendering constraints.
+- No clear standard for readability, palette, or material treatment.
+
+Production-readiness rule:
+- Gate 3 must produce a reusable art brief that downstream asset tasks can reference directly.
+- If the brief is still ambiguous, content generation should stop and return to revision.
 
 ### Gate 4: Character and Environment Asset Approval
 
+Purpose:
+- Convert approved art direction into import-ready, buildable assets with consistent metadata and validation.
+
 Inputs:
 - Concept-approved model tasks.
+- Gate 3 style kit and visual production brief.
+- Target platform export/import rules.
 
 Outputs:
 - Approved model set and metadata.
+- Import-ready asset package with naming and file conventions.
+- Validation report for topology, textures, materials, and export compatibility.
 
 Approval checklist:
 - Topology and budgets validated.
+- Texture/material budgets validated for the target platform.
 - Naming and import conventions pass.
+- Export settings, pivot/origin, and scale rules are documented.
+- Assets are traceable to the approved style kit and intended gameplay use.
 
 Fail conditions:
 - Polygon/material budget breach.
 - Invalid export/import diagnostics.
+- Asset shape or material language diverges from the approved art direction.
+- Missing metadata needed for import into Unity or downstream animation work.
+
+Production-readiness rule:
+- Gate 4 must produce a package that can be consumed directly by the next stage without manual cleanup.
+- If an asset cannot be imported, renamed, or traced to a production brief, it is not considered ready.
+
+### Gate 3/4 Handoff Contract for Content Production
+
+Before moving to animation, gameplay, or further content generation, the following must exist:
+- A signed-off style kit from Gate 3.
+- An asset manifest from Gate 4 listing every approved asset, its variant, and its expected use.
+- A validation report showing that assets meet the required budgets and import rules.
+- A clear mapping from each asset to the corresponding gameplay or encounter requirement.
+
+This handoff is what makes the pipeline actually capable of producing content instead of only producing concepts.
 
 ### Gate 5: Animation Approval
 
@@ -448,6 +510,19 @@ Minimum assumptions:
 Important practical note:
 - Unity does not need the GUI window open all the time if running batch/CLI tasks.
 - But Unity must be installed, and the needed editor/toolchain must exist locally.
+
+## 9.5) NexusOS Integration Touchpoints
+
+The Game Creator workflow should plug into existing NexusOS capabilities rather than inventing a parallel stack.
+
+- Workspace management: create and switch project workspaces for each generated game.
+- State persistence: store project spec packages, canon doc versions, gate status, and approval history in local state files.
+- Task resume engine: preserve long-running generation or review operations so they can continue after interruption.
+- Router and model orchestration: use Nexus Router for fallback-capable generation calls when content tasks need model switching.
+- Unity tool bridge: connect build, test, and log checks to the existing Unity execution policy layer.
+- Startup and conformance checks: verify that required tools, engines, and providers are available before starting a build workflow.
+
+This makes the Game Creator flow feel native to NexusOS instead of being bolted on as a separate feature.
 
 ## 10) V1 Implementation Priorities
 

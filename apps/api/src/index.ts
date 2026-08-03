@@ -116,6 +116,7 @@ import { buildGameCreatorReleasePackage, writeGameCreatorReleasePackage } from "
 import { appendGameCreatorTelemetryEvent, buildGameCreatorTelemetrySummary } from "./lib/gameCreatorTelemetry.js";
 import { buildGameCreatorComplianceSummary } from "./lib/gameCreatorCompliance.js";
 import { buildGameCreatorWorkflowSummary } from "./lib/gameCreatorWorkflowSummary.js";
+import { buildAnimationReadinessManifest, buildArtifactPreviewMetadata, buildGate3Artifacts, buildGate4Artifacts, evaluateGate3Readiness, evaluateGate4Readiness } from "./lib/gameCreatorGates.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -3945,6 +3946,23 @@ async function executeGameCreatorQueueItem(input: {
   };
 
   if (!input.item.regenerateArtifact) {
+    const gateTargets = ['art', 'content', 'production', 'engineering', 'qa', 'audio', 'gameplay'];
+    if (gateTargets.includes(input.item.lane)) {
+      const gate3 = await buildGate3Artifacts({ workspacePath: input.workspacePath, spec: input.spec as any });
+      const gate4 = await buildGate4Artifacts({ workspacePath: input.workspacePath, spec: input.spec as any, gate3Artifacts: gate3.artifacts });
+      const animationReadiness = await buildAnimationReadinessManifest({ workspacePath: input.workspacePath, spec: input.spec as any, gate3Artifacts: gate3.artifacts, gate4Artifacts: gate4.artifacts });
+      for (const artifact of gate3.artifacts) {
+        outputs.push(artifact.relativePath);
+        createArtifact({ kind: 'code', relativePath: artifact.relativePath });
+      }
+      for (const artifact of gate4.artifacts) {
+        outputs.push(artifact.relativePath);
+        createArtifact({ kind: 'code', relativePath: artifact.relativePath });
+      }
+      outputs.push(animationReadiness.relativePath);
+      createArtifact({ kind: 'code', relativePath: animationReadiness.relativePath });
+    }
+
     const files = buildGameCreatorScaffoldFiles({ spec: input.spec, item: input.item });
     for (const file of files) {
       const absolutePath = safeWorkspaceJoin(input.workspacePath, file.relativePath);
@@ -8374,6 +8392,62 @@ app.get("/api/tools/game-creator/gates/gate2", async (req, res) => {
   });
 });
 
+app.get("/api/tools/game-creator/gates/gate3", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim();
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const spec = buildGameCreatorSpecPackage(draft);
+  const readiness = await evaluateGate3Readiness({ workspacePath: workspace.path, spec });
+
+  res.json({
+    ok: true,
+    gateId: "gate-3-art-direction",
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    ...readiness,
+  });
+});
+
+app.post("/api/tools/game-creator/gates/gate3/produce", async (req, res) => {
+  const body = req.body as { workspaceId?: string };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const spec = buildGameCreatorSpecPackage(draft);
+  const result = await buildGate3Artifacts({ workspacePath: workspace.path, spec });
+  return res.json({ ok: true, gateId: "gate-3-art-direction", workspaceId: workspace.id, workspacePath: workspace.path, ...result });
+});
+
+app.get("/api/tools/game-creator/gates/gate4", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim();
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const spec = buildGameCreatorSpecPackage(draft);
+  const readiness = await evaluateGate4Readiness({ workspacePath: workspace.path, spec });
+
+  res.json({
+    ok: true,
+    gateId: "gate-4-asset-approval",
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    ...readiness,
+  });
+});
+
+app.post("/api/tools/game-creator/gates/gate4/produce", async (req, res) => {
+  const body = req.body as { workspaceId?: string };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const draft = readGameCreatorDraft(state);
+  const spec = buildGameCreatorSpecPackage(draft);
+  const gate3Artifacts = await buildGate3Artifacts({ workspacePath: workspace.path, spec });
+  const gate4Artifacts = await buildGate4Artifacts({ workspacePath: workspace.path, spec, gate3Artifacts: gate3Artifacts.artifacts });
+  const animationReadiness = await buildAnimationReadinessManifest({ workspacePath: workspace.path, spec, gate3Artifacts: gate3Artifacts.artifacts, gate4Artifacts: gate4Artifacts.artifacts });
+  return res.json({ ok: true, gateId: "gate-4-asset-approval", workspaceId: workspace.id, workspacePath: workspace.path, animationReadiness, ...gate4Artifacts });
+});
+
 app.post("/api/tools/game-creator/process/start", async (req, res) => {
   const body = req.body as { workspaceId?: string; requireLocked?: boolean; mode?: GameCreatorExecutionMode };
   const state = await readSystemState();
@@ -9037,6 +9111,31 @@ app.post("/api/tools/game-creator/execution/artifacts/:artifactId/regenerate", a
       }
       : entry));
     await writeSystemState(nextState);
+    return res.status(500).json({ error: String(error) });
+  }
+});
+
+app.get("/api/tools/game-creator/artifact-preview", async (req, res) => {
+  const relativePath = String(req.query.relativePath ?? "").trim();
+  const workspaceId = String(req.query.workspaceId ?? "").trim() || undefined;
+  const download = String(req.query.download ?? "").trim().toLowerCase() === "1";
+  if (!relativePath) {
+    return res.status(400).json({ error: "relativePath is required" });
+  }
+
+  try {
+    const state = await readSystemState();
+    const workspace = await resolveWorkspaceContext(state, workspaceId);
+    const absolutePath = resolveWorkspaceTargetPath(workspace.path, relativePath);
+    await fs.access(absolutePath);
+
+    const content = await fs.readFile(absolutePath, "utf-8");
+    if (download) {
+      res.setHeader("Content-Disposition", `attachment; filename="${path.basename(absolutePath)}"`);
+    }
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    return res.send(content);
+  } catch (error) {
     return res.status(500).json({ error: String(error) });
   }
 });

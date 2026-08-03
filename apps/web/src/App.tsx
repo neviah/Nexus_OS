@@ -1229,6 +1229,30 @@ function getDefaultGameCreatorSetupWizardDraft(): GameCreatorSetupWizardDraft {
   };
 }
 
+function buildArtifactPreviewMetadata(input: { workspaceId: string; relativePath: string }) {
+  const normalized = input.relativePath.split("\\").join("/");
+
+  if (/\.(png|jpg|jpeg|webp|svg)$/i.test(normalized)) {
+    return {
+      kind: "image" as const,
+      previewUrl: `/api/tools/image/local/file?workspaceId=${encodeURIComponent(input.workspaceId)}&relativePath=${encodeURIComponent(normalized)}`,
+    };
+  }
+
+  if (/\.(json|md|txt|obj)$/i.test(normalized)) {
+    return {
+      kind: "text" as const,
+      previewUrl: `/api/tools/game-creator/artifact-preview?workspaceId=${encodeURIComponent(input.workspaceId)}&relativePath=${encodeURIComponent(normalized)}`,
+      downloadUrl: `/api/tools/game-creator/artifact-preview?workspaceId=${encodeURIComponent(input.workspaceId)}&relativePath=${encodeURIComponent(normalized)}&download=1`,
+    };
+  }
+
+  return {
+    kind: "download" as const,
+    downloadUrl: `/api/tools/game-creator/artifact-preview?workspaceId=${encodeURIComponent(input.workspaceId)}&relativePath=${encodeURIComponent(normalized)}&download=1`,
+  };
+}
+
 function App() {
   const [themeId, setThemeId] = useState<string>(() => {
     if (typeof window === "undefined") {
@@ -1382,7 +1406,11 @@ function App() {
   const [gameCreatorReviewBusyKey, setGameCreatorReviewBusyKey] = useState<string | null>(null);
   const [gameCreatorGate2Status, setGameCreatorGate2Status] = useState<GameCreatorGate2Status | null>(null);
   const [gameCreatorStartBusy, setGameCreatorStartBusy] = useState(false);
-  const [gameCreatorGate2Expanded, setGameCreatorGate2Expanded] = useState(false);
+  const [gameCreatorGateSectionsExpanded, setGameCreatorGateSectionsExpanded] = useState<Record<string, boolean>>({
+    gate2: true,
+    gate3: true,
+    gate4: true,
+  });
   const [gameCreatorShowMissingDocCards, setGameCreatorShowMissingDocCards] = useState(false);
   const [gameCreatorDocFocusFilter, setGameCreatorDocFocusFilter] = useState<"all" | "needs-review" | "quality-fail" | "unlocked">("needs-review");
   const [gameCreatorSectionControlsExpanded, setGameCreatorSectionControlsExpanded] = useState(false);
@@ -7764,32 +7792,61 @@ function App() {
 
               <section className="tool-section">
                 <div className="tool-header-row">
-                  <h3>Gate 2 Status</h3>
-                  <button type="button" className="ghost" onClick={() => setGameCreatorGate2Expanded((current) => !current)}>
-                    {gameCreatorGate2Expanded ? "Hide Details" : "Show Details"}
-                  </button>
+                  <h3>Workflow Gates</h3>
+                  <div className="tool-action-row">
+                    <button type="button" className="ghost" onClick={() => setGameCreatorGateSectionsExpanded((current) => ({
+                      ...current,
+                      gate2: !current.gate2,
+                      gate3: !current.gate3,
+                      gate4: !current.gate4,
+                    }))}>
+                      Toggle all
+                    </button>
+                  </div>
                 </div>
-                {gameCreatorGate2Status ? (
-                  <>
-                    <small className={gameCreatorGate2Status.ready ? "runtime-ready" : "runtime-warning"}>
-                      {gameCreatorGate2Status.ready
-                        ? "Gate 2 passed: required docs are approved and locked."
-                        : "Gate 2 blocked: approve and lock required canon docs first."}
-                    </small>
-                    <small>
-                      Required {gameCreatorGate2Status.summary.requiredDocs} · Existing {gameCreatorGate2Status.summary.existingDocs} · Approved {gameCreatorGate2Status.summary.approvedDocs} · Locked {gameCreatorGate2Status.summary.lockedDocs}
-                    </small>
-                    {gameCreatorGate2Expanded && gameCreatorGate2Status.blockers.length > 0 ? (
-                      <ul className="tool-list">
-                        {gameCreatorGate2Status.blockers.map((blocker) => (
-                          <li key={blocker}><small className="runtime-warning">{blocker}</small></li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </>
-                ) : (
-                  <small>No gate status yet. Click Start Game Creator Process to validate Gate 2.</small>
-                )}
+
+                <details className="tool-details" open={gameCreatorGateSectionsExpanded.gate2}>
+                  <summary>Gate 2 · Docs and approvals</summary>
+                  <div className="tool-list">
+                    {gameCreatorGate2Status ? (
+                      <>
+                        <small className={gameCreatorGate2Status.ready ? "runtime-ready" : "runtime-warning"}>
+                          {gameCreatorGate2Status.ready
+                            ? "Gate 2 passed: required docs are approved and locked."
+                            : "Gate 2 blocked: approve and lock required canon docs first."}
+                        </small>
+                        <small>
+                          Required {gameCreatorGate2Status.summary.requiredDocs} · Existing {gameCreatorGate2Status.summary.existingDocs} · Approved {gameCreatorGate2Status.summary.approvedDocs} · Locked {gameCreatorGate2Status.summary.lockedDocs}
+                        </small>
+                        {gameCreatorGate2Status.blockers.length > 0 ? (
+                          <ul className="tool-list">
+                            {gameCreatorGate2Status.blockers.map((blocker) => (
+                              <li key={blocker}><small className="runtime-warning">{blocker}</small></li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </>
+                    ) : (
+                      <small>No gate status yet. Click Start Game Creator Process to validate Gate 2.</small>
+                    )}
+                  </div>
+                </details>
+
+                <details className="tool-details" open={gameCreatorGateSectionsExpanded.gate3}>
+                  <summary>Gate 3 · Art direction and references</summary>
+                  <div className="tool-list">
+                    <small>Creates a style kit, production brief, reference pack, silhouettes, and readability references.</small>
+                    <small>Artifacts are generated during execution and appear in the artifact review below.</small>
+                  </div>
+                </details>
+
+                <details className="tool-details" open={gameCreatorGateSectionsExpanded.gate4}>
+                  <summary>Gate 4 · Asset manifest and validation</summary>
+                  <div className="tool-list">
+                    <small>Produces an import-ready asset manifest, validation report, and starter OBJ assets.</small>
+                    <small>The pipeline also writes an animation-readiness manifest for the next downstream content step.</small>
+                  </div>
+                </details>
               </section>
 
               <section className="tool-section">
@@ -8462,24 +8519,30 @@ function App() {
                     <small>No artifacts in this filter.</small>
                   ) : (
                     <ul className="tool-list">
-                      {gameCreatorVisibleExecutionArtifacts.map((artifact) => (
-                        <li key={artifact.id}>
-                          <strong>{artifact.queueItemTitle}</strong>
-                          <small>Kind: {artifact.kind} · Lane: {artifact.lane} · Status: {artifact.status}</small>
-                          <small>File: {artifact.relativePath}</small>
-                          {artifact.previewUrl ? (
-                            <small>
-                              <a href={artifact.previewUrl} target="_blank" rel="noreferrer">Preview artifact</a>
-                            </small>
-                          ) : null}
-                          <div className="tool-action-row">
-                            <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "approved")} disabled={gameCreatorExecutionBusyAction !== null}>Approve</button>
-                            <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "rejected")} disabled={gameCreatorExecutionBusyAction !== null}>Reject</button>
-                            <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "pending")} disabled={gameCreatorExecutionBusyAction !== null}>Reset</button>
-                            <button type="button" className="ghost" onClick={() => void regenerateGameCreatorArtifact(artifact.id)} disabled={gameCreatorExecutionBusyAction !== null}>Regenerate</button>
-                          </div>
-                        </li>
-                      ))}
+                      {gameCreatorVisibleExecutionArtifacts.map((artifact) => {
+                        const previewMeta = buildArtifactPreviewMetadata({ workspaceId: boot?.activeWorkspaceId ?? "", relativePath: artifact.relativePath });
+                        return (
+                          <li key={artifact.id}>
+                            <strong>{artifact.queueItemTitle}</strong>
+                            <small>Kind: {artifact.kind} · Lane: {artifact.lane} · Status: {artifact.status}</small>
+                            <small>File: {artifact.relativePath}</small>
+                            <div className="tool-action-row">
+                              {artifact.previewUrl || previewMeta.previewUrl ? (
+                                <a href={artifact.previewUrl ?? previewMeta.previewUrl} target="_blank" rel="noreferrer">Preview</a>
+                              ) : null}
+                              {previewMeta.downloadUrl ? (
+                                <a href={previewMeta.downloadUrl} target="_blank" rel="noreferrer">Download</a>
+                              ) : null}
+                            </div>
+                            <div className="tool-action-row">
+                              <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "approved")} disabled={gameCreatorExecutionBusyAction !== null}>Approve</button>
+                              <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "rejected")} disabled={gameCreatorExecutionBusyAction !== null}>Reject</button>
+                              <button type="button" className="ghost" onClick={() => void decideGameCreatorArtifact(artifact.id, "pending")} disabled={gameCreatorExecutionBusyAction !== null}>Reset</button>
+                              <button type="button" className="ghost" onClick={() => void regenerateGameCreatorArtifact(artifact.id)} disabled={gameCreatorExecutionBusyAction !== null}>Regenerate</button>
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </details>
