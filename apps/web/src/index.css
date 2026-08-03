@@ -829,6 +829,22 @@ button:disabled {
   gap: 8px;
 }
 
+.workflow-step-card.workflow-step-base {
+  background: rgba(18, 29, 35, 0.42);
+}
+
+.workflow-step-card.workflow-step-alt {
+  background: rgba(30, 45, 54, 0.5);
+}
+
+:root[data-theme="daybreak"] .workflow-step-card.workflow-step-base {
+  background: rgba(255, 255, 255, 0.9);
+}
+
+:root[data-theme="daybreak"] .workflow-step-card.workflow-step-alt {
+  background: rgba(255, 255, 255, 0.96);
+}
+
 .tool-details {
   border: 1px solid rgba(47, 71, 79, 0.35);
   border-radius: 8px;

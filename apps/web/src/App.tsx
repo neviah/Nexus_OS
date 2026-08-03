@@ -7950,7 +7950,7 @@ function App() {
                 )}
               </section>
 
-              <section className="tool-section">
+              <section className="tool-section workflow-step-card workflow-step-base">
                 <h3>Project Setup Wizard</h3>
                 <div className="stable-audio-form game-creator-setup-grid">
                   <label>
@@ -8163,7 +8163,7 @@ function App() {
                 </div>
               </section>
 
-              <section className="tool-section">
+              <section className="tool-section workflow-step-card workflow-step-alt">
                 <div className="tool-header-row">
                   <h3>Step 1.5: Concept Swarm Briefs</h3>
                   <button type="button" onClick={() => void generateGameCreatorConceptSwarm()} disabled={gameCreatorConceptSwarmBusy}>
@@ -8201,7 +8201,7 @@ function App() {
                 ) : null}
               </section>
 
-              <section className="tool-section">
+              <section className="tool-section workflow-step-card workflow-step-base">
                 <h3>Step 2: Generate Canon Docs</h3>
                 <div className="stable-audio-form">
                   <small>Default mode uses selected harnesses from Step 1 and keeps complexity low.</small>
@@ -8272,7 +8272,7 @@ function App() {
                 ) : null}
               </section>
 
-              <section className="tool-section">
+              <section className="tool-section workflow-step-card workflow-step-alt">
                 <div className="tool-header-row">
                   <h3>Step 3: Review, Lock, and Version</h3>
                   <div className="tool-action-row">
@@ -8373,7 +8373,7 @@ function App() {
                 )}
               </section>
 
-              <section className="tool-section">
+              <section className="tool-section workflow-step-card workflow-step-base">
                 <div className="tool-header-row">
                   <h3>Step 4: Execution Queue</h3>
                   <div className="tool-action-row">
