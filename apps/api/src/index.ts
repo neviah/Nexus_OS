@@ -9570,15 +9570,15 @@ app.post("/api/tools/unity/:action", async (req, res) => {
 app.post("/api/tools/game-creator/unity/run", async (req, res) => {
   const body = req.body as {
     workspaceId?: string;
-    action?: "generate" | "smoke" | "build" | "validate-assets" | "validate-performance";
+    action?: "generate" | "smoke-handoff" | "smoke" | "build" | "validate-assets" | "validate-performance";
     unityPath?: string;
   };
-  const action = pickEnumValue(body.action, ["generate", "smoke", "build", "validate-assets", "validate-performance"] as const, "generate");
+  const action = pickEnumValue(body.action, ["generate", "smoke-handoff", "smoke", "build", "validate-assets", "validate-performance"] as const, "generate");
   const state = await readSystemState();
   const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
   const unity = await detectUnityCliStatus();
   const unityPath = body.unityPath?.trim() || unity.selectedPath;
-  if (action === "generate") {
+  if (action === "generate" || action === "smoke-handoff") {
     const draft = readGameCreatorDraft(state);
     const spec = buildGameCreatorSpecPackage(draft);
     const canonStore = getGameCreatorCanonDocsStore(state);
@@ -9602,20 +9602,31 @@ app.post("/api/tools/game-creator/unity/run", async (req, res) => {
         unityPath: null,
         executed: false,
         projectPath: authoring.unityProjectPath,
-        method: authoring.methodName,
+        method: action === "smoke-handoff"
+          ? "NexusGenerated.GameCreatorAutomation.GenerateAndRunReadinessSmoke"
+          : authoring.methodName,
         logRelativePath: authoring.logRelativePath,
         planRelativePath: authoring.planRelativePath,
+        readinessReportRelativePath: authoring.readinessReportRelativePath,
         stagedFiles: authoring.stagedFiles,
-        message: "Unity project staged. Set UNITY_EDITOR_PATH to run the headless authoring step.",
+        message: action === "smoke-handoff"
+          ? "Unity project staged. Set UNITY_EDITOR_PATH to run the readiness smoke handoff step."
+          : "Unity project staged. Set UNITY_EDITOR_PATH to run the headless authoring step.",
       });
     }
 
-    const logPath = safeWorkspaceJoin(workspace.path, authoring.logRelativePath);
+    const method = action === "smoke-handoff"
+      ? "NexusGenerated.GameCreatorAutomation.GenerateAndRunReadinessSmoke"
+      : authoring.methodName;
+    const logRelativePath = action === "smoke-handoff"
+      ? `GameBuild/unity/Logs/smoke-handoff-${Date.now()}.log`
+      : authoring.logRelativePath;
+    const logPath = safeWorkspaceJoin(workspace.path, logRelativePath);
     await fs.mkdir(path.dirname(logPath), { recursive: true });
     const result = await runUnityBatchMethod({
       unityPath,
       projectPath: authoring.unityProjectPath,
-      method: authoring.methodName,
+      method,
       logPath,
     });
 
@@ -9624,12 +9635,13 @@ app.post("/api/tools/game-creator/unity/run", async (req, res) => {
       workspaceId: workspace.id,
       action,
       executed: true,
-      method: authoring.methodName,
+      method,
       unityPath,
       projectPath: authoring.unityProjectPath,
       command: result.command,
-      logRelativePath: authoring.logRelativePath,
+      logRelativePath,
       planRelativePath: authoring.planRelativePath,
+      readinessReportRelativePath: authoring.readinessReportRelativePath,
       stagedFiles: authoring.stagedFiles,
       stdout: result.stdout,
       stderr: result.stderr,

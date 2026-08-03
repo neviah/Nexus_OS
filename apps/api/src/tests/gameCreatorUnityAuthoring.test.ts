@@ -98,6 +98,7 @@ test("Game Creator stages a Unity authoring project from Gate 4 manifests", asyn
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorTechnicalProfileManifest.json")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorProductionPlanManifest.json")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/NexusGenerated/GameCreatorEncounterWireManifest.json")));
+  assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Generated/game-creator-readiness-score.json")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/SplashController.cs")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/GameFlowBootstrap.cs")));
   assert.ok(result.stagedFiles.some((entry) => entry.endsWith("GameBuild/unity/Assets/Scripts/GameCreator/Shell/GameSettingsProfile.cs")));
@@ -140,6 +141,7 @@ test("Game Creator stages a Unity authoring project from Gate 4 manifests", asyn
   assert.equal(result.technicalProfileManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorTechnicalProfileManifest.json");
   assert.equal(result.productionPlanManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorProductionPlanManifest.json");
   assert.equal(result.encounterWireManifestRelativePath, "GameBuild/unity/Assets/NexusGenerated/GameCreatorEncounterWireManifest.json");
+  assert.equal(result.readinessReportRelativePath, "GameBuild/unity/Assets/Generated/game-creator-readiness-score.json");
 
   const plan = JSON.parse(await fs.readFile(path.join(tempDir, result.planRelativePath), "utf8")) as { gate4: { enemyFamilies: Array<{ familyId: string }> } };
   assert.equal(plan.gate4.enemyFamilies.length, 5);
@@ -181,6 +183,10 @@ test("Game Creator stages a Unity authoring project from Gate 4 manifests", asyn
 
   const encounterManifest = JSON.parse(await fs.readFile(path.join(tempDir, result.encounterWireManifestRelativePath), "utf8")) as { encounterWire: { spawnRules: string[] } };
   assert.ok(encounterManifest.encounterWire.spawnRules.length >= 1);
+
+  const readinessManifest = JSON.parse(await fs.readFile(path.join(tempDir, result.readinessReportRelativePath), "utf8")) as { status: string; score: number };
+  assert.equal(readinessManifest.status, "pending-unity-run");
+  assert.equal(readinessManifest.score, 0);
 
   await fs.rm(tempDir, { recursive: true, force: true });
 });
