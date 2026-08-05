@@ -1055,6 +1055,53 @@ type GameCreatorExecutionStatusResponse = {
   queueSummary: GameCreatorQueueSummary;
 };
 
+type AutopilotLoopProfile = "free" | "cost" | "custom";
+
+type AutopilotFallbackTarget = {
+  providerId: string;
+  model: string;
+};
+
+type AutopilotLoopConfig = {
+  profile: AutopilotLoopProfile;
+  backendHarnessId: string;
+  maxSteps: number;
+  maxDurationMinutes: number;
+  maxRetriesPerTask: number;
+  customFallbackChain: AutopilotFallbackTarget[];
+  updatedAt: string;
+  lastRun?: {
+    status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
+    startedAt?: string;
+    finishedAt?: string;
+    stepsExecuted?: number;
+    blocker?: string;
+    mode?: GameCreatorExecutionMode;
+  };
+};
+
+type AutopilotLoopProfileResponse = {
+  ok: boolean;
+  agentId: string;
+  config: AutopilotLoopConfig;
+  effectiveFallbackChain: AutopilotFallbackTarget[];
+  effectiveSource: string;
+  profileOptions?: AutopilotLoopProfile[];
+};
+
+type AutopilotLoopStatusResponse = {
+  ok: boolean;
+  workspaceId: string;
+  workspacePath: string;
+  agentId: string;
+  config: AutopilotLoopConfig;
+  effectiveFallbackChain: AutopilotFallbackTarget[];
+  effectiveSource: string;
+  queueSummary: GameCreatorQueueSummary;
+  executionRun: GameCreatorExecutionRunState;
+  lastRun?: AutopilotLoopConfig["lastRun"];
+};
+
 type GameCreatorSpriteResult = {
   imageUrl: string;
   relativePath: string;
@@ -1448,6 +1495,12 @@ function App() {
   const [gameCreatorSpriteTrace, setGameCreatorSpriteTrace] = useState("");
   const [gameCreatorSpriteResult, setGameCreatorSpriteResult] = useState<GameCreatorSpriteResult | null>(null);
   const gameCreatorSpriteAbortRef = useRef<AbortController | null>(null);
+  const [autopilotLoopConfig, setAutopilotLoopConfig] = useState<AutopilotLoopConfig | null>(null);
+  const [autopilotLoopEffectiveChain, setAutopilotLoopEffectiveChain] = useState<AutopilotFallbackTarget[]>([]);
+  const [autopilotLoopEffectiveSource, setAutopilotLoopEffectiveSource] = useState("none");
+  const [autopilotLoopStatus, setAutopilotLoopStatus] = useState<AutopilotLoopStatusResponse | null>(null);
+  const [autopilotLoopBusyAction, setAutopilotLoopBusyAction] = useState<"load" | "save" | "run-step" | "run-until-blocker" | null>(null);
+  const [autopilotLoopMaxStepsDraft, setAutopilotLoopMaxStepsDraft] = useState(10);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -3287,6 +3340,133 @@ function App() {
       pushToast(String(error), "err");
     } finally {
       setGameCreatorExecutionBusyAction(null);
+    }
+  }
+
+  async function loadAutopilotLoopProfile() {
+    const response = await fetch("/api/tools/autopilot-loop/profile");
+    if (!response.ok) {
+      throw new Error("Failed to load Autopilot profile.");
+    }
+    const payload = (await response.json()) as AutopilotLoopProfileResponse;
+    setAutopilotLoopConfig(payload.config);
+    setAutopilotLoopEffectiveChain(payload.effectiveFallbackChain ?? []);
+    setAutopilotLoopEffectiveSource(payload.effectiveSource ?? "none");
+    setAutopilotLoopMaxStepsDraft(payload.config?.maxSteps ?? 10);
+  }
+
+  async function loadAutopilotLoopStatus() {
+    const response = await fetch(`/api/tools/autopilot-loop/status?workspaceId=${encodeURIComponent(boot?.activeWorkspaceId ?? "")}`);
+    if (!response.ok) {
+      throw new Error("Failed to load Autopilot status.");
+    }
+    const payload = (await response.json()) as AutopilotLoopStatusResponse;
+    setAutopilotLoopStatus(payload);
+    setAutopilotLoopConfig(payload.config);
+    setAutopilotLoopEffectiveChain(payload.effectiveFallbackChain ?? []);
+    setAutopilotLoopEffectiveSource(payload.effectiveSource ?? "none");
+  }
+
+  async function refreshAutopilotLoopPanel() {
+    setAutopilotLoopBusyAction("load");
+    try {
+      await loadAutopilotLoopProfile();
+      await loadAutopilotLoopStatus();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setAutopilotLoopBusyAction(null);
+    }
+  }
+
+  async function saveAutopilotLoopProfile() {
+    if (!autopilotLoopConfig) {
+      return;
+    }
+    setAutopilotLoopBusyAction("save");
+    try {
+      const response = await fetch("/api/tools/autopilot-loop/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: autopilotLoopConfig.profile,
+          backendHarnessId: autopilotLoopConfig.backendHarnessId,
+          maxSteps: autopilotLoopConfig.maxSteps,
+          maxDurationMinutes: autopilotLoopConfig.maxDurationMinutes,
+          maxRetriesPerTask: autopilotLoopConfig.maxRetriesPerTask,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to save Autopilot profile.");
+      }
+      const payload = (await response.json()) as AutopilotLoopProfileResponse;
+      setAutopilotLoopConfig(payload.config);
+      setAutopilotLoopEffectiveChain(payload.effectiveFallbackChain ?? []);
+      setAutopilotLoopEffectiveSource(payload.effectiveSource ?? "none");
+      setStatusMessage("Autopilot profile saved.");
+      pushToast("Autopilot profile saved.", "ok");
+      await loadAutopilotLoopStatus();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setAutopilotLoopBusyAction(null);
+    }
+  }
+
+  async function runAutopilotLoopStep() {
+    setAutopilotLoopBusyAction("run-step");
+    try {
+      const response = await fetch("/api/tools/autopilot-loop/run-step", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          mode: gameCreatorExecutionMode,
+        }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Autopilot step failed.");
+      }
+      pushToast("Autopilot executed one step.", "ok");
+      await loadGameCreatorQueue();
+      await loadGameCreatorExecutionStatus();
+      await loadAutopilotLoopStatus();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setAutopilotLoopBusyAction(null);
+    }
+  }
+
+  async function runAutopilotUntilBlocker() {
+    setAutopilotLoopBusyAction("run-until-blocker");
+    try {
+      const response = await fetch("/api/tools/autopilot-loop/run-until-blocker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          mode: gameCreatorExecutionMode,
+          maxSteps: autopilotLoopMaxStepsDraft,
+        }),
+      });
+      const payload = (await response.json()) as { blocker?: string; stepsExecuted?: number; error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? payload.blocker ?? "Autopilot run failed.");
+      }
+      pushToast(`Autopilot executed ${payload.stepsExecuted ?? 0} step(s).`, payload.blocker ? "warn" : "ok");
+      await loadGameCreatorQueue();
+      await loadGameCreatorExecutionStatus();
+      await loadAutopilotLoopStatus();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setAutopilotLoopBusyAction(null);
     }
   }
 
@@ -5180,6 +5360,9 @@ function App() {
     if (selectedPane.type === "tool" && selectedPane.id === "game-creator") {
       void loadGameCreatorSetupWizard();
     }
+    if (selectedPane.type === "tool" && selectedPane.id === "autopilot-loop") {
+      void refreshAutopilotLoopPanel();
+    }
     if (selectedPane.type === "tool" && selectedPane.id === "settings") {
       void loadGitStatus();
       void loadGitHubConnectorStatus();
@@ -6340,7 +6523,7 @@ function App() {
 
             {toolsOpen ? (
               <ul className="nav-list">
-                {boot?.tools.filter((tool) => tool.id !== "9router" && tool.id !== "settings" && tool.id !== "game-creator").map((tool) => {
+                {boot?.tools.filter((tool) => tool.id !== "9router" && tool.id !== "settings" && tool.id !== "game-creator" && tool.id !== "autopilot-loop").map((tool) => {
                   const isActive = selectedPane.type === "tool" && selectedPane.id === tool.id;
                   return (
                     <li key={tool.id}>
@@ -6377,6 +6560,19 @@ function App() {
                   <span className="meta-block">
                     <strong>Game Creator</strong>
                     <small>planning + docs + gates</small>
+                  </span>
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  className={`nav-item ${selectedPane.type === "tool" && selectedPane.id === "autopilot-loop" ? "active" : ""}`}
+                  onClick={() => setSelectedPane({ type: "tool", id: "autopilot-loop" })}
+                >
+                  <span className="health healthy" />
+                  <span className="meta-block">
+                    <strong>Nexus Autopilot Loop</strong>
+                    <small>self-driving queue runner</small>
                   </span>
                 </button>
               </li>
@@ -8634,6 +8830,147 @@ function App() {
             </div>
           ) : null}
 
+          {selectedPane.type === "tool" && selectedPane.id === "autopilot-loop" ? (
+            <div className="tool-view tool-console">
+              <div className="tool-header-row">
+                <div>
+                  <h2>Nexus Autopilot Loop</h2>
+                  <p className="subtitle">Run one-step or bounded loop execution with profile-based routing and checkpoint visibility.</p>
+                </div>
+                <div className="tool-action-row">
+                  <button type="button" className="ghost" onClick={() => void refreshAutopilotLoopPanel()} disabled={autopilotLoopBusyAction !== null}>
+                    {autopilotLoopBusyAction === "load" ? "Refreshing..." : "Refresh"}
+                  </button>
+                </div>
+              </div>
+
+              <section className="tool-section">
+                <div className="tool-header-row">
+                  <h3>Profile</h3>
+                  <button type="button" onClick={() => void saveAutopilotLoopProfile()} disabled={autopilotLoopBusyAction !== null || !autopilotLoopConfig}>
+                    {autopilotLoopBusyAction === "save" ? "Saving..." : "Save Profile"}
+                  </button>
+                </div>
+                {autopilotLoopConfig ? (
+                  <div className="stable-audio-form game-creator-setup-grid">
+                    <label>
+                      <span>Profile</span>
+                      <select
+                        value={autopilotLoopConfig.profile}
+                        onChange={(event) => setAutopilotLoopConfig((current) => current ? { ...current, profile: event.target.value as AutopilotLoopProfile } : current)}
+                        disabled={autopilotLoopBusyAction !== null}
+                      >
+                        <option value="free">Free</option>
+                        <option value="cost">Cost</option>
+                        <option value="custom">Custom</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Backend Harness</span>
+                      <select
+                        value={autopilotLoopConfig.backendHarnessId}
+                        onChange={(event) => setAutopilotLoopConfig((current) => current ? { ...current, backendHarnessId: event.target.value } : current)}
+                        disabled={autopilotLoopBusyAction !== null}
+                      >
+                        {(boot?.harnesses ?? []).map((harness) => (
+                          <option key={harness.id} value={harness.id}>{harness.name} ({harness.status})</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Default Max Steps</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={200}
+                        value={autopilotLoopConfig.maxSteps}
+                        onChange={(event) => {
+                          const next = Math.max(1, Math.min(200, Number(event.target.value || 1)));
+                          setAutopilotLoopConfig((current) => current ? { ...current, maxSteps: next } : current);
+                          setAutopilotLoopMaxStepsDraft(next);
+                        }}
+                      />
+                    </label>
+                    <label>
+                      <span>Max Duration (minutes)</span>
+                      <input
+                        type="number"
+                        min={5}
+                        max={480}
+                        value={autopilotLoopConfig.maxDurationMinutes}
+                        onChange={(event) => setAutopilotLoopConfig((current) => current ? { ...current, maxDurationMinutes: Math.max(5, Math.min(480, Number(event.target.value || 5))) } : current)}
+                      />
+                    </label>
+                    <label>
+                      <span>Retries Per Task</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={autopilotLoopConfig.maxRetriesPerTask}
+                        onChange={(event) => setAutopilotLoopConfig((current) => current ? { ...current, maxRetriesPerTask: Math.max(0, Math.min(10, Number(event.target.value || 0))) } : current)}
+                      />
+                    </label>
+                    {autopilotLoopConfig.profile === "cost" ? (
+                      <div className="game-creator-setup-span autopilot-cost-warning">
+                        <strong>Cost Profile Active</strong>
+                        <small>This mode may route to paid models. Switch to Free to avoid spend.</small>
+                      </div>
+                    ) : null}
+                    <div className="game-creator-setup-span tool-list">
+                      <small>Effective chain source: {autopilotLoopEffectiveSource}</small>
+                      {autopilotLoopEffectiveChain.length ? (
+                        <ul>
+                          {autopilotLoopEffectiveChain.map((entry, index) => (
+                            <li key={`${entry.providerId}-${entry.model}-${index}`}><small>{entry.providerId} :: {entry.model}</small></li>
+                          ))}
+                        </ul>
+                      ) : <small className="runtime-warning">No effective fallback chain configured yet.</small>}
+                    </div>
+                  </div>
+                ) : <small>Autopilot profile not loaded yet.</small>}
+              </section>
+
+              <section className="tool-section">
+                <div className="tool-header-row">
+                  <h3>Runner Controls</h3>
+                  <div className="tool-action-row">
+                    <label>
+                      <span>Mode</span>
+                      <select value={gameCreatorExecutionMode} onChange={(event) => void saveGameCreatorExecutionMode(event.target.value as GameCreatorExecutionMode)} disabled={autopilotLoopBusyAction !== null}>
+                        <option value="strict-approval">Strict approval</option>
+                        <option value="auto-produce">Auto-produce</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Run-Until-Blocker Steps</span>
+                      <input type="number" min={1} max={200} value={autopilotLoopMaxStepsDraft} onChange={(event) => setAutopilotLoopMaxStepsDraft(Math.max(1, Math.min(200, Number(event.target.value || 1))))} />
+                    </label>
+                    <button type="button" onClick={() => void runAutopilotLoopStep()} disabled={autopilotLoopBusyAction !== null}>
+                      {autopilotLoopBusyAction === "run-step" ? "Running Step..." : "Run Step"}
+                    </button>
+                    <button type="button" className="ghost" onClick={() => void runAutopilotUntilBlocker()} disabled={autopilotLoopBusyAction !== null}>
+                      {autopilotLoopBusyAction === "run-until-blocker" ? "Running Loop..." : "Run Until Blocker"}
+                    </button>
+                  </div>
+                </div>
+                {autopilotLoopStatus ? (
+                  <div className="tool-list">
+                    <small>Queue: Total {autopilotLoopStatus.queueSummary.total} · Ready {autopilotLoopStatus.queueSummary.ready} · Blocked {autopilotLoopStatus.queueSummary.blocked} · Done {autopilotLoopStatus.queueSummary.done}</small>
+                    <small>Execution run: {autopilotLoopStatus.executionRun.status}{autopilotLoopStatus.executionRun.message ? ` · ${autopilotLoopStatus.executionRun.message}` : ""}</small>
+                    {autopilotLoopStatus.lastRun ? (
+                      <small>
+                        Last run: {autopilotLoopStatus.lastRun.status}
+                        {autopilotLoopStatus.lastRun.stepsExecuted !== undefined ? ` · steps ${autopilotLoopStatus.lastRun.stepsExecuted}` : ""}
+                        {autopilotLoopStatus.lastRun.blocker ? ` · blocker ${autopilotLoopStatus.lastRun.blocker}` : ""}
+                      </small>
+                    ) : null}
+                  </div>
+                ) : <small>No Autopilot status yet.</small>}
+              </section>
+            </div>
+          ) : null}
+
           {selectedPane.type === "tool" && selectedPane.id === "settings" ? (
             <div className="tool-view tool-console">
               <div className="tool-header-row">
@@ -9105,7 +9442,7 @@ function App() {
             </div>
           ) : null}
 
-          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator", "image-generator", "media-center", "settings", "game-creator"].includes(selectedPane.id) ? (
+          {selectedPane.type === "tool" && !["nexus-router", "cookbook", "voice-studio", "music-generator", "image-generator", "media-center", "settings", "game-creator", "autopilot-loop"].includes(selectedPane.id) ? (
             <div className="placeholder-view">
               <h2>{boot?.tools.find((tool) => tool.id === selectedPane.id)?.name ?? "Tool"}</h2>
               <p>Tool plugin slot ready. Hook this panel to a future backend module.</p>
