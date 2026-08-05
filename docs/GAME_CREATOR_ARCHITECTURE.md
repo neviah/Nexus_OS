@@ -525,6 +525,83 @@ The Game Creator workflow should plug into existing NexusOS capabilities rather 
 - State persistence: store project spec packages, canon doc versions, gate status, and approval history in local state files.
 - Task resume engine: preserve long-running generation or review operations so they can continue after interruption.
 
+## 9.6) Execution Orchestration and Queue Discipline
+
+The pipeline should behave like a governed production queue, not a freeform prompt loop.
+
+Core rules:
+- Every major stage must be represented as a task with explicit dependencies, inputs, outputs, and approval state.
+- Only one task may write to a given artifact at a time.
+- Each task must record the canon doc version it used and the exact artifact bundle it produced.
+- If a prerequisite artifact is missing or outdated, the task must stop and request a revision rather than proceed on stale assumptions.
+- Long-running work should be resumable and should preserve intermediate state so the system can continue after interruption.
+
+Recommended queue model:
+- Intake queue: setup wizard, project spec package, and initial approval.
+- Doc queue: canon doc drafting and review.
+- Asset queue: art and audio production tasks, one batch at a time.
+- Integration queue: gameplay wiring, scene assembly, and Unity import validation.
+- Polish queue: tuning, balancing, and release candidate checks.
+
+This keeps the LLM workflow serial and understandable. The system can still parallelize low-risk read-only analysis, but content-writing steps should be serialized by artifact ownership.
+
+## 9.7) Unity Handoff Artifact Bundle
+
+For a credible Unity handoff, the workflow must emit a structured handoff bundle at each approved gate.
+
+Minimum contents of the bundle:
+- Asset manifest: every approved asset, variant, purpose, and source reference.
+- Scene manifest: scenes, scene order, entry points, and required dependencies.
+- Prefab and runtime catalog: gameplay objects, spawn points, and controller bindings.
+- Gameplay data manifest: enemy roster references, encounter data, difficulty tuning, and reward tables.
+- Audio manifest: music stems, SFX packs, loop tags, and scene usage mapping.
+- Validation report: import checks, build checks, performance sanity checks, and unresolved issues.
+- Build notes: platform-specific export settings, known caveats, and review follow-ups.
+
+Handoff rule:
+- If the bundle is incomplete, the next stage must not proceed as if the work were production-ready.
+- The Unity shell should consume the bundle directly rather than relying on loose natural-language instructions.
+
+## 9.8) Generator Strategy (Bounded, Structured, Reviewable)
+
+Generators are useful, but they should be treated as draft accelerators rather than final authorities.
+
+Recommended generator families for V1:
+- Level and encounter layout generator.
+- Dialogue variant generator.
+- NPC and enemy profile generator.
+- Loot and reward curve generator.
+- Audio variation generator for ambience, hits, and UI feedback.
+
+Generator rules:
+- Every generator must output structured data first: JSON, YAML, or manifest-based content.
+- Generators should be constrained by the approved art bible, difficulty curve, and scope tier.
+- They should not invent new visual identity or tone outside the approved style kit.
+- Generated output should be reviewable and traceable to the originating spec and canon docs.
+- Final content should pass a validation gate before being promoted to the playable build.
+
+This keeps the system practical: generators accelerate iteration, but the canon docs and approval gates stay in control.
+
+## 9.9) Quality Asset Library and Production Floor
+
+Even with good generators, the workflow still needs a quality floor.
+
+The system should maintain a curated starter library of:
+- base character silhouettes and modular body parts
+- environment tiles, props, and modular set pieces
+- UI panels, icons, and HUD elements
+- music stems and looping ambience
+- SFX layers for impacts, UI, movement, and combat
+- animation loop templates for idle, walk, attack, hit, and death states
+
+Why this matters:
+- LLMs are good at variation and adaptation, but weak at producing consistently polished first-pass content from nothing.
+- A small high-quality library makes the generated content feel more coherent and reduces rework.
+- The generator should remix and extend these assets within approved style constraints rather than inventing new visual language on the fly.
+
+Production rule:
+- Every generated asset should have a fallback path to a curated base asset if the generated variant is rejected or fails validation.
+
 ## 10) Doc-To-System Mapping
 
 The canon docs should directly shape the generated game shell and content defaults:
@@ -555,7 +632,11 @@ This makes the Game Creator flow feel native to NexusOS instead of being bolted 
 1. Build the Setup Wizard and emit Project Spec Package.
 2. Build canon-doc generator from wizard output.
 3. Build Gate 1 and Gate 2 workflow engine with approvals.
-4. Build expansion request intake + impact analysis for enemy-related requests.
-5. Build Unity adapter for project scaffold + asset import + build checks.
+4. Implement the task queue and artifact-lock model so content stages run one-at-a-time by ownership.
+5. Define the Unity handoff bundle schema and validation report format.
+6. Implement bounded generators for encounter, dialogue, and enemy content using structured output.
+7. Stand up a curated starter asset library and asset manifest pipeline.
+8. Build expansion request intake + impact analysis for enemy-related requests.
+9. Build Unity adapter for project scaffold + asset import + build checks.
 
 This sequence gives a real end-to-end skeleton before deep content automation.

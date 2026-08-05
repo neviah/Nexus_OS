@@ -2743,6 +2743,78 @@ function buildGameCreatorExecutionQueueFromStatus(status: Array<{
   });
 }
 
+async function buildAndPersistGameCreatorExecutionQueue(input: {
+  state: SystemState;
+  workspacePath: string;
+  mode: GameCreatorExecutionMode;
+  requireLocked: boolean;
+}): Promise<{
+  builtAt: string;
+  items: GameCreatorQueueItem[];
+  blockers: string[];
+  readyForExecution: boolean;
+  impactSummary: {
+    changedDocs: string[];
+    impactedQueueItems: number;
+  };
+  summary: {
+    total: number;
+    ready: number;
+    inProgress: number;
+    blocked: number;
+    done: number;
+    backlog: number;
+  };
+}> {
+  const draft = readGameCreatorDraft(input.state);
+  const spec = buildGameCreatorSpecPackage(draft);
+  const files = buildCanonDocTemplateFiles(spec).filter((entry) => entry.fileName !== "CANON_DOC_INDEX.md");
+  const store = getGameCreatorCanonDocsStore(input.state);
+  const status = await readCanonDocStatus({
+    workspacePath: input.workspacePath,
+    files,
+    records: store.records,
+    snapshots: store.snapshots,
+    scopeTier: spec.setupWizard.scopeTier,
+  });
+  const readiness = await evaluateGate2Readiness({
+    state: input.state,
+    workspacePath: input.workspacePath,
+    requireLocked: input.requireLocked,
+    requireApproved: input.mode === "strict-approval",
+  });
+  const items = annotateQueueItemBlockers({
+    items: buildGameCreatorExecutionQueueFromStatus(status, input.mode),
+    mode: input.mode,
+    artifacts: getGameCreatorExecutionArtifacts(input.state),
+  });
+  const builtAt = new Date().toISOString();
+  const changedDocs = Object.values(store.records)
+    .filter((record) => record.lastDiffSummary?.changed)
+    .map((record) => record.fileName);
+  const impactedItems = items.filter((entry) => changedDocs.includes(entry.sourceDocFile));
+  writeGameCreatorExecutionQueueStore(input.state, { builtAt, items });
+
+  return {
+    builtAt,
+    items,
+    blockers: readiness.blockers,
+    readyForExecution: readiness.ready,
+    impactSummary: {
+      changedDocs,
+      impactedQueueItems: impactedItems.length,
+    },
+    summary: {
+      total: items.length,
+      ready: items.filter((entry) => entry.status === "ready").length,
+      inProgress: items.filter((entry) => entry.status === "in-progress").length,
+      blocked: items.filter((entry) => entry.status === "blocked").length,
+      done: items.filter((entry) => entry.status === "done").length,
+      backlog: items.filter((entry) => entry.status === "backlog").length,
+    },
+  };
+}
+
 function buildGameCreatorScaffoldFiles(input: {
   spec: GameCreatorSpecPackage;
   item: GameCreatorQueueItem;
@@ -4451,6 +4523,14 @@ async function runNextGameCreatorExecutionStep(input: {
       requireApproved: true,
     });
     if (!readiness.ready) {
+      await appendGameCreatorExecutionJournalEntry({
+        workspacePath: workspace.path,
+        mode: input.mode,
+        status: "blocked",
+        summary: "Gate 2 blocked execution step.",
+        blocker: `Gate 2 is blocked: ${readiness.blockers.join(" | ")}`,
+        complete: false,
+      });
       return {
         ok: false,
         mode: input.mode,
@@ -4470,6 +4550,14 @@ async function runNextGameCreatorExecutionStep(input: {
       items: refreshedItems,
     });
     await writeSystemState(state);
+    await appendGameCreatorExecutionJournalEntry({
+      workspacePath: workspace.path,
+      mode: input.mode,
+      status: "blocked",
+      summary: "No executable queue item was available.",
+      blocker: pick.blocker,
+      complete: refreshedItems.length > 0 && refreshedItems.every((entry) => entry.status === "done"),
+    });
     return {
       ok: false,
       mode: input.mode,
@@ -4551,6 +4639,19 @@ async function runNextGameCreatorExecutionStep(input: {
         }),
       });
       await writeSystemState(nextState);
+      await appendGameCreatorExecutionJournalEntry({
+        workspacePath: workspace.path,
+        mode: input.mode,
+        status: "failed",
+        summary: "Queue item failed quality gate checks.",
+        jobId: job.id,
+        queueItemTitle: nextItem.title,
+        queueItemLane: nextItem.lane,
+        outputs: result.outputs,
+        warnings: [...result.warnings, ...result.gateFailures],
+        blocker: failureMessage,
+        complete: false,
+      });
 
       return {
         ok: false,
@@ -4587,6 +4688,19 @@ async function runNextGameCreatorExecutionStep(input: {
       }),
     });
     await writeSystemState(nextState);
+    const finalQueue = getGameCreatorExecutionQueueStore(nextState);
+    await appendGameCreatorExecutionJournalEntry({
+      workspacePath: workspace.path,
+      mode: input.mode,
+      status: "completed",
+      summary: "Queue item executed successfully.",
+      jobId: job.id,
+      queueItemTitle: nextItem.title,
+      queueItemLane: nextItem.lane,
+      outputs: result.outputs,
+      warnings: result.warnings,
+      complete: finalQueue.items.length > 0 && finalQueue.items.every((entry) => entry.status === "done"),
+    });
 
     return {
       ok: true,
@@ -4618,6 +4732,17 @@ async function runNextGameCreatorExecutionStep(input: {
       }),
     });
     await writeSystemState(nextState);
+    await appendGameCreatorExecutionJournalEntry({
+      workspacePath: workspace.path,
+      mode: input.mode,
+      status: "failed",
+      summary: "Queue item execution threw an exception.",
+      jobId: job.id,
+      queueItemTitle: nextItem.title,
+      queueItemLane: nextItem.lane,
+      blocker: String(error),
+      complete: false,
+    });
 
     return {
       ok: false,
@@ -5534,6 +5659,48 @@ async function ensureWorkspaceHarnessLogsDir(
 
 async function appendHarnessChatRunLog(logFilePath: string, entry: Record<string, unknown>): Promise<void> {
   await fs.appendFile(logFilePath, `${JSON.stringify(entry)}\n`, "utf-8");
+}
+
+async function appendGameCreatorExecutionJournalEntry(input: {
+  workspacePath: string;
+  mode: GameCreatorExecutionMode;
+  status: "completed" | "failed" | "blocked";
+  summary: string;
+  jobId?: string;
+  queueItemTitle?: string;
+  queueItemLane?: GameCreatorQueueLane;
+  outputs?: string[];
+  warnings?: string[];
+  blocker?: string;
+  complete?: boolean;
+}): Promise<void> {
+  const journalDir = path.join(input.workspacePath, "GameBuild", "workflow");
+  await fs.mkdir(journalDir, { recursive: true });
+  const journalPath = path.join(journalDir, "execution-journal.md");
+  const stamp = new Date().toISOString();
+  const lines = [
+    `## ${stamp}`,
+    `- Mode: ${input.mode}`,
+    `- Status: ${input.status}`,
+    `- Summary: ${input.summary}`,
+    `- Job: ${input.jobId ?? "n/a"}`,
+    `- Queue Item: ${input.queueItemTitle ?? "n/a"}`,
+    `- Lane: ${input.queueItemLane ?? "n/a"}`,
+    `- Workflow Complete: ${input.complete === true ? "yes" : "no"}`,
+  ];
+
+  if (input.blocker) {
+    lines.push(`- Blocker: ${input.blocker}`);
+  }
+  if ((input.outputs ?? []).length > 0) {
+    lines.push(`- Outputs: ${(input.outputs ?? []).slice(0, 6).join(" | ")}`);
+  }
+  if ((input.warnings ?? []).length > 0) {
+    lines.push(`- Warnings: ${(input.warnings ?? []).slice(0, 6).join(" | ")}`);
+  }
+
+  lines.push("");
+  await fs.appendFile(journalPath, `${lines.join("\n")}\n`, "utf-8");
 }
 
 function extractAppliedWritePaths(content: string): string[] {
@@ -8601,9 +8768,64 @@ app.post("/api/tools/game-creator/workflow/run", async (req, res) => {
     queueCompleted: queueStore.items.every((item) => item.status === "done"),
   });
 
+  const stageResults: Array<{
+    stage: "build-queue" | "run-execution";
+    ok: boolean;
+    summary?: string;
+    details?: Record<string, unknown>;
+  }> = [];
+
+  let queueItems = queueStore.items;
+  if (plan.steps.includes("build-queue") && queueItems.length === 0) {
+    const queueBuild = await buildAndPersistGameCreatorExecutionQueue({
+      state,
+      workspacePath: workspace.path,
+      mode: requestedMode,
+      requireLocked: requestedMode === "strict-approval",
+    });
+    queueItems = queueBuild.items;
+    stageResults.push({
+      stage: "build-queue",
+      ok: true,
+      summary: `Queue built with ${queueBuild.summary.total} item(s).`,
+      details: {
+        builtAt: queueBuild.builtAt,
+        queueSummary: queueBuild.summary,
+        blockers: queueBuild.blockers,
+      },
+    });
+  }
+
+  await writeSystemState(state);
+
+  if (plan.steps.includes("run-execution") && queueItems.some((item) => item.status === "ready")) {
+    const step = await runNextGameCreatorExecutionStep({ workspaceId: workspace.id, mode: requestedMode });
+    stageResults.push({
+      stage: "run-execution",
+      ok: step.ok,
+      summary: step.ok
+        ? `Executed queue item: ${step.job?.queueItemTitle ?? "(unknown)"}.`
+        : `Execution did not advance: ${step.blocker ?? "unknown blocker"}`,
+      details: {
+        jobId: step.job?.id,
+        queueItemId: step.job?.queueItemId,
+        warnings: step.warnings ?? [],
+        blocker: step.blocker,
+        statusCode: step.statusCode,
+      },
+    });
+  }
+
   await appendGameCreatorWorkflowEvent(workspace.id, "workflow-run", `Workflow run initiated with plan: ${plan.steps.join(" → ")}`, "info", { plan });
 
-  return res.json({ ok: true, workspaceId: workspace.id, workspacePath: workspace.path, mode: requestedMode, plan });
+  return res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    mode: requestedMode,
+    plan,
+    stageResults,
+  });
 });
 
 app.get("/api/tools/game-creator/queue", async (req, res) => {
@@ -8656,57 +8878,25 @@ app.post("/api/tools/game-creator/queue/build", async (req, res) => {
   const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
   const mode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
   writeGameCreatorExecutionMode(state, mode);
-  const draft = readGameCreatorDraft(state);
-  const spec = buildGameCreatorSpecPackage(draft);
-  const files = buildCanonDocTemplateFiles(spec).filter((entry) => entry.fileName !== "CANON_DOC_INDEX.md");
-  const store = getGameCreatorCanonDocsStore(state);
-  const status = await readCanonDocStatus({
-    workspacePath: workspace.path,
-    files,
-    records: store.records,
-    snapshots: store.snapshots,
-    scopeTier: spec.setupWizard.scopeTier,
-  });
-  const readiness = await evaluateGate2Readiness({
+  const queueBuild = await buildAndPersistGameCreatorExecutionQueue({
     state,
     workspacePath: workspace.path,
-    requireLocked: mode === "strict-approval" ? body.requireLocked !== false : false,
-    requireApproved: mode === "strict-approval",
-  });
-  const items = annotateQueueItemBlockers({
-    items: buildGameCreatorExecutionQueueFromStatus(status, mode),
     mode,
-    artifacts: getGameCreatorExecutionArtifacts(state),
+    requireLocked: mode === "strict-approval" ? body.requireLocked !== false : false,
   });
-  const builtAt = new Date().toISOString();
-  const changedDocs = Object.values(store.records)
-    .filter((record) => record.lastDiffSummary?.changed)
-    .map((record) => record.fileName);
-  const impactedItems = items.filter((entry) => changedDocs.includes(entry.sourceDocFile));
-  writeGameCreatorExecutionQueueStore(state, { builtAt, items });
   await writeSystemState(state);
-  await appendGameCreatorWorkflowEvent(workspace.id, "queue-built", `Queue built with ${items.length} item(s).`, readiness.ready ? "info" : "warn", { itemCount: items.length, blockers: readiness.blockers, mode });
+  await appendGameCreatorWorkflowEvent(workspace.id, "queue-built", `Queue built with ${queueBuild.items.length} item(s).`, queueBuild.readyForExecution ? "info" : "warn", { itemCount: queueBuild.items.length, blockers: queueBuild.blockers, mode });
 
   return res.json({
     ok: true,
     workspaceId: workspace.id,
-    builtAt,
-    readyForExecution: readiness.ready,
+    builtAt: queueBuild.builtAt,
+    readyForExecution: queueBuild.readyForExecution,
     mode,
-    blockers: readiness.blockers,
-    impactSummary: {
-      changedDocs,
-      impactedQueueItems: impactedItems.length,
-    },
-    items,
-    summary: {
-      total: items.length,
-      ready: items.filter((entry) => entry.status === "ready").length,
-      inProgress: items.filter((entry) => entry.status === "in-progress").length,
-      blocked: items.filter((entry) => entry.status === "blocked").length,
-      done: items.filter((entry) => entry.status === "done").length,
-      backlog: items.filter((entry) => entry.status === "backlog").length,
-    },
+    blockers: queueBuild.blockers,
+    impactSummary: queueBuild.impactSummary,
+    items: queueBuild.items,
+    summary: queueBuild.summary,
   });
 });
 
