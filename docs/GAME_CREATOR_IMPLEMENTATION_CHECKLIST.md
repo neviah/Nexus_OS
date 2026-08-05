@@ -79,3 +79,17 @@ Exit criteria:
 - [ ] Add queue starvation detection and blocker diagnostics.
 - [ ] Add dashboard cards for queue health and gate readiness.
 - [ ] Add at least one end-to-end API test for workflow run + queue build + run-next.
+
+## Autopilot Loop Agent MVP (New)
+
+- [ ] Add dedicated menu agent: Nexus Autopilot Loop.
+- [ ] Add profile selector with three modes: Free, Cost, Custom.
+- [ ] Set default profile to Free with curated no-cost model chain.
+- [ ] Add per-agent router assignment lookup for autopilot-loop custom mode.
+- [ ] Reuse existing run-next and run-all queue loop with run-until-blocker control.
+- [ ] Add journal API endpoint and UI panel for per-step execution logs.
+- [ ] Add hard stop controls (max steps, max duration, repeated-failure pause).
+- [ ] Add one end-to-end test for Free profile loop execution.
+
+Autopilot MVP reference:
+- See docs/AUTOPILOT_LOOP_AGENT_SPEC.md for detailed draft behavior and profile policy.
