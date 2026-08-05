@@ -808,6 +808,30 @@ const GAME_CREATOR_CANON_DOC_ROOT = "docs/game-creator";
 const GAME_CREATOR_CANON_DOC_VERSION_ROOT = "docs/game-creator/.versions";
 const gameCreatorGenerationProgressByWorkspace = new Map<string, GameCreatorGenerationProgress>();
 const gameCreatorExecutionRunnerByWorkspace = new Map<string, GameCreatorExecutionRunnerControl>();
+const AUTOPILOT_AGENT_ID = "autopilot-loop";
+const AUTOPILOT_LOOP_PROFILES = ["free", "cost", "custom"] as const;
+const AUTOPILOT_LOOP_FREE_MODELS = ["deepseek-v3", "qwen-2.5-72b", "qwen-coder-plus"] as const;
+const AUTOPILOT_LOOP_COST_MODELS = ["claude-3.7-sonnet", "claude-3.5-sonnet", "deepseek-v3"] as const;
+
+type AutopilotLoopProfile = typeof AUTOPILOT_LOOP_PROFILES[number];
+
+type AutopilotLoopConfig = {
+  profile: AutopilotLoopProfile;
+  backendHarnessId: string;
+  maxSteps: number;
+  maxDurationMinutes: number;
+  maxRetriesPerTask: number;
+  customFallbackChain: Array<{ providerId: string; model: string }>;
+  updatedAt: string;
+  lastRun?: {
+    status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
+    startedAt?: string;
+    finishedAt?: string;
+    stepsExecuted?: number;
+    blocker?: string;
+    mode?: GameCreatorExecutionMode;
+  };
+};
 
 type UnityCliStatus = {
   selectedPath: string | null;
@@ -2510,6 +2534,153 @@ function getGameCreatorExecutionQueueStore(state: SystemState): {
 function getGameCreatorExecutionMode(state: SystemState): GameCreatorExecutionMode {
   const mode = state.gameCreator?.executionMode;
   return mode === "auto-produce" ? "auto-produce" : "strict-approval";
+}
+
+function getDefaultAutopilotLoopConfig(): AutopilotLoopConfig {
+  return {
+    profile: "free",
+    backendHarnessId: "hermes",
+    maxSteps: 20,
+    maxDurationMinutes: 90,
+    maxRetriesPerTask: 2,
+    customFallbackChain: [],
+    updatedAt: new Date().toISOString(),
+    lastRun: {
+      status: "idle",
+    },
+  };
+}
+
+function normalizeAutopilotFallbackChain(input: unknown): Array<{ providerId: string; model: string }> {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  const sanitized = input
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+      const providerId = typeof (entry as { providerId?: unknown }).providerId === "string"
+        ? (entry as { providerId: string }).providerId.trim()
+        : "";
+      const model = typeof (entry as { model?: unknown }).model === "string"
+        ? (entry as { model: string }).model.trim()
+        : "";
+      if (!providerId || !model) {
+        return null;
+      }
+      return { providerId, model };
+    })
+    .filter((entry): entry is { providerId: string; model: string } => Boolean(entry));
+  return sanitized.slice(0, 8);
+}
+
+function getAutopilotLoopConfig(state: SystemState): AutopilotLoopConfig {
+  const base = getDefaultAutopilotLoopConfig();
+  const raw = state.gameCreator?.autopilotLoop;
+  const profile = pickEnumValue(raw?.profile, AUTOPILOT_LOOP_PROFILES, base.profile);
+  const backendHarnessId = typeof raw?.backendHarnessId === "string" && raw.backendHarnessId.trim().length > 0
+    ? raw.backendHarnessId.trim()
+    : base.backendHarnessId;
+  const maxStepsRaw = Number(raw?.maxSteps ?? base.maxSteps);
+  const maxDurationRaw = Number(raw?.maxDurationMinutes ?? base.maxDurationMinutes);
+  const maxRetriesRaw = Number(raw?.maxRetriesPerTask ?? base.maxRetriesPerTask);
+
+  const maxSteps = Number.isFinite(maxStepsRaw) ? Math.min(200, Math.max(1, Math.floor(maxStepsRaw))) : base.maxSteps;
+  const maxDurationMinutes = Number.isFinite(maxDurationRaw) ? Math.min(480, Math.max(5, Math.floor(maxDurationRaw))) : base.maxDurationMinutes;
+  const maxRetriesPerTask = Number.isFinite(maxRetriesRaw) ? Math.min(10, Math.max(0, Math.floor(maxRetriesRaw))) : base.maxRetriesPerTask;
+  const customFallbackChain = normalizeAutopilotFallbackChain(raw?.customFallbackChain);
+
+  return {
+    profile,
+    backendHarnessId,
+    maxSteps,
+    maxDurationMinutes,
+    maxRetriesPerTask,
+    customFallbackChain,
+    updatedAt: isIsoDateString(raw?.updatedAt) ? raw!.updatedAt! : base.updatedAt,
+    lastRun: raw?.lastRun,
+  };
+}
+
+function writeAutopilotLoopConfig(state: SystemState, config: AutopilotLoopConfig): void {
+  state.gameCreator = {
+    ...(state.gameCreator ?? {}),
+    autopilotLoop: {
+      profile: config.profile,
+      backendHarnessId: config.backendHarnessId,
+      maxSteps: config.maxSteps,
+      maxDurationMinutes: config.maxDurationMinutes,
+      maxRetriesPerTask: config.maxRetriesPerTask,
+      customFallbackChain: config.customFallbackChain,
+      updatedAt: config.updatedAt,
+      lastRun: config.lastRun,
+    },
+  };
+}
+
+function resolveAutopilotProviderId(state: SystemState): string | null {
+  const router = ensureRouterState(state);
+  const enabled = router.providers.find((provider) => provider.enabled)?.id;
+  if (enabled) {
+    return enabled;
+  }
+  const fromFallback = router.fallbackChain.find((entry) => typeof entry.providerId === "string" && entry.providerId.trim().length > 0)?.providerId;
+  if (fromFallback) {
+    return fromFallback;
+  }
+  return router.providers[0]?.id ?? null;
+}
+
+function resolveAutopilotEffectiveFallbackChain(state: SystemState, config: AutopilotLoopConfig): {
+  chain: Array<{ providerId: string; model: string }>;
+  source: "free" | "cost" | "custom-assignment" | "custom-config" | "router-default" | "none";
+} {
+  const router = ensureRouterState(state);
+
+  if (config.profile === "custom") {
+    if (config.customFallbackChain.length > 0) {
+      return { chain: config.customFallbackChain, source: "custom-config" };
+    }
+    const assignment = normalizeAutopilotFallbackChain(router.harnessAssignments[AUTOPILOT_AGENT_ID]);
+    if (assignment.length > 0) {
+      return { chain: assignment, source: "custom-assignment" };
+    }
+    if (router.fallbackChain.length > 0) {
+      return { chain: router.fallbackChain.slice(0, 6), source: "router-default" };
+    }
+    return { chain: [], source: "none" };
+  }
+
+  const providerId = resolveAutopilotProviderId(state);
+  if (!providerId) {
+    return { chain: [], source: "none" };
+  }
+
+  const models = config.profile === "free" ? AUTOPILOT_LOOP_FREE_MODELS : AUTOPILOT_LOOP_COST_MODELS;
+  return {
+    chain: models.map((model) => ({ providerId, model })),
+    source: config.profile,
+  };
+}
+
+function buildAutopilotQueueSummary(state: SystemState): {
+  total: number;
+  ready: number;
+  inProgress: number;
+  blocked: number;
+  done: number;
+  backlog: number;
+} {
+  const queue = getGameCreatorExecutionQueueStore(state);
+  return {
+    total: queue.items.length,
+    ready: queue.items.filter((entry) => entry.status === "ready").length,
+    inProgress: queue.items.filter((entry) => entry.status === "in-progress").length,
+    blocked: queue.items.filter((entry) => entry.status === "blocked").length,
+    done: queue.items.filter((entry) => entry.status === "done").length,
+    backlog: queue.items.filter((entry) => entry.status === "backlog").length,
+  };
 }
 
 function writeGameCreatorExecutionMode(state: SystemState, mode: GameCreatorExecutionMode): void {
@@ -7856,6 +8027,7 @@ app.get("/api/bootstrap", async (_req, res) => {
       { id: "cookbook", name: "Cookbook", status: "online" },
       { id: "media-center", name: "Media Center", status: mediaCenterStatus },
       { id: "game-creator", name: "Game Creator", status: "online" },
+      { id: "autopilot-loop", name: "Nexus Autopilot Loop", status: "online" },
       { id: "settings", name: "Settings", status: "online" },
     ],
     router9: getRouterSummary(state),
@@ -8956,6 +9128,234 @@ app.get("/api/tools/game-creator/execution", async (req, res) => {
       done: queue.items.filter((entry) => entry.status === "done").length,
       backlog: queue.items.filter((entry) => entry.status === "backlog").length,
     },
+  });
+});
+
+app.get("/api/tools/autopilot-loop/profile", async (_req, res) => {
+  const state = await readSystemState();
+  const config = getAutopilotLoopConfig(state);
+  const effective = resolveAutopilotEffectiveFallbackChain(state, config);
+  return res.json({
+    ok: true,
+    agentId: AUTOPILOT_AGENT_ID,
+    config,
+    effectiveFallbackChain: effective.chain,
+    effectiveSource: effective.source,
+    profileOptions: AUTOPILOT_LOOP_PROFILES,
+  });
+});
+
+app.post("/api/tools/autopilot-loop/profile", async (req, res) => {
+  const body = req.body as {
+    profile?: AutopilotLoopProfile;
+    backendHarnessId?: string;
+    maxSteps?: number;
+    maxDurationMinutes?: number;
+    maxRetriesPerTask?: number;
+    customFallbackChain?: Array<{ providerId: string; model: string }>;
+  };
+
+  const state = await readSystemState();
+  const existing = getAutopilotLoopConfig(state);
+  const profile = pickEnumValue(body.profile, AUTOPILOT_LOOP_PROFILES, existing.profile);
+  const backendHarnessId = typeof body.backendHarnessId === "string" && body.backendHarnessId.trim().length > 0
+    ? body.backendHarnessId.trim()
+    : existing.backendHarnessId;
+  const maxSteps = Number.isFinite(Number(body.maxSteps))
+    ? Math.min(200, Math.max(1, Math.floor(Number(body.maxSteps))))
+    : existing.maxSteps;
+  const maxDurationMinutes = Number.isFinite(Number(body.maxDurationMinutes))
+    ? Math.min(480, Math.max(5, Math.floor(Number(body.maxDurationMinutes))))
+    : existing.maxDurationMinutes;
+  const maxRetriesPerTask = Number.isFinite(Number(body.maxRetriesPerTask))
+    ? Math.min(10, Math.max(0, Math.floor(Number(body.maxRetriesPerTask))))
+    : existing.maxRetriesPerTask;
+  const customFallbackChain = body.customFallbackChain !== undefined
+    ? normalizeAutopilotFallbackChain(body.customFallbackChain)
+    : existing.customFallbackChain;
+
+  const next: AutopilotLoopConfig = {
+    ...existing,
+    profile,
+    backendHarnessId,
+    maxSteps,
+    maxDurationMinutes,
+    maxRetriesPerTask,
+    customFallbackChain,
+    updatedAt: new Date().toISOString(),
+  };
+
+  writeAutopilotLoopConfig(state, next);
+
+  if (profile === "custom" && next.customFallbackChain.length > 0) {
+    const router = ensureRouterState(state);
+    router.harnessAssignments[AUTOPILOT_AGENT_ID] = next.customFallbackChain;
+  }
+
+  await writeSystemState(state);
+  const effective = resolveAutopilotEffectiveFallbackChain(state, next);
+  return res.json({
+    ok: true,
+    agentId: AUTOPILOT_AGENT_ID,
+    config: next,
+    effectiveFallbackChain: effective.chain,
+    effectiveSource: effective.source,
+  });
+});
+
+app.get("/api/tools/autopilot-loop/status", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim();
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
+  const config = getAutopilotLoopConfig(state);
+  const effective = resolveAutopilotEffectiveFallbackChain(state, config);
+  const queueSummary = buildAutopilotQueueSummary(state);
+  const run = getGameCreatorExecutionRunState(state);
+
+  return res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    agentId: AUTOPILOT_AGENT_ID,
+    config,
+    effectiveFallbackChain: effective.chain,
+    effectiveSource: effective.source,
+    queueSummary,
+    executionRun: run,
+    lastRun: config.lastRun ?? { status: "idle" },
+  });
+});
+
+app.post("/api/tools/autopilot-loop/run-step", async (req, res) => {
+  const body = req.body as { workspaceId?: string; mode?: GameCreatorExecutionMode };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const config = getAutopilotLoopConfig(state);
+  const mode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
+
+  writeAutopilotLoopConfig(state, {
+    ...config,
+    updatedAt: new Date().toISOString(),
+    lastRun: {
+      status: "running",
+      startedAt: new Date().toISOString(),
+      mode,
+      stepsExecuted: 0,
+    },
+  });
+  await writeSystemState(state);
+
+  const step = await runNextGameCreatorExecutionStep({ workspaceId: workspace.id, mode });
+  const afterState = await readSystemState();
+  const afterConfig = getAutopilotLoopConfig(afterState);
+  const doneNow = buildAutopilotQueueSummary(afterState).ready === 0;
+
+  const nextStatus = step.ok
+    ? (doneNow ? "completed" : "paused")
+    : (step.statusCode === 409 || step.statusCode === 412 ? "paused" : "failed");
+
+  writeAutopilotLoopConfig(afterState, {
+    ...afterConfig,
+    updatedAt: new Date().toISOString(),
+    lastRun: {
+      status: nextStatus,
+      startedAt: afterConfig.lastRun?.startedAt,
+      finishedAt: new Date().toISOString(),
+      stepsExecuted: step.ok ? 1 : 0,
+      blocker: step.ok ? undefined : step.blocker,
+      mode,
+    },
+  });
+  await writeSystemState(afterState);
+
+  if (!step.ok) {
+    return res.status(step.statusCode ?? 500).json({
+      ok: false,
+      agentId: AUTOPILOT_AGENT_ID,
+      mode,
+      error: step.blocker ?? "Execution failed.",
+      job: step.job,
+      lastRun: getAutopilotLoopConfig(afterState).lastRun,
+    });
+  }
+
+  return res.json({
+    ok: true,
+    agentId: AUTOPILOT_AGENT_ID,
+    mode,
+    step,
+    lastRun: getAutopilotLoopConfig(afterState).lastRun,
+  });
+});
+
+app.post("/api/tools/autopilot-loop/run-until-blocker", async (req, res) => {
+  const body = req.body as { workspaceId?: string; mode?: GameCreatorExecutionMode; maxSteps?: number };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const config = getAutopilotLoopConfig(state);
+  const mode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
+  const requestedMax = Number.isFinite(Number(body.maxSteps)) ? Number(body.maxSteps) : config.maxSteps;
+  const maxSteps = Math.min(200, Math.max(1, Math.floor(requestedMax)));
+
+  writeAutopilotLoopConfig(state, {
+    ...config,
+    updatedAt: new Date().toISOString(),
+    lastRun: {
+      status: "running",
+      startedAt: new Date().toISOString(),
+      mode,
+      stepsExecuted: 0,
+    },
+  });
+  await writeSystemState(state);
+
+  const executed: Array<{ ok: boolean; queueItemId?: string; queueItemTitle?: string; blocker?: string }> = [];
+  let blocker: string | undefined;
+  for (let index = 0; index < maxSteps; index += 1) {
+    const step = await runNextGameCreatorExecutionStep({ workspaceId: workspace.id, mode });
+    if (!step.ok) {
+      blocker = step.blocker ?? "Execution paused by blocker.";
+      executed.push({ ok: false, blocker });
+      break;
+    }
+    executed.push({
+      ok: true,
+      queueItemId: step.job?.queueItemId,
+      queueItemTitle: step.job?.queueItemTitle,
+    });
+  }
+
+  const finalState = await readSystemState();
+  const finalConfig = getAutopilotLoopConfig(finalState);
+  const queueSummary = buildAutopilotQueueSummary(finalState);
+  const runStatus: "completed" | "paused" = blocker
+    ? "paused"
+    : (queueSummary.ready === 0 ? "completed" : "paused");
+
+  writeAutopilotLoopConfig(finalState, {
+    ...finalConfig,
+    updatedAt: new Date().toISOString(),
+    lastRun: {
+      status: runStatus,
+      startedAt: finalConfig.lastRun?.startedAt,
+      finishedAt: new Date().toISOString(),
+      stepsExecuted: executed.filter((entry) => entry.ok).length,
+      blocker,
+      mode,
+    },
+  });
+  await writeSystemState(finalState);
+
+  return res.json({
+    ok: !blocker,
+    agentId: AUTOPILOT_AGENT_ID,
+    mode,
+    maxSteps,
+    stepsExecuted: executed.filter((entry) => entry.ok).length,
+    blocker,
+    queueSummary,
+    iterations: executed,
+    lastRun: getAutopilotLoopConfig(finalState).lastRun,
   });
 });
 

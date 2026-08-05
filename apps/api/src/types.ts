@@ -48,6 +48,26 @@ export type GameCreatorSetupWizardDraft = {
 export type GameCreatorState = {
   setupWizardDraft?: Partial<GameCreatorSetupWizardDraft>;
   executionMode?: "strict-approval" | "auto-produce";
+  autopilotLoop?: {
+    profile?: "free" | "cost" | "custom";
+    backendHarnessId?: string;
+    maxSteps?: number;
+    maxDurationMinutes?: number;
+    maxRetriesPerTask?: number;
+    customFallbackChain?: Array<{
+      providerId: string;
+      model: string;
+    }>;
+    updatedAt?: string;
+    lastRun?: {
+      status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
+      startedAt?: string;
+      finishedAt?: string;
+      stepsExecuted?: number;
+      blocker?: string;
+      mode?: "strict-approval" | "auto-produce";
+    };
+  };
   conceptSwarm?: {
     generatedAt?: string;
     harnessId?: string;

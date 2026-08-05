@@ -244,3 +244,48 @@ Example runtime policy update:
   "trustedManifestKeyIds": []
 }
 ```
+
+## Nexus Autopilot Loop
+
+- `GET /api/tools/autopilot-loop/profile`
+  - Returns current Autopilot profile config and effective fallback chain.
+- `POST /api/tools/autopilot-loop/profile`
+  - Updates profile settings (`free`, `cost`, `custom`), budget limits, harness id, and optional custom chain.
+- `GET /api/tools/autopilot-loop/status?workspaceId=<optional>`
+  - Returns profile, effective chain source, queue summary, and latest execution run state.
+- `POST /api/tools/autopilot-loop/run-step`
+  - Executes exactly one queue step through the existing Game Creator execution engine.
+- `POST /api/tools/autopilot-loop/run-until-blocker`
+  - Executes up to `maxSteps` tasks and stops on blocker, completion, or step budget.
+
+Profile rules:
+
+- `free`
+  - Default mode. Uses curated no-cost model order and must not auto-switch to paid profile.
+- `cost`
+  - Paid-capable mode. Must be explicitly selected by the user.
+- `custom`
+  - Uses custom fallback chain from Autopilot config, else per-agent router assignment (`autopilot-loop`), else router defaults.
+
+Example profile update:
+
+```json
+{
+  "profile": "free",
+  "backendHarnessId": "hermes",
+  "maxSteps": 20,
+  "maxDurationMinutes": 90,
+  "maxRetriesPerTask": 2,
+  "customFallbackChain": []
+}
+```
+
+Example bounded run request:
+
+```json
+{
+  "workspaceId": "default",
+  "mode": "strict-approval",
+  "maxSteps": 12
+}
+```
