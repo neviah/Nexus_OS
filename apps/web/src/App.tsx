@@ -169,6 +169,18 @@ type WorkspaceFolderEntry = {
   path: string;
 };
 
+type WorkspaceFileResponse = {
+  ok: boolean;
+  workspaceId: string;
+  relativePath: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  isBinary: boolean;
+  content?: string;
+  base64Content?: string;
+};
+
 type CookbookRecommendation = {
   id: string;
   name: string;
@@ -1056,15 +1068,40 @@ type GameCreatorExecutionStatusResponse = {
 };
 
 type AutopilotLoopProfile = "free" | "cost" | "custom";
+type AutopilotLoopRunMode = "strict-approval" | "auto-produce";
 
 type AutopilotFallbackTarget = {
   providerId: string;
   model: string;
 };
 
+type AutopilotTaskPlanItem = {
+  id: string;
+  order: number;
+  title: string;
+  detail: string;
+  status: "pending" | "running" | "done";
+  source: "objective" | "manual";
+  createdAt: string;
+  updatedAt: string;
+};
+
+type AutopilotPlanSummary = {
+  total: number;
+  pending: number;
+  running: number;
+  done: number;
+  blocked: number;
+};
+
 type AutopilotLoopConfig = {
   profile: AutopilotLoopProfile;
   backendHarnessId: string;
+  objective: string;
+  completionContract: string;
+  taskPlan: AutopilotTaskPlanItem[];
+  planGeneratedAt?: string;
+  planSource?: "objective" | "manual";
   maxSteps: number;
   maxDurationMinutes: number;
   maxRetriesPerTask: number;
@@ -1072,11 +1109,15 @@ type AutopilotLoopConfig = {
   updatedAt: string;
   lastRun?: {
     status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
+    runId?: string;
     startedAt?: string;
     finishedAt?: string;
     stepsExecuted?: number;
     blocker?: string;
-    mode?: GameCreatorExecutionMode;
+    mode?: AutopilotLoopRunMode;
+    currentTaskId?: string;
+    currentTaskTitle?: string;
+    completedTaskIds?: string[];
   };
 };
 
@@ -1084,6 +1125,7 @@ type AutopilotLoopProfileResponse = {
   ok: boolean;
   agentId: string;
   config: AutopilotLoopConfig;
+  planSummary: AutopilotPlanSummary;
   effectiveFallbackChain: AutopilotFallbackTarget[];
   effectiveSource: string;
   profileOptions?: AutopilotLoopProfile[];
@@ -1095,11 +1137,32 @@ type AutopilotLoopStatusResponse = {
   workspacePath: string;
   agentId: string;
   config: AutopilotLoopConfig;
+  planSummary: AutopilotPlanSummary;
+  currentTask: AutopilotTaskPlanItem | null;
   effectiveFallbackChain: AutopilotFallbackTarget[];
   effectiveSource: string;
-  queueSummary: GameCreatorQueueSummary;
-  executionRun: GameCreatorExecutionRunState;
+  isRunning?: boolean;
+  journalTail?: AutopilotLoopJournalEntry[];
   lastRun?: AutopilotLoopConfig["lastRun"];
+};
+
+type AutopilotLoopJournalEntry = {
+  seq: number;
+  at: string;
+  level: "info" | "warn" | "error";
+  event: string;
+  message: string;
+  taskId?: string;
+  taskTitle?: string;
+  runId?: string;
+};
+
+type AutopilotLoopJournalResponse = {
+  ok: boolean;
+  workspaceId: string;
+  entries: AutopilotLoopJournalEntry[];
+  latestSeq: number;
+  isRunning: boolean;
 };
 
 type GameCreatorSpriteResult = {
@@ -1499,8 +1562,13 @@ function App() {
   const [autopilotLoopEffectiveChain, setAutopilotLoopEffectiveChain] = useState<AutopilotFallbackTarget[]>([]);
   const [autopilotLoopEffectiveSource, setAutopilotLoopEffectiveSource] = useState("none");
   const [autopilotLoopStatus, setAutopilotLoopStatus] = useState<AutopilotLoopStatusResponse | null>(null);
-  const [autopilotLoopBusyAction, setAutopilotLoopBusyAction] = useState<"load" | "save" | "run-step" | "run-until-blocker" | null>(null);
+  const [autopilotLoopBusyAction, setAutopilotLoopBusyAction] = useState<"load" | "save" | "run-step" | "run-start" | "stop" | "resume" | null>(null);
+  const [autopilotLoopRunMode, setAutopilotLoopRunMode] = useState<AutopilotLoopRunMode>("strict-approval");
   const [autopilotLoopMaxStepsDraft, setAutopilotLoopMaxStepsDraft] = useState(10);
+  const [autopilotLoopJournal, setAutopilotLoopJournal] = useState<AutopilotLoopJournalEntry[]>([]);
+  const [autopilotLoopJournalSeq, setAutopilotLoopJournalSeq] = useState(0);
+  const [autopilotLoopAutoScroll, setAutopilotLoopAutoScroll] = useState(true);
+  const autopilotLoopJournalRef = useRef<HTMLPreElement | null>(null);
   const [statusMessage, setStatusMessage] = useState("Booting NEXUS OS...");
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; tone: "ok" | "warn" | "err" }>>([]);
   const [toolsOpen, setToolsOpen] = useState(true);
@@ -1547,8 +1615,12 @@ function App() {
   const [officePresets, setOfficePresets] = useState<Array<{ id: string; label: string; description: string; args: string[] }>>([]);
   const [officePresetDraft, setOfficePresetDraft] = useState<{ harnessId: string; preset: "view" | "validate" | "create"; file: string; kind: "docx" | "xlsx" | "pptx" }>({ harnessId: "", preset: "view", file: "", kind: "docx" });
   const [officePresetBusy, setOfficePresetBusy] = useState(false);
-  const [rightTab, setRightTab] = useState<"workspace" | "diagnostics">("workspace");
+  const [rightTab, setRightTab] = useState<"workspace" | "files" | "diagnostics">("workspace");
   const [workspaceSwitchBusy, setWorkspaceSwitchBusy] = useState(false);
+  const [selectedWorkspaceFile, setSelectedWorkspaceFile] = useState<WorkspaceFileResponse | null>(null);
+  const [selectedWorkspaceFileBusy, setSelectedWorkspaceFileBusy] = useState(false);
+  const [selectedWorkspaceFileError, setSelectedWorkspaceFileError] = useState<string | null>(null);
+  const [selectedWorkspaceFilePath, setSelectedWorkspaceFilePath] = useState<string | null>(null);
   const [streamTrace, setStreamTrace] = useState("");
   const [streamTraceOpen, setStreamTraceOpen] = useState(false);
   const [autoSpeakHarnessReplies, setAutoSpeakHarnessReplies] = useState(true);
@@ -3350,6 +3422,7 @@ function App() {
     }
     const payload = (await response.json()) as AutopilotLoopProfileResponse;
     setAutopilotLoopConfig(payload.config);
+    setAutopilotLoopRunMode(payload.config?.lastRun?.mode ?? "strict-approval");
     setAutopilotLoopEffectiveChain(payload.effectiveFallbackChain ?? []);
     setAutopilotLoopEffectiveSource(payload.effectiveSource ?? "none");
     setAutopilotLoopMaxStepsDraft(payload.config?.maxSteps ?? 10);
@@ -3363,8 +3436,36 @@ function App() {
     const payload = (await response.json()) as AutopilotLoopStatusResponse;
     setAutopilotLoopStatus(payload);
     setAutopilotLoopConfig(payload.config);
+    setAutopilotLoopRunMode(payload.lastRun?.mode ?? payload.config?.lastRun?.mode ?? "strict-approval");
     setAutopilotLoopEffectiveChain(payload.effectiveFallbackChain ?? []);
     setAutopilotLoopEffectiveSource(payload.effectiveSource ?? "none");
+    const tail = payload.journalTail ?? [];
+    if (tail.length > 0) {
+      setAutopilotLoopJournal(tail);
+      setAutopilotLoopJournalSeq(tail[tail.length - 1].seq);
+    }
+  }
+
+  async function loadAutopilotLoopJournal(afterSeq = 0) {
+    const response = await fetch(`/api/tools/autopilot-loop/journal?workspaceId=${encodeURIComponent(boot?.activeWorkspaceId ?? "")}&afterSeq=${encodeURIComponent(String(afterSeq))}`);
+    if (!response.ok) {
+      throw new Error("Failed to load Autopilot journal.");
+    }
+    const payload = (await response.json()) as AutopilotLoopJournalResponse;
+    if ((payload.entries?.length ?? 0) === 0) {
+      setAutopilotLoopJournalSeq(Math.max(afterSeq, payload.latestSeq ?? afterSeq));
+      return;
+    }
+
+    setAutopilotLoopJournal((current) => {
+      const merged = [...current, ...payload.entries];
+      const deduped = new Map<number, AutopilotLoopJournalEntry>();
+      for (const entry of merged) {
+        deduped.set(entry.seq, entry);
+      }
+      return Array.from(deduped.values()).sort((left, right) => left.seq - right.seq).slice(-500);
+    });
+    setAutopilotLoopJournalSeq(payload.latestSeq);
   }
 
   async function refreshAutopilotLoopPanel() {
@@ -3372,6 +3473,7 @@ function App() {
     try {
       await loadAutopilotLoopProfile();
       await loadAutopilotLoopStatus();
+      await loadAutopilotLoopJournal(0);
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -3392,9 +3494,12 @@ function App() {
         body: JSON.stringify({
           profile: autopilotLoopConfig.profile,
           backendHarnessId: autopilotLoopConfig.backendHarnessId,
+          objective: autopilotLoopConfig.objective,
+          completionContract: autopilotLoopConfig.completionContract,
           maxSteps: autopilotLoopConfig.maxSteps,
           maxDurationMinutes: autopilotLoopConfig.maxDurationMinutes,
           maxRetriesPerTask: autopilotLoopConfig.maxRetriesPerTask,
+          customFallbackChain: autopilotLoopConfig.customFallbackChain,
         }),
       });
       if (!response.ok) {
@@ -3402,6 +3507,7 @@ function App() {
       }
       const payload = (await response.json()) as AutopilotLoopProfileResponse;
       setAutopilotLoopConfig(payload.config);
+      setAutopilotLoopRunMode(payload.config?.lastRun?.mode ?? "strict-approval");
       setAutopilotLoopEffectiveChain(payload.effectiveFallbackChain ?? []);
       setAutopilotLoopEffectiveSource(payload.effectiveSource ?? "none");
       setStatusMessage("Autopilot profile saved.");
@@ -3423,7 +3529,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           workspaceId: boot?.activeWorkspaceId,
-          mode: gameCreatorExecutionMode,
+          mode: autopilotLoopRunMode,
         }),
       });
       const payload = (await response.json()) as { error?: string };
@@ -3431,8 +3537,6 @@ function App() {
         throw new Error(payload.error ?? "Autopilot step failed.");
       }
       pushToast("Autopilot executed one step.", "ok");
-      await loadGameCreatorQueue();
-      await loadGameCreatorExecutionStatus();
       await loadAutopilotLoopStatus();
     } catch (error) {
       setStatusMessage(String(error));
@@ -3443,25 +3547,73 @@ function App() {
   }
 
   async function runAutopilotUntilBlocker() {
-    setAutopilotLoopBusyAction("run-until-blocker");
+    setAutopilotLoopBusyAction("run-start");
     try {
-      const response = await fetch("/api/tools/autopilot-loop/run-until-blocker", {
+      const response = await fetch("/api/tools/autopilot-loop/run-start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           workspaceId: boot?.activeWorkspaceId,
-          mode: gameCreatorExecutionMode,
+          mode: autopilotLoopRunMode,
           maxSteps: autopilotLoopMaxStepsDraft,
         }),
       });
-      const payload = (await response.json()) as { blocker?: string; stepsExecuted?: number; error?: string };
+      const payload = (await response.json()) as { error?: string };
       if (!response.ok) {
-        throw new Error(payload.error ?? payload.blocker ?? "Autopilot run failed.");
+        throw new Error(payload.error ?? "Autopilot run failed.");
       }
-      pushToast(`Autopilot executed ${payload.stepsExecuted ?? 0} step(s).`, payload.blocker ? "warn" : "ok");
-      await loadGameCreatorQueue();
-      await loadGameCreatorExecutionStatus();
+      pushToast("Autopilot run started.", "ok");
       await loadAutopilotLoopStatus();
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setAutopilotLoopBusyAction(null);
+    }
+  }
+
+  async function stopAutopilotLoopRun() {
+    setAutopilotLoopBusyAction("stop");
+    try {
+      const response = await fetch("/api/tools/autopilot-loop/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: boot?.activeWorkspaceId }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to stop Autopilot run.");
+      }
+      pushToast("Autopilot stop requested.", "warn");
+      await loadAutopilotLoopStatus();
+      await loadAutopilotLoopJournal(autopilotLoopJournalSeq);
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    } finally {
+      setAutopilotLoopBusyAction(null);
+    }
+  }
+
+  async function resumeAutopilotLoopRun() {
+    setAutopilotLoopBusyAction("resume");
+    try {
+      const response = await fetch("/api/tools/autopilot-loop/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: boot?.activeWorkspaceId,
+          mode: autopilotLoopRunMode,
+          maxSteps: autopilotLoopMaxStepsDraft,
+        }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to resume Autopilot run.");
+      }
+      pushToast("Autopilot resumed from the latest checkpoint.", "ok");
+      await loadAutopilotLoopStatus();
+      await loadAutopilotLoopJournal(autopilotLoopJournalSeq);
     } catch (error) {
       setStatusMessage(String(error));
       pushToast(String(error), "err");
@@ -5386,6 +5538,28 @@ function App() {
   }, [runtimeJobs]);
 
   useEffect(() => {
+    if (selectedPane.type !== "tool" || selectedPane.id !== "autopilot-loop") {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadAutopilotLoopStatus();
+      void loadAutopilotLoopJournal(autopilotLoopJournalSeq);
+    }, 1200);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [selectedPane, autopilotLoopJournalSeq, boot?.activeWorkspaceId]);
+
+  useEffect(() => {
+    if (!autopilotLoopAutoScroll || !autopilotLoopJournalRef.current) {
+      return;
+    }
+    autopilotLoopJournalRef.current.scrollTop = autopilotLoopJournalRef.current.scrollHeight;
+  }, [autopilotLoopJournal, autopilotLoopAutoScroll]);
+
+  useEffect(() => {
     if (rightTab !== "workspace") {
       return;
     }
@@ -5577,6 +5751,31 @@ function App() {
     const response = await fetch(`/api/workspaces/${workspaceId}/tree`);
     const payload = (await response.json()) as { tree: WorkspaceTreeNode };
     setWorkspaceTree(payload.tree);
+  }
+
+  async function loadWorkspaceFile(workspaceId: string, relativePath: string) {
+    const response = await fetch(`/api/workspaces/${workspaceId}/file?relativePath=${encodeURIComponent(relativePath)}`);
+    const payload = await response.json() as WorkspaceFileResponse | { error?: string };
+    if (!response.ok) {
+      throw new Error((payload as { error?: string }).error ?? "Failed to load workspace file.");
+    }
+    setSelectedWorkspaceFile(payload as WorkspaceFileResponse);
+    setSelectedWorkspaceFileError(null);
+  }
+
+  async function openWorkspaceFile(relativePath: string) {
+    const workspaceId = boot?.activeWorkspaceId ?? "default";
+    setSelectedWorkspaceFilePath(relativePath);
+    setRightTab("files");
+    setSelectedWorkspaceFileBusy(true);
+    try {
+      await loadWorkspaceFile(workspaceId, relativePath);
+    } catch (error) {
+      setSelectedWorkspaceFile(null);
+      setSelectedWorkspaceFileError(String(error));
+    } finally {
+      setSelectedWorkspaceFileBusy(false);
+    }
   }
 
   async function refreshActiveWorkspaceTree(workspaceId?: string) {
@@ -6236,6 +6435,11 @@ function App() {
       }
 
       await loadBootstrap();
+      setSelectedWorkspaceFile(null);
+      setSelectedWorkspaceFileError(null);
+      setSelectedWorkspaceFilePath(null);
+      setAutopilotLoopJournal([]);
+      setAutopilotLoopJournalSeq(0);
       if (selectedPane.type === "agent") {
         await Promise.all([
           loadHarnessThreads(selectedPane.id, workspaceId),
@@ -6254,10 +6458,25 @@ function App() {
 
   async function onDeleteWorkspace(workspaceId: string) {
     if (workspaceId === "default") {
+      pushToast("Default workspace cannot be deleted.", "warn");
       return;
     }
-    await fetch(`/api/workspaces/${workspaceId}`, { method: "DELETE" });
-    await loadBootstrap();
+    try {
+      const response = await fetch(`/api/workspaces/${workspaceId}`, { method: "DELETE" });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to delete workspace.");
+      }
+      await loadBootstrap();
+      setSelectedWorkspaceFile(null);
+      setSelectedWorkspaceFileError(null);
+      setSelectedWorkspaceFilePath(null);
+      setStatusMessage("Workspace deleted.");
+      pushToast("Workspace deleted.", "ok");
+    } catch (error) {
+      setStatusMessage(String(error));
+      pushToast(String(error), "err");
+    }
   }
 
   async function onResumeTask(task: FailedTask) {
@@ -6355,9 +6574,10 @@ function App() {
     const hasChildren = Boolean(node.children && node.children.length > 0);
     const isDirectory = node.type === "directory";
     const collapsed = isDirectory && hasChildren ? Boolean(collapsedTreePaths[node.path]) : false;
+    const isSelectedFile = node.type === "file" && selectedWorkspaceFilePath === node.path;
 
     return (
-      <li key={node.path} className={`tree-node ${node.type} ${isDirectory && !collapsed ? "expanded" : ""}`}>
+      <li key={node.path} className={`tree-node ${node.type} ${isDirectory && !collapsed ? "expanded" : ""} ${isSelectedFile ? "selected" : ""}`}>
         <div className="tree-node-row">
           {isDirectory && hasChildren ? (
             <button
@@ -6372,7 +6592,18 @@ function App() {
           ) : (
             <span className="tree-leaf-dot" aria-hidden="true">•</span>
           )}
-          <span className="tree-node-label">{treeNodeIcon(node)} {node.name}</span>
+          {node.type === "file" ? (
+            <button
+              type="button"
+              className="tree-node-label tree-node-button"
+              onClick={() => void openWorkspaceFile(node.path)}
+              title={node.path}
+            >
+              {treeNodeIcon(node)} {node.name}
+            </button>
+          ) : (
+            <span className="tree-node-label">{treeNodeIcon(node)} {node.name}</span>
+          )}
         </div>
         {hasChildren && !collapsed ? <ul>{node.children?.map(renderTree)}</ul> : null}
       </li>
@@ -6812,7 +7043,43 @@ function App() {
                 {fallbackChoiceOptions.length === 0 ? (
                   <p className="nxr-hint">Add at least one fallback row before assigning harness models.</p>
                 ) : (
-                  <div className="nxr-harness-grid">
+                  <>
+                    <div className="nxr-harness-grid">
+                      <div className="nxr-harness-card">
+                        <strong>Nexus Autopilot Loop</strong>
+                        <small>autopilot-loop</small>
+                        <ul>
+                          {fallbackChoiceOptions.map((option) => {
+                            const selected = nxHarnessAssignments["autopilot-loop"] ?? [];
+                            return (
+                              <li key={`autopilot-loop-${option}`}>
+                                <label>
+                                  <input
+                                    type="checkbox"
+                                    checked={selected.includes(option)}
+                                    onChange={(event) => {
+                                      const checked = event.target.checked;
+                                      setNxHarnessAssignments((current) => {
+                                        const existing = current["autopilot-loop"] ?? [];
+                                        const next = checked
+                                          ? Array.from(new Set([...existing, option]))
+                                          : existing.filter((entry) => entry !== option);
+                                        return { ...current, "autopilot-loop": next };
+                                      });
+                                    }}
+                                  />
+                                  <span>{option}</span>
+                                </label>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </div>
+                    </div>
+
+                    <small className="nxr-hint">Autopilot uses this Router assignment when Profile is set to Custom and no custom chain is saved in the Autopilot profile editor.</small>
+
+                    <div className="nxr-harness-grid">
                     {boot?.harnesses.map((harness) => {
                       const selected = nxHarnessAssignments[harness.id] ?? [];
                       return (
@@ -6845,7 +7112,8 @@ function App() {
                         </div>
                       );
                     })}
-                  </div>
+                    </div>
+                  </>
                 )}
 
                 <div className="nxr-retry">
@@ -8877,6 +9145,26 @@ function App() {
                         ))}
                       </select>
                     </label>
+                    <label className="game-creator-setup-span">
+                      <span>Objective</span>
+                      <textarea
+                        rows={4}
+                        value={autopilotLoopConfig.objective}
+                        onChange={(event) => setAutopilotLoopConfig((current) => current ? { ...current, objective: event.target.value } : current)}
+                        disabled={autopilotLoopBusyAction !== null}
+                        placeholder="Describe what Autopilot should accomplish"
+                      />
+                    </label>
+                    <label className="game-creator-setup-span">
+                      <span>Completion Contract</span>
+                      <textarea
+                        rows={3}
+                        value={autopilotLoopConfig.completionContract}
+                        onChange={(event) => setAutopilotLoopConfig((current) => current ? { ...current, completionContract: event.target.value } : current)}
+                        disabled={autopilotLoopBusyAction !== null}
+                        placeholder="Define what done means"
+                      />
+                    </label>
                     <label>
                       <span>Default Max Steps</span>
                       <input
@@ -8937,7 +9225,7 @@ function App() {
                   <div className="tool-action-row">
                     <label>
                       <span>Mode</span>
-                      <select value={gameCreatorExecutionMode} onChange={(event) => void saveGameCreatorExecutionMode(event.target.value as GameCreatorExecutionMode)} disabled={autopilotLoopBusyAction !== null}>
+                      <select value={autopilotLoopRunMode} onChange={(event) => setAutopilotLoopRunMode(event.target.value as AutopilotLoopRunMode)} disabled={autopilotLoopBusyAction !== null}>
                         <option value="strict-approval">Strict approval</option>
                         <option value="auto-produce">Auto-produce</option>
                       </select>
@@ -8946,18 +9234,41 @@ function App() {
                       <span>Run-Until-Blocker Steps</span>
                       <input type="number" min={1} max={200} value={autopilotLoopMaxStepsDraft} onChange={(event) => setAutopilotLoopMaxStepsDraft(Math.max(1, Math.min(200, Number(event.target.value || 1))))} />
                     </label>
-                    <button type="button" onClick={() => void runAutopilotLoopStep()} disabled={autopilotLoopBusyAction !== null}>
+                    <button type="button" onClick={() => void runAutopilotLoopStep()} disabled={autopilotLoopBusyAction !== null || autopilotLoopStatus?.isRunning === true}>
                       {autopilotLoopBusyAction === "run-step" ? "Running Step..." : "Run Step"}
                     </button>
-                    <button type="button" className="ghost" onClick={() => void runAutopilotUntilBlocker()} disabled={autopilotLoopBusyAction !== null}>
-                      {autopilotLoopBusyAction === "run-until-blocker" ? "Running Loop..." : "Run Until Blocker"}
+                    <button type="button" className="ghost" onClick={() => void runAutopilotUntilBlocker()} disabled={autopilotLoopBusyAction !== null || autopilotLoopStatus?.isRunning === true}>
+                      {autopilotLoopBusyAction === "run-start" ? "Starting..." : "Run Until Blocker"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => void stopAutopilotLoopRun()}
+                      disabled={autopilotLoopBusyAction !== null || autopilotLoopStatus?.isRunning !== true}
+                    >
+                      {autopilotLoopBusyAction === "stop" ? "Stopping..." : "Stop"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => void resumeAutopilotLoopRun()}
+                      disabled={autopilotLoopBusyAction !== null || autopilotLoopStatus?.isRunning === true || autopilotLoopStatus?.planSummary?.pending === 0}
+                    >
+                      {autopilotLoopBusyAction === "resume" ? "Resuming..." : "Resume"}
                     </button>
                   </div>
                 </div>
                 {autopilotLoopStatus ? (
                   <div className="tool-list">
-                    <small>Queue: Total {autopilotLoopStatus.queueSummary.total} · Ready {autopilotLoopStatus.queueSummary.ready} · Blocked {autopilotLoopStatus.queueSummary.blocked} · Done {autopilotLoopStatus.queueSummary.done}</small>
-                    <small>Execution run: {autopilotLoopStatus.executionRun.status}{autopilotLoopStatus.executionRun.message ? ` · ${autopilotLoopStatus.executionRun.message}` : ""}</small>
+                    <small>Runner: {autopilotLoopStatus.isRunning ? "running" : "idle"}</small>
+                    <small>Plan: Total {autopilotLoopStatus.planSummary.total} · Pending {autopilotLoopStatus.planSummary.pending} · Running {autopilotLoopStatus.planSummary.running} · Done {autopilotLoopStatus.planSummary.done}</small>
+                    {autopilotLoopStatus.currentTask ? (
+                      <small>Current task: {autopilotLoopStatus.currentTask.title} · {autopilotLoopStatus.currentTask.detail}</small>
+                    ) : (
+                      <small>No current task selected.</small>
+                    )}
+                    <small>Objective: {autopilotLoopStatus.config.objective || "(unset)"}</small>
+                    <small>Completion contract: {autopilotLoopStatus.config.completionContract || "(unset)"}</small>
                     {autopilotLoopStatus.lastRun ? (
                       <small>
                         Last run: {autopilotLoopStatus.lastRun.status}
@@ -8965,6 +9276,39 @@ function App() {
                         {autopilotLoopStatus.lastRun.blocker ? ` · blocker ${autopilotLoopStatus.lastRun.blocker}` : ""}
                       </small>
                     ) : null}
+                    {autopilotLoopStatus.config.taskPlan.length ? (
+                      <ul>
+                        {autopilotLoopStatus.config.taskPlan.map((task) => (
+                          <li key={task.id}>
+                            <small>{task.title} · {task.status} · {task.detail}</small>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <small className="runtime-warning">No task plan has been generated yet.</small>
+                    )}
+
+                    <details className="tool-details" open>
+                      <summary>Live Autopilot Journal</summary>
+                      <div className="tool-action-row">
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={autopilotLoopAutoScroll}
+                            onChange={(event) => setAutopilotLoopAutoScroll(event.target.checked)}
+                          />
+                          <span>Auto-scroll</span>
+                        </label>
+                      </div>
+                      <pre className="image-status-stream" ref={autopilotLoopJournalRef}>
+                        {autopilotLoopJournal.length > 0
+                          ? autopilotLoopJournal.map((entry) => {
+                            const stamp = new Date(entry.at).toLocaleTimeString();
+                            return `[${stamp}] ${entry.level.toUpperCase()} ${entry.event}: ${entry.message}`;
+                          }).join("\n")
+                          : "No journal entries yet."}
+                      </pre>
+                    </details>
                   </div>
                 ) : <small>No Autopilot status yet.</small>}
               </section>
@@ -10224,6 +10568,13 @@ function App() {
             </button>
             <button
               type="button"
+              className={`tab-btn ${rightTab === "files" ? "active" : ""}`}
+              onClick={() => setRightTab("files")}
+            >
+              Files
+            </button>
+            <button
+              type="button"
               className={`tab-btn ${rightTab === "diagnostics" ? "active" : ""}`}
               onClick={() => setRightTab("diagnostics")}
             >
@@ -10369,6 +10720,58 @@ function App() {
                 {workspaceTree ? <ul className="tree-root">{renderTree(workspaceTree)}</ul> : <p>Loading workspace tree...</p>}
               </section>
             </>
+          ) : null}
+
+          {rightTab === "files" ? (
+            <section className="workspace-panel file-viewer-panel">
+              <div className="tree-panel-head">
+                <div>
+                  <h3>File Viewer</h3>
+                  <small>{selectedWorkspaceFilePath ?? "Select a file from the workspace tree."}</small>
+                </div>
+                <div className="tree-panel-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => selectedWorkspaceFilePath ? void openWorkspaceFile(selectedWorkspaceFilePath) : undefined}
+                    disabled={selectedWorkspaceFileBusy || !selectedWorkspaceFilePath}
+                  >
+                    {selectedWorkspaceFileBusy ? "Loading..." : "Refresh"}
+                  </button>
+                </div>
+              </div>
+
+              {selectedWorkspaceFileError ? <p className="runtime-warning">{selectedWorkspaceFileError}</p> : null}
+
+              {selectedWorkspaceFile ? (
+                <div className="file-viewer-shell">
+                  <div className="file-viewer-meta">
+                    <strong>{selectedWorkspaceFile.fileName}</strong>
+                    <small>{selectedWorkspaceFile.relativePath}</small>
+                    <small>{selectedWorkspaceFile.mimeType} · {formatBytes(selectedWorkspaceFile.sizeBytes)}</small>
+                  </div>
+                  {selectedWorkspaceFile.isBinary && selectedWorkspaceFile.mimeType.startsWith("image/") && selectedWorkspaceFile.base64Content ? (
+                    <img
+                      className="file-viewer-image"
+                      src={`data:${selectedWorkspaceFile.mimeType};base64,${selectedWorkspaceFile.base64Content}`}
+                      alt={selectedWorkspaceFile.fileName}
+                    />
+                  ) : null}
+                  {!selectedWorkspaceFile.isBinary && selectedWorkspaceFile.content !== undefined ? (
+                    selectedWorkspaceFile.fileName.toLowerCase().endsWith(".md") ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedWorkspaceFile.content}</ReactMarkdown>
+                    ) : (
+                      <pre className="file-viewer-content">{selectedWorkspaceFile.content}</pre>
+                    )
+                  ) : null}
+                  {selectedWorkspaceFile.isBinary && !selectedWorkspaceFile.mimeType.startsWith("image/") ? (
+                    <p className="runtime-warning">Binary file preview is not available for this file type yet.</p>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="diagnostics-empty">No file loaded yet.</p>
+              )}
+            </section>
           ) : null}
 
           {rightTab === "diagnostics" ? (

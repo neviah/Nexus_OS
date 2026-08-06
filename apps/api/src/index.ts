@@ -20,6 +20,9 @@ import { readHarnessRegistry, resolveHarnessHealth } from "./lib/harnessRegistry
 import { getRootDir, readSystemState, writeSystemState } from "./lib/stateStore.js";
 import { getRouterSummary } from "./lib/routerStatus.js";
 import type {
+  AutopilotLoopProfile,
+  AutopilotLoopRunMode,
+  AutopilotLoopTask,
   ChatMessage,
   GameCreatorSetupWizardDraft,
   StartupReadiness,
@@ -124,6 +127,7 @@ const app = express();
 const port = Number(process.env.PORT ?? 8080);
 const activeStreams = new Map<string, AbortController>();
 const activeScheduleRuns = new Set<string>();
+const activeAutopilotRuns = new Map<string, { runId: string; abortController: AbortController }>();
 const execFileAsync = promisify(execFile);
 
 type RuntimeJobAction =
@@ -505,6 +509,10 @@ type GameCreatorSpecPackage = {
   scopeWarnings: string[];
 };
 
+type GameCreatorGateSpec = {
+  setupWizard: Pick<GameCreatorSetupWizardDraft, "target" | "genre" | "perspective" | "scopeTier" | "artStyle" | "controls" | "coreLoopPriority" | "difficultyTarget" | "enemyFamilies" | "biomes" | "bosses">;
+};
+
 function pickEnumValue<T extends readonly string[]>(value: unknown, allowed: T, fallback: T[number]): T[number] {
   if (typeof value !== "string") {
     return fallback;
@@ -601,6 +609,25 @@ function buildGameCreatorSpecPackage(draft: GameCreatorSetupWizardDraft): GameCr
       requiresControllerChecklist: draft.controls === "controller" || draft.controls === "both",
     },
     scopeWarnings: warnings,
+  };
+}
+
+function toGameCreatorGateSpec(specPackage: GameCreatorSpecPackage): GameCreatorGateSpec {
+  const setupWizard = specPackage.setupWizard;
+  return {
+    setupWizard: {
+      target: setupWizard.target,
+      genre: setupWizard.genre,
+      perspective: setupWizard.perspective,
+      scopeTier: setupWizard.scopeTier,
+      artStyle: setupWizard.artStyle,
+      controls: setupWizard.controls,
+      coreLoopPriority: setupWizard.coreLoopPriority,
+      difficultyTarget: setupWizard.difficultyTarget,
+      enemyFamilies: setupWizard.enemyFamilies,
+      biomes: setupWizard.biomes,
+      bosses: setupWizard.bosses,
+    },
   };
 }
 
@@ -810,14 +837,17 @@ const gameCreatorGenerationProgressByWorkspace = new Map<string, GameCreatorGene
 const gameCreatorExecutionRunnerByWorkspace = new Map<string, GameCreatorExecutionRunnerControl>();
 const AUTOPILOT_AGENT_ID = "autopilot-loop";
 const AUTOPILOT_LOOP_PROFILES = ["free", "cost", "custom"] as const;
+const AUTOPILOT_LOOP_RUN_MODES = ["strict-approval", "auto-produce"] as const;
 const AUTOPILOT_LOOP_FREE_MODELS = ["deepseek-v3", "qwen-2.5-72b", "qwen-coder-plus"] as const;
 const AUTOPILOT_LOOP_COST_MODELS = ["claude-3.7-sonnet", "claude-3.5-sonnet", "deepseek-v3"] as const;
-
-type AutopilotLoopProfile = typeof AUTOPILOT_LOOP_PROFILES[number];
-
 type AutopilotLoopConfig = {
   profile: AutopilotLoopProfile;
   backendHarnessId: string;
+  objective: string;
+  completionContract: string;
+  taskPlan: AutopilotLoopTask[];
+  planGeneratedAt: string;
+  planSource: "objective" | "manual";
   maxSteps: number;
   maxDurationMinutes: number;
   maxRetriesPerTask: number;
@@ -825,11 +855,15 @@ type AutopilotLoopConfig = {
   updatedAt: string;
   lastRun?: {
     status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
+    runId?: string;
     startedAt?: string;
     finishedAt?: string;
     stepsExecuted?: number;
     blocker?: string;
-    mode?: GameCreatorExecutionMode;
+    mode?: AutopilotLoopRunMode;
+    currentTaskId?: string;
+    currentTaskTitle?: string;
+    completedTaskIds?: string[];
   };
 };
 
@@ -2537,14 +2571,20 @@ function getGameCreatorExecutionMode(state: SystemState): GameCreatorExecutionMo
 }
 
 function getDefaultAutopilotLoopConfig(): AutopilotLoopConfig {
+  const now = new Date().toISOString();
   return {
     profile: "free",
     backendHarnessId: "hermes",
+    objective: "",
+    completionContract: "",
+    taskPlan: [],
+    planGeneratedAt: now,
+    planSource: "manual",
     maxSteps: 20,
     maxDurationMinutes: 90,
     maxRetriesPerTask: 2,
     customFallbackChain: [],
-    updatedAt: new Date().toISOString(),
+    updatedAt: now,
     lastRun: {
       status: "idle",
     },
@@ -2555,7 +2595,7 @@ function normalizeAutopilotFallbackChain(input: unknown): Array<{ providerId: st
   if (!Array.isArray(input)) {
     return [];
   }
-  const sanitized = input
+  return input
     .map((entry) => {
       if (!entry || typeof entry !== "object") {
         return null;
@@ -2571,17 +2611,116 @@ function normalizeAutopilotFallbackChain(input: unknown): Array<{ providerId: st
       }
       return { providerId, model };
     })
-    .filter((entry): entry is { providerId: string; model: string } => Boolean(entry));
-  return sanitized.slice(0, 8);
+    .filter((entry): entry is { providerId: string; model: string } => Boolean(entry))
+    .slice(0, 8);
+}
+
+function normalizeAutopilotTaskPlan(input: unknown): AutopilotLoopTask[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return input
+    .map((entry, index) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+      const title = typeof (entry as { title?: unknown }).title === "string" ? (entry as { title: string }).title.trim() : "";
+      const detail = typeof (entry as { detail?: unknown }).detail === "string" ? (entry as { detail: string }).detail.trim() : "";
+      const id = typeof (entry as { id?: unknown }).id === "string" && (entry as { id: string }).id.trim().length > 0
+        ? (entry as { id: string }).id.trim()
+        : `task-${index + 1}`;
+      const status = pickEnumValue((entry as { status?: unknown }).status, ["pending", "running", "done"] as const, "pending");
+      const source = pickEnumValue((entry as { source?: unknown }).source, ["objective", "manual"] as const, "objective");
+      const order = Number.isFinite(Number((entry as { order?: unknown }).order)) ? Math.max(1, Math.floor(Number((entry as { order?: unknown }).order))) : index + 1;
+      const createdAt = isIsoDateString((entry as { createdAt?: unknown }).createdAt) ? (entry as { createdAt: string }).createdAt : new Date().toISOString();
+      const updatedAt = isIsoDateString((entry as { updatedAt?: unknown }).updatedAt) ? (entry as { updatedAt: string }).updatedAt : createdAt;
+      if (!title || !detail) {
+        return null;
+      }
+      return { id, order, title, detail, status, source, createdAt, updatedAt };
+    })
+    .filter((entry): entry is AutopilotLoopTask => Boolean(entry))
+    .sort((left, right) => left.order - right.order)
+    .slice(0, 24);
+}
+
+function summarizeAutopilotObjective(objective: string): string[] {
+  const normalized = objective
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return [];
+  }
+  const fragments = normalized
+    .split(/\n+/)
+    .flatMap((line) => line.split(/(?:\band\b|\bthen\b|;|\.|,)+/i))
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  return fragments.length > 0 ? fragments : [normalized];
+}
+
+function buildAutopilotTaskPlan(input: { objective: string; completionContract: string; source?: "objective" | "manual" }): AutopilotLoopTask[] {
+  const now = new Date().toISOString();
+  const plan: AutopilotLoopTask[] = [];
+  const objective = input.objective.trim();
+  const completionContract = input.completionContract.trim();
+  if (!objective && !completionContract) {
+    return plan;
+  }
+
+  if (objective) {
+    plan.push({
+      id: "intake-objective",
+      order: 1,
+      title: "Intake objective",
+      detail: objective,
+      status: "pending",
+      source: input.source ?? "objective",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const slices = summarizeAutopilotObjective(objective);
+    slices.forEach((slice, index) => {
+      plan.push({
+        id: `slice-${index + 1}`,
+        order: index + 2,
+        title: `Work slice ${index + 1}`,
+        detail: slice,
+        status: "pending",
+        source: input.source ?? "objective",
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+  }
+
+  if (completionContract) {
+    plan.push({
+      id: "verify-completion-contract",
+      order: plan.length + 1,
+      title: "Verify completion contract",
+      detail: completionContract,
+      status: "pending",
+      source: input.source ?? "objective",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  return plan.length > 0 ? plan.slice(0, 24) : [];
 }
 
 function getAutopilotLoopConfig(state: SystemState): AutopilotLoopConfig {
   const base = getDefaultAutopilotLoopConfig();
-  const raw = state.gameCreator?.autopilotLoop;
-  const profile = pickEnumValue(raw?.profile, AUTOPILOT_LOOP_PROFILES, base.profile);
+  const raw = state.autopilotLoop ?? (state.gameCreator as { autopilotLoop?: Partial<AutopilotLoopConfig> } | undefined)?.autopilotLoop;
+  const profile = pickEnumValue(raw?.profile ?? base.profile, AUTOPILOT_LOOP_PROFILES, base.profile);
   const backendHarnessId = typeof raw?.backendHarnessId === "string" && raw.backendHarnessId.trim().length > 0
     ? raw.backendHarnessId.trim()
     : base.backendHarnessId;
+  const objective = typeof raw?.objective === "string" ? raw.objective : base.objective;
+  const completionContract = typeof raw?.completionContract === "string" ? raw.completionContract : base.completionContract;
   const maxStepsRaw = Number(raw?.maxSteps ?? base.maxSteps);
   const maxDurationRaw = Number(raw?.maxDurationMinutes ?? base.maxDurationMinutes);
   const maxRetriesRaw = Number(raw?.maxRetriesPerTask ?? base.maxRetriesPerTask);
@@ -2590,10 +2729,16 @@ function getAutopilotLoopConfig(state: SystemState): AutopilotLoopConfig {
   const maxDurationMinutes = Number.isFinite(maxDurationRaw) ? Math.min(480, Math.max(5, Math.floor(maxDurationRaw))) : base.maxDurationMinutes;
   const maxRetriesPerTask = Number.isFinite(maxRetriesRaw) ? Math.min(10, Math.max(0, Math.floor(maxRetriesRaw))) : base.maxRetriesPerTask;
   const customFallbackChain = normalizeAutopilotFallbackChain(raw?.customFallbackChain);
+  const taskPlan = normalizeAutopilotTaskPlan(raw?.taskPlan);
 
   return {
     profile,
     backendHarnessId,
+    objective,
+    completionContract,
+    taskPlan: taskPlan.length > 0 ? taskPlan : buildAutopilotTaskPlan({ objective, completionContract, source: raw?.planSource === "manual" ? "manual" : "objective" }),
+    planGeneratedAt: isIsoDateString(raw?.planGeneratedAt) ? raw.planGeneratedAt : base.planGeneratedAt,
+    planSource: raw?.planSource === "manual" ? "manual" : base.planSource,
     maxSteps,
     maxDurationMinutes,
     maxRetriesPerTask,
@@ -2604,19 +2749,253 @@ function getAutopilotLoopConfig(state: SystemState): AutopilotLoopConfig {
 }
 
 function writeAutopilotLoopConfig(state: SystemState, config: AutopilotLoopConfig): void {
-  state.gameCreator = {
-    ...(state.gameCreator ?? {}),
-    autopilotLoop: {
-      profile: config.profile,
-      backendHarnessId: config.backendHarnessId,
-      maxSteps: config.maxSteps,
-      maxDurationMinutes: config.maxDurationMinutes,
-      maxRetriesPerTask: config.maxRetriesPerTask,
-      customFallbackChain: config.customFallbackChain,
-      updatedAt: config.updatedAt,
-      lastRun: config.lastRun,
-    },
+  const journal = Array.isArray(state.autopilotLoop?.journal) ? state.autopilotLoop.journal.slice(-500) : [];
+  state.autopilotLoop = {
+    profile: config.profile,
+    backendHarnessId: config.backendHarnessId,
+    objective: config.objective,
+    completionContract: config.completionContract,
+    taskPlan: config.taskPlan,
+    planGeneratedAt: config.planGeneratedAt,
+    planSource: config.planSource,
+    maxSteps: config.maxSteps,
+    maxDurationMinutes: config.maxDurationMinutes,
+    maxRetriesPerTask: config.maxRetriesPerTask,
+    customFallbackChain: config.customFallbackChain,
+    updatedAt: config.updatedAt,
+    lastRun: config.lastRun,
+    journal,
   };
+}
+
+type AutopilotJournalEntry = {
+  seq: number;
+  at: string;
+  level: "info" | "warn" | "error";
+  event: string;
+  message: string;
+  taskId?: string;
+  taskTitle?: string;
+  runId?: string;
+};
+
+function getAutopilotJournal(state: SystemState): AutopilotJournalEntry[] {
+  const raw = state.autopilotLoop?.journal;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const entries: AutopilotJournalEntry[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const seq = Number((entry as { seq?: unknown }).seq);
+    const at = typeof (entry as { at?: unknown }).at === "string" ? (entry as { at: string }).at : "";
+    const level = pickEnumValue((entry as { level?: unknown }).level, ["info", "warn", "error"] as const, "info");
+    const event = typeof (entry as { event?: unknown }).event === "string" ? (entry as { event: string }).event : "event";
+    const message = typeof (entry as { message?: unknown }).message === "string" ? (entry as { message: string }).message : "";
+    const taskId = typeof (entry as { taskId?: unknown }).taskId === "string" ? (entry as { taskId: string }).taskId : undefined;
+    const taskTitle = typeof (entry as { taskTitle?: unknown }).taskTitle === "string" ? (entry as { taskTitle: string }).taskTitle : undefined;
+    const runId = typeof (entry as { runId?: unknown }).runId === "string" ? (entry as { runId: string }).runId : undefined;
+    if (!Number.isFinite(seq) || !at || !message) {
+      continue;
+    }
+    entries.push({ seq: Math.max(1, Math.floor(seq)), at, level, event, message, taskId, taskTitle, runId });
+  }
+  return entries.sort((left, right) => left.seq - right.seq).slice(-500);
+}
+
+function appendAutopilotJournalEntry(state: SystemState, input: Omit<AutopilotJournalEntry, "seq" | "at"> & { at?: string }): AutopilotJournalEntry {
+  const existing = getAutopilotJournal(state);
+  const lastSeq = existing.length > 0 ? existing[existing.length - 1].seq : 0;
+  const entry: AutopilotJournalEntry = {
+    seq: lastSeq + 1,
+    at: input.at ?? new Date().toISOString(),
+    level: input.level,
+    event: input.event,
+    message: input.message,
+    taskId: input.taskId,
+    taskTitle: input.taskTitle,
+    runId: input.runId,
+  };
+  state.autopilotLoop = {
+    ...(state.autopilotLoop ?? {}),
+    journal: [...existing, entry].slice(-500),
+  };
+  return entry;
+}
+
+function isAutopilotRunActive(workspaceId: string): boolean {
+  return activeAutopilotRuns.has(workspaceId);
+}
+
+function waitWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("aborted"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error("aborted"));
+    };
+    signal.addEventListener("abort", onAbort);
+  });
+}
+
+async function runAutopilotLoopInBackground(input: {
+  workspaceId: string;
+  runId: string;
+  mode: AutopilotLoopRunMode;
+  maxSteps: number;
+  resume: boolean;
+  abortController: AbortController;
+}): Promise<void> {
+  const signal = input.abortController.signal;
+  let stepsExecuted = 0;
+  let blocker: string | undefined;
+  let finalStatus: "paused" | "completed" | "canceled" | "failed" = "paused";
+
+  try {
+    for (let index = 0; index < input.maxSteps; index += 1) {
+      if (signal.aborted) {
+        blocker = "Stopped by user.";
+        finalStatus = "canceled";
+        break;
+      }
+
+      const state = await readSystemState();
+      const config = getAutopilotLoopConfig(state);
+      const nextTask = getAutopilotNextTask(config);
+
+      if (!nextTask) {
+        blocker = config.objective.trim() || config.completionContract.trim()
+          ? "Autopilot plan is complete."
+          : "Set an objective and completion contract before running Autopilot.";
+        finalStatus = blocker.includes("complete") ? "completed" : "paused";
+        appendAutopilotJournalEntry(state, {
+          level: "info",
+          event: "run-blocker",
+          message: blocker,
+          runId: input.runId,
+        });
+        await writeSystemState(state);
+        break;
+      }
+
+      const runningState = await readSystemState();
+      const runningConfig = getAutopilotLoopConfig(runningState);
+      const runningPlan = runningConfig.taskPlan.map((task) => task.id === nextTask.id
+        ? { ...task, status: "running" as const, updatedAt: new Date().toISOString() }
+        : task);
+      writeAutopilotLoopConfig(runningState, {
+        ...runningConfig,
+        taskPlan: runningPlan,
+        updatedAt: new Date().toISOString(),
+        lastRun: {
+          ...(runningConfig.lastRun ?? {}),
+          runId: input.runId,
+          status: "running",
+          mode: input.mode,
+          currentTaskId: nextTask.id,
+          currentTaskTitle: nextTask.title,
+        },
+      });
+      appendAutopilotJournalEntry(runningState, {
+        level: "info",
+        event: "task-start",
+        message: `Starting task: ${nextTask.title}`,
+        taskId: nextTask.id,
+        taskTitle: nextTask.title,
+        runId: input.runId,
+      });
+      await writeSystemState(runningState);
+
+      await waitWithAbort(250, signal);
+
+      const completedState = await readSystemState();
+      const completedConfig = getAutopilotLoopConfig(completedState);
+      const completedPlan = completedConfig.taskPlan.map((task) => task.id === nextTask.id
+        ? { ...task, status: "done" as const, updatedAt: new Date().toISOString() }
+        : task);
+      stepsExecuted += 1;
+      writeAutopilotLoopConfig(completedState, {
+        ...completedConfig,
+        taskPlan: completedPlan,
+        updatedAt: new Date().toISOString(),
+        lastRun: {
+          ...(completedConfig.lastRun ?? {}),
+          runId: input.runId,
+          status: "running",
+          mode: input.mode,
+          currentTaskId: nextTask.id,
+          currentTaskTitle: nextTask.title,
+          stepsExecuted,
+          completedTaskIds: [...(completedConfig.lastRun?.completedTaskIds ?? []), nextTask.id],
+        },
+      });
+      appendAutopilotJournalEntry(completedState, {
+        level: "info",
+        event: "task-done",
+        message: `Completed task: ${nextTask.title}`,
+        taskId: nextTask.id,
+        taskTitle: nextTask.title,
+        runId: input.runId,
+      });
+      await writeSystemState(completedState);
+    }
+
+    if (!signal.aborted && finalStatus !== "completed") {
+      const state = await readSystemState();
+      const config = getAutopilotLoopConfig(state);
+      const summary = buildAutopilotPlanSummary(config);
+      if (!blocker && summary.pending > 0) {
+        blocker = "Reached max step limit before finishing the plan.";
+      }
+      if (summary.pending === 0) {
+        finalStatus = "completed";
+      }
+    }
+  } catch (error) {
+    if (signal.aborted) {
+      blocker = "Stopped by user.";
+      finalStatus = "canceled";
+    } else {
+      blocker = String(error);
+      finalStatus = "failed";
+    }
+  } finally {
+    const finalState = await readSystemState();
+    const finalConfig = getAutopilotLoopConfig(finalState);
+    writeAutopilotLoopConfig(finalState, {
+      ...finalConfig,
+      updatedAt: new Date().toISOString(),
+      lastRun: {
+        ...(finalConfig.lastRun ?? {}),
+        runId: input.runId,
+        status: finalStatus,
+        mode: input.mode,
+        finishedAt: new Date().toISOString(),
+        stepsExecuted,
+        blocker,
+      },
+    });
+    appendAutopilotJournalEntry(finalState, {
+      level: finalStatus === "failed" ? "error" : (finalStatus === "canceled" ? "warn" : "info"),
+      event: "run-finished",
+      message: finalStatus === "completed"
+        ? `Autopilot run completed after ${stepsExecuted} step(s).`
+        : `Autopilot run ${finalStatus} after ${stepsExecuted} step(s).${blocker ? ` ${blocker}` : ""}`,
+      runId: input.runId,
+    });
+    await writeSystemState(finalState);
+    activeAutopilotRuns.delete(input.workspaceId);
+  }
 }
 
 function resolveAutopilotProviderId(state: SystemState): string | null {
@@ -2664,22 +3043,24 @@ function resolveAutopilotEffectiveFallbackChain(state: SystemState, config: Auto
   };
 }
 
-function buildAutopilotQueueSummary(state: SystemState): {
+function getAutopilotNextTask(config: AutopilotLoopConfig): AutopilotLoopTask | null {
+  return config.taskPlan.find((task) => task.status !== "done") ?? null;
+}
+
+function buildAutopilotPlanSummary(config: AutopilotLoopConfig): {
   total: number;
-  ready: number;
-  inProgress: number;
-  blocked: number;
+  pending: number;
+  running: number;
   done: number;
-  backlog: number;
+  blocked: number;
 } {
-  const queue = getGameCreatorExecutionQueueStore(state);
+  const tasks = config.taskPlan;
   return {
-    total: queue.items.length,
-    ready: queue.items.filter((entry) => entry.status === "ready").length,
-    inProgress: queue.items.filter((entry) => entry.status === "in-progress").length,
-    blocked: queue.items.filter((entry) => entry.status === "blocked").length,
-    done: queue.items.filter((entry) => entry.status === "done").length,
-    backlog: queue.items.filter((entry) => entry.status === "backlog").length,
+    total: tasks.length,
+    pending: tasks.filter((entry) => entry.status === "pending").length,
+    running: tasks.filter((entry) => entry.status === "running").length,
+    done: tasks.filter((entry) => entry.status === "done").length,
+    blocked: 0,
   };
 }
 
@@ -8061,6 +8442,11 @@ app.get("/api/tools/game-creator/release/status", async (req, res) => {
   const specPackage = buildGameCreatorSpecPackage(draft);
   const canonStore = getGameCreatorCanonDocsStore(state);
   const queueStore = getGameCreatorExecutionQueueStore(state);
+  const gateSpec = toGameCreatorGateSpec(specPackage);
+  const gate3Readiness = await evaluateGate3Readiness({ workspacePath: workspace.path, spec: gateSpec });
+  const gate4Readiness = await evaluateGate4Readiness({ workspacePath: workspace.path, spec: gateSpec });
+  const handoffBundleRelativePath = path.posix.join("GameBuild", "unity", "Assets", "NexusGenerated", "GameCreatorUnityHandoffBundle.json");
+  const handoffBundleReady = await fileExists(path.join(workspace.path, handoffBundleRelativePath));
   const release = buildGameCreatorReleasePackage({
     workspacePath: workspace.path,
     specPackage,
@@ -8069,6 +8455,12 @@ app.get("/api/tools/game-creator/release/status", async (req, res) => {
     artifacts: getGameCreatorExecutionArtifacts(state),
     jobs: getGameCreatorExecutionJobs(state),
     run: getGameCreatorExecutionRunState(state),
+    gateReadiness: {
+      gate3Ready: gate3Readiness.ready,
+      gate4Ready: gate4Readiness.ready,
+      handoffBundleReady,
+      handoffBundleRelativePath,
+    },
   });
   const telemetrySummary = buildGameCreatorTelemetrySummary({ workspaceId: workspace.id, storageDir: gameCreatorTelemetryStorageDir });
   const complianceSummary = buildGameCreatorComplianceSummary({
@@ -8097,6 +8489,11 @@ app.post("/api/tools/game-creator/release/build", async (req, res) => {
   const specPackage = buildGameCreatorSpecPackage(draft);
   const canonStore = getGameCreatorCanonDocsStore(state);
   const queueStore = getGameCreatorExecutionQueueStore(state);
+  const gateSpec = toGameCreatorGateSpec(specPackage);
+  const gate3Readiness = await evaluateGate3Readiness({ workspacePath: workspace.path, spec: gateSpec });
+  const gate4Readiness = await evaluateGate4Readiness({ workspacePath: workspace.path, spec: gateSpec });
+  const handoffBundleRelativePath = path.posix.join("GameBuild", "unity", "Assets", "NexusGenerated", "GameCreatorUnityHandoffBundle.json");
+  const handoffBundleReady = await fileExists(path.join(workspace.path, handoffBundleRelativePath));
   const release = await writeGameCreatorReleasePackage({
     workspacePath: workspace.path,
     specPackage,
@@ -8105,6 +8502,12 @@ app.post("/api/tools/game-creator/release/build", async (req, res) => {
     artifacts: getGameCreatorExecutionArtifacts(state),
     jobs: getGameCreatorExecutionJobs(state),
     run: getGameCreatorExecutionRunState(state),
+    gateReadiness: {
+      gate3Ready: gate3Readiness.ready,
+      gate4Ready: gate4Readiness.ready,
+      handoffBundleReady,
+      handoffBundleRelativePath,
+    },
   });
   const telemetrySummary = buildGameCreatorTelemetrySummary({ workspaceId: workspace.id, storageDir: gameCreatorTelemetryStorageDir });
   const complianceSummary = buildGameCreatorComplianceSummary({
@@ -9139,6 +9542,7 @@ app.get("/api/tools/autopilot-loop/profile", async (_req, res) => {
     ok: true,
     agentId: AUTOPILOT_AGENT_ID,
     config,
+    planSummary: buildAutopilotPlanSummary(config),
     effectiveFallbackChain: effective.chain,
     effectiveSource: effective.source,
     profileOptions: AUTOPILOT_LOOP_PROFILES,
@@ -9149,6 +9553,8 @@ app.post("/api/tools/autopilot-loop/profile", async (req, res) => {
   const body = req.body as {
     profile?: AutopilotLoopProfile;
     backendHarnessId?: string;
+    objective?: string;
+    completionContract?: string;
     maxSteps?: number;
     maxDurationMinutes?: number;
     maxRetriesPerTask?: number;
@@ -9157,10 +9563,12 @@ app.post("/api/tools/autopilot-loop/profile", async (req, res) => {
 
   const state = await readSystemState();
   const existing = getAutopilotLoopConfig(state);
-  const profile = pickEnumValue(body.profile, AUTOPILOT_LOOP_PROFILES, existing.profile);
+  const profile = pickEnumValue(body.profile ?? existing.profile, AUTOPILOT_LOOP_PROFILES, existing.profile);
   const backendHarnessId = typeof body.backendHarnessId === "string" && body.backendHarnessId.trim().length > 0
     ? body.backendHarnessId.trim()
     : existing.backendHarnessId;
+  const objective = typeof body.objective === "string" ? body.objective : existing.objective;
+  const completionContract = typeof body.completionContract === "string" ? body.completionContract : existing.completionContract;
   const maxSteps = Number.isFinite(Number(body.maxSteps))
     ? Math.min(200, Math.max(1, Math.floor(Number(body.maxSteps))))
     : existing.maxSteps;
@@ -9173,11 +9581,24 @@ app.post("/api/tools/autopilot-loop/profile", async (req, res) => {
   const customFallbackChain = body.customFallbackChain !== undefined
     ? normalizeAutopilotFallbackChain(body.customFallbackChain)
     : existing.customFallbackChain;
+  const regeneratePlan = body.objective !== undefined || body.completionContract !== undefined;
+  const taskPlan = regeneratePlan
+    ? buildAutopilotTaskPlan({
+      objective,
+      completionContract,
+      source: existing.planSource ?? "objective",
+    })
+    : existing.taskPlan;
 
   const next: AutopilotLoopConfig = {
     ...existing,
     profile,
     backendHarnessId,
+    objective,
+    completionContract,
+    taskPlan,
+    planGeneratedAt: regeneratePlan ? new Date().toISOString() : existing.planGeneratedAt,
+    planSource: regeneratePlan ? "objective" : existing.planSource,
     maxSteps,
     maxDurationMinutes,
     maxRetriesPerTask,
@@ -9198,6 +9619,7 @@ app.post("/api/tools/autopilot-loop/profile", async (req, res) => {
     ok: true,
     agentId: AUTOPILOT_AGENT_ID,
     config: next,
+    planSummary: buildAutopilotPlanSummary(next),
     effectiveFallbackChain: effective.chain,
     effectiveSource: effective.source,
   });
@@ -9209,8 +9631,10 @@ app.get("/api/tools/autopilot-loop/status", async (req, res) => {
   const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
   const config = getAutopilotLoopConfig(state);
   const effective = resolveAutopilotEffectiveFallbackChain(state, config);
-  const queueSummary = buildAutopilotQueueSummary(state);
-  const run = getGameCreatorExecutionRunState(state);
+  const planSummary = buildAutopilotPlanSummary(config);
+  const currentTask = getAutopilotNextTask(config);
+  const journal = getAutopilotJournal(state);
+  const isRunning = isAutopilotRunActive(workspace.id);
 
   return res.json({
     ok: true,
@@ -9218,131 +9642,384 @@ app.get("/api/tools/autopilot-loop/status", async (req, res) => {
     workspacePath: workspace.path,
     agentId: AUTOPILOT_AGENT_ID,
     config,
+    planSummary,
+    currentTask,
     effectiveFallbackChain: effective.chain,
     effectiveSource: effective.source,
-    queueSummary,
-    executionRun: run,
+    isRunning,
+    journalTail: journal.slice(-120),
     lastRun: config.lastRun ?? { status: "idle" },
   });
 });
 
-app.post("/api/tools/autopilot-loop/run-step", async (req, res) => {
-  const body = req.body as { workspaceId?: string; mode?: GameCreatorExecutionMode };
+app.get("/api/tools/autopilot-loop/journal", async (req, res) => {
+  const workspaceId = String(req.query.workspaceId ?? "").trim();
+  const afterSeq = Number(req.query.afterSeq ?? 0);
+  const limitRaw = Number(req.query.limit ?? 120);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.floor(limitRaw))) : 120;
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, workspaceId || state.activeWorkspaceId);
+  const journal = getAutopilotJournal(state);
+  const entries = journal
+    .filter((entry) => entry.seq > (Number.isFinite(afterSeq) ? Math.floor(afterSeq) : 0))
+    .slice(-limit);
+  const latestSeq = journal.length > 0 ? journal[journal.length - 1].seq : 0;
+  return res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    entries,
+    latestSeq,
+    isRunning: isAutopilotRunActive(workspace.id),
+  });
+});
+
+app.post("/api/tools/autopilot-loop/run-start", async (req, res) => {
+  const body = req.body as { workspaceId?: string; mode?: AutopilotLoopRunMode; maxSteps?: number; resume?: boolean };
   const state = await readSystemState();
   const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  if (isAutopilotRunActive(workspace.id)) {
+    return res.status(409).json({ error: "Autopilot is already running for this workspace." });
+  }
+
   const config = getAutopilotLoopConfig(state);
-  const mode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
+  const mode = pickEnumValue(body.mode, AUTOPILOT_LOOP_RUN_MODES, config.lastRun?.mode ?? "strict-approval");
+  const requestedMax = Number.isFinite(Number(body.maxSteps)) ? Number(body.maxSteps) : config.maxSteps;
+  const maxSteps = Math.min(200, Math.max(1, Math.floor(requestedMax)));
+  const runId = crypto.randomUUID();
+  const startedAt = new Date().toISOString();
+  const resume = body.resume === true;
+
+  writeAutopilotLoopConfig(state, {
+    ...config,
+    updatedAt: startedAt,
+    lastRun: {
+      runId,
+      status: "running",
+      startedAt,
+      finishedAt: undefined,
+      blocker: undefined,
+      mode,
+      stepsExecuted: 0,
+      completedTaskIds: resume ? (config.lastRun?.completedTaskIds ?? []) : [],
+      currentTaskId: undefined,
+      currentTaskTitle: undefined,
+    },
+  });
+  appendAutopilotJournalEntry(state, {
+    level: "info",
+    event: resume ? "run-resume" : "run-start",
+    message: `${resume ? "Resumed" : "Started"} Autopilot run (${mode}) with max ${maxSteps} step(s).`,
+    runId,
+  });
+  await writeSystemState(state);
+
+  const abortController = new AbortController();
+  activeAutopilotRuns.set(workspace.id, { runId, abortController });
+  void runAutopilotLoopInBackground({ workspaceId: workspace.id, runId, mode, maxSteps, resume, abortController });
+
+  return res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    runId,
+    mode,
+    maxSteps,
+    resumed: resume,
+    lastRun: getAutopilotLoopConfig(state).lastRun,
+  });
+});
+
+app.post("/api/tools/autopilot-loop/stop", async (req, res) => {
+  const body = req.body as { workspaceId?: string };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  const activeRun = activeAutopilotRuns.get(workspace.id);
+  if (!activeRun) {
+    return res.status(409).json({ error: "Autopilot is not running." });
+  }
+  activeRun.abortController.abort();
+  return res.json({ ok: true, workspaceId: workspace.id, runId: activeRun.runId, stopping: true });
+});
+
+app.post("/api/tools/autopilot-loop/resume", async (req, res) => {
+  const body = req.body as { workspaceId?: string; mode?: AutopilotLoopRunMode; maxSteps?: number };
+  const state = await readSystemState();
+  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
+  if (isAutopilotRunActive(workspace.id)) {
+    return res.status(409).json({ error: "Autopilot is already running for this workspace." });
+  }
+  const config = getAutopilotLoopConfig(state);
+  if (config.taskPlan.every((task) => task.status === "done")) {
+    return res.status(409).json({ error: "No pending tasks remain to resume." });
+  }
+
+  const mode = pickEnumValue(body.mode, AUTOPILOT_LOOP_RUN_MODES, config.lastRun?.mode ?? "strict-approval");
+  const requestedMax = Number.isFinite(Number(body.maxSteps)) ? Number(body.maxSteps) : config.maxSteps;
+  const maxSteps = Math.min(200, Math.max(1, Math.floor(requestedMax)));
+  const runId = crypto.randomUUID();
+  const startedAt = new Date().toISOString();
+
+  writeAutopilotLoopConfig(state, {
+    ...config,
+    updatedAt: startedAt,
+    lastRun: {
+      runId,
+      status: "running",
+      startedAt,
+      finishedAt: undefined,
+      blocker: undefined,
+      mode,
+      stepsExecuted: 0,
+      completedTaskIds: config.lastRun?.completedTaskIds ?? [],
+      currentTaskId: config.lastRun?.currentTaskId,
+      currentTaskTitle: config.lastRun?.currentTaskTitle,
+    },
+  });
+  appendAutopilotJournalEntry(state, {
+    level: "info",
+    event: "run-resume",
+    message: `Resumed Autopilot run (${mode}) from the latest journal checkpoint with max ${maxSteps} step(s).`,
+    runId,
+  });
+  await writeSystemState(state);
+
+  const abortController = new AbortController();
+  activeAutopilotRuns.set(workspace.id, { runId, abortController });
+  void runAutopilotLoopInBackground({ workspaceId: workspace.id, runId, mode, maxSteps, resume: true, abortController });
+
+  return res.json({
+    ok: true,
+    workspaceId: workspace.id,
+    runId,
+    mode,
+    maxSteps,
+    resumed: true,
+    lastRun: getAutopilotLoopConfig(state).lastRun,
+  });
+});
+
+app.post("/api/tools/autopilot-loop/run-step", async (req, res) => {
+  const body = req.body as { workspaceId?: string; mode?: AutopilotLoopRunMode };
+  const workspaceState = await readSystemState();
+  const workspace = await resolveWorkspaceContext(workspaceState, body.workspaceId ?? workspaceState.activeWorkspaceId);
+  if (isAutopilotRunActive(workspace.id)) {
+    return res.status(409).json({ error: "Autopilot is already running. Stop it before running a single step." });
+  }
+  const state = await readSystemState();
+  const config = getAutopilotLoopConfig(state);
+  const mode = pickEnumValue(body.mode, AUTOPILOT_LOOP_RUN_MODES, config.lastRun?.mode ?? "strict-approval");
+  const currentTask = getAutopilotNextTask(config);
+  const now = new Date().toISOString();
+  const runId = crypto.randomUUID();
 
   writeAutopilotLoopConfig(state, {
     ...config,
     updatedAt: new Date().toISOString(),
     lastRun: {
+      runId,
       status: "running",
-      startedAt: new Date().toISOString(),
+      startedAt: now,
       mode,
       stepsExecuted: 0,
     },
   });
+  appendAutopilotJournalEntry(state, {
+    level: "info",
+    event: "run-step-start",
+    message: "Running one Autopilot step.",
+    runId,
+  });
   await writeSystemState(state);
 
-  const step = await runNextGameCreatorExecutionStep({ workspaceId: workspace.id, mode });
-  const afterState = await readSystemState();
-  const afterConfig = getAutopilotLoopConfig(afterState);
-  const doneNow = buildAutopilotQueueSummary(afterState).ready === 0;
-
-  const nextStatus = step.ok
-    ? (doneNow ? "completed" : "paused")
-    : (step.statusCode === 409 || step.statusCode === 412 ? "paused" : "failed");
-
-  writeAutopilotLoopConfig(afterState, {
-    ...afterConfig,
-    updatedAt: new Date().toISOString(),
-    lastRun: {
-      status: nextStatus,
-      startedAt: afterConfig.lastRun?.startedAt,
-      finishedAt: new Date().toISOString(),
-      stepsExecuted: step.ok ? 1 : 0,
-      blocker: step.ok ? undefined : step.blocker,
-      mode,
-    },
-  });
-  await writeSystemState(afterState);
-
-  if (!step.ok) {
-    return res.status(step.statusCode ?? 500).json({
+  if (!currentTask) {
+    const afterState = await readSystemState();
+    const afterConfig = getAutopilotLoopConfig(afterState);
+    writeAutopilotLoopConfig(afterState, {
+      ...afterConfig,
+      updatedAt: new Date().toISOString(),
+      lastRun: {
+        status: "paused",
+        startedAt: afterConfig.lastRun?.startedAt ?? now,
+        finishedAt: new Date().toISOString(),
+        stepsExecuted: 0,
+        blocker: "Set an objective and completion contract before running Autopilot.",
+        mode,
+        runId,
+      },
+    });
+    appendAutopilotJournalEntry(afterState, {
+      level: "warn",
+      event: "run-step-blocked",
+      message: "Step blocked: objective/completion contract is missing.",
+      runId,
+    });
+    await writeSystemState(afterState);
+    return res.status(409).json({
       ok: false,
       agentId: AUTOPILOT_AGENT_ID,
       mode,
-      error: step.blocker ?? "Execution failed.",
-      job: step.job,
+      error: "Set an objective and completion contract before running Autopilot.",
       lastRun: getAutopilotLoopConfig(afterState).lastRun,
+      planSummary: buildAutopilotPlanSummary(getAutopilotLoopConfig(afterState)),
     });
   }
+
+  const updatedPlan = config.taskPlan.map((task) => task.id === currentTask.id
+    ? { ...task, status: "done" as const, updatedAt: new Date().toISOString() }
+    : task);
+  const hasRemainingTasks = updatedPlan.some((task) => task.status !== "done");
+  const updatedConfig: AutopilotLoopConfig = {
+    ...config,
+    taskPlan: updatedPlan,
+    updatedAt: new Date().toISOString(),
+    lastRun: {
+      status: hasRemainingTasks ? "paused" : "completed",
+      startedAt: now,
+      finishedAt: new Date().toISOString(),
+      stepsExecuted: 1,
+      mode,
+      runId,
+      currentTaskId: currentTask.id,
+      currentTaskTitle: currentTask.title,
+      completedTaskIds: [currentTask.id],
+    },
+  };
+  writeAutopilotLoopConfig(state, updatedConfig);
+  appendAutopilotJournalEntry(state, {
+    level: "info",
+    event: "run-step-done",
+    message: `Completed step task: ${currentTask.title}`,
+    taskId: currentTask.id,
+    taskTitle: currentTask.title,
+    runId,
+  });
+  await writeSystemState(state);
 
   return res.json({
     ok: true,
     agentId: AUTOPILOT_AGENT_ID,
     mode,
-    step,
-    lastRun: getAutopilotLoopConfig(afterState).lastRun,
+    step: {
+      ok: true,
+      taskId: currentTask.id,
+      taskTitle: currentTask.title,
+      taskDetail: currentTask.detail,
+    },
+    lastRun: updatedConfig.lastRun,
+    planSummary: buildAutopilotPlanSummary(updatedConfig),
   });
 });
 
 app.post("/api/tools/autopilot-loop/run-until-blocker", async (req, res) => {
-  const body = req.body as { workspaceId?: string; mode?: GameCreatorExecutionMode; maxSteps?: number };
+  const body = req.body as { workspaceId?: string; mode?: AutopilotLoopRunMode; maxSteps?: number };
+  const workspaceState = await readSystemState();
+  const workspace = await resolveWorkspaceContext(workspaceState, body.workspaceId ?? workspaceState.activeWorkspaceId);
+  if (isAutopilotRunActive(workspace.id)) {
+    return res.status(409).json({ error: "Autopilot is already running. Stop it before using run-until-blocker." });
+  }
   const state = await readSystemState();
-  const workspace = await resolveWorkspaceContext(state, body.workspaceId ?? state.activeWorkspaceId);
   const config = getAutopilotLoopConfig(state);
-  const mode = pickEnumValue(body.mode, ["strict-approval", "auto-produce"] as const, getGameCreatorExecutionMode(state));
+  const mode = pickEnumValue(body.mode, AUTOPILOT_LOOP_RUN_MODES, config.lastRun?.mode ?? "strict-approval");
   const requestedMax = Number.isFinite(Number(body.maxSteps)) ? Number(body.maxSteps) : config.maxSteps;
   const maxSteps = Math.min(200, Math.max(1, Math.floor(requestedMax)));
+  const runId = crypto.randomUUID();
 
   writeAutopilotLoopConfig(state, {
     ...config,
     updatedAt: new Date().toISOString(),
     lastRun: {
+      runId,
       status: "running",
       startedAt: new Date().toISOString(),
       mode,
       stepsExecuted: 0,
     },
   });
+  appendAutopilotJournalEntry(state, {
+    level: "info",
+    event: "run-sync-start",
+    message: `Running Autopilot until blocker (max ${maxSteps} step(s)).`,
+    runId,
+  });
   await writeSystemState(state);
 
-  const executed: Array<{ ok: boolean; queueItemId?: string; queueItemTitle?: string; blocker?: string }> = [];
+  const executed: Array<{ ok: boolean; taskId?: string; taskTitle?: string; blocker?: string }> = [];
   let blocker: string | undefined;
   for (let index = 0; index < maxSteps; index += 1) {
-    const step = await runNextGameCreatorExecutionStep({ workspaceId: workspace.id, mode });
-    if (!step.ok) {
-      blocker = step.blocker ?? "Execution paused by blocker.";
+    const currentConfig = getAutopilotLoopConfig(await readSystemState());
+    const nextTask = getAutopilotNextTask(currentConfig);
+    if (!nextTask) {
+      blocker = currentConfig.objective.trim() || currentConfig.completionContract.trim()
+        ? "Autopilot plan is complete."
+        : "Set an objective and completion contract before running Autopilot.";
       executed.push({ ok: false, blocker });
       break;
     }
+    const nextPlan = currentConfig.taskPlan.map((task) => task.id === nextTask.id
+      ? { ...task, status: "done" as const, updatedAt: new Date().toISOString() }
+      : task);
+    writeAutopilotLoopConfig(state, {
+      ...currentConfig,
+      taskPlan: nextPlan,
+      updatedAt: new Date().toISOString(),
+      lastRun: {
+        status: "running",
+        runId,
+        startedAt: currentConfig.lastRun?.startedAt ?? new Date().toISOString(),
+        mode,
+        stepsExecuted: index + 1,
+        currentTaskId: nextTask.id,
+        currentTaskTitle: nextTask.title,
+        completedTaskIds: [...(currentConfig.lastRun?.completedTaskIds ?? []), nextTask.id],
+      },
+    });
+    await writeSystemState(state);
+    const logState = await readSystemState();
+    appendAutopilotJournalEntry(logState, {
+      level: "info",
+      event: "run-sync-step",
+      message: `Completed task: ${nextTask.title}`,
+      taskId: nextTask.id,
+      taskTitle: nextTask.title,
+      runId,
+    });
+    await writeSystemState(logState);
     executed.push({
       ok: true,
-      queueItemId: step.job?.queueItemId,
-      queueItemTitle: step.job?.queueItemTitle,
+      taskId: nextTask.id,
+      taskTitle: nextTask.title,
     });
   }
 
   const finalState = await readSystemState();
   const finalConfig = getAutopilotLoopConfig(finalState);
-  const queueSummary = buildAutopilotQueueSummary(finalState);
+  const planSummary = buildAutopilotPlanSummary(finalConfig);
   const runStatus: "completed" | "paused" = blocker
     ? "paused"
-    : (queueSummary.ready === 0 ? "completed" : "paused");
+    : (planSummary.pending === 0 ? "completed" : "paused");
 
   writeAutopilotLoopConfig(finalState, {
     ...finalConfig,
     updatedAt: new Date().toISOString(),
     lastRun: {
       status: runStatus,
+      runId,
       startedAt: finalConfig.lastRun?.startedAt,
       finishedAt: new Date().toISOString(),
       stepsExecuted: executed.filter((entry) => entry.ok).length,
       blocker,
       mode,
+      currentTaskId: finalConfig.lastRun?.currentTaskId,
+      currentTaskTitle: finalConfig.lastRun?.currentTaskTitle,
+      completedTaskIds: finalConfig.lastRun?.completedTaskIds,
     },
+  });
+  appendAutopilotJournalEntry(finalState, {
+    level: blocker ? "warn" : "info",
+    event: "run-sync-finished",
+    message: blocker
+      ? `Run paused after ${executed.filter((entry) => entry.ok).length} step(s): ${blocker}`
+      : `Run completed after ${executed.filter((entry) => entry.ok).length} step(s).`,
+    runId,
   });
   await writeSystemState(finalState);
 
@@ -9353,7 +10030,7 @@ app.post("/api/tools/autopilot-loop/run-until-blocker", async (req, res) => {
     maxSteps,
     stepsExecuted: executed.filter((entry) => entry.ok).length,
     blocker,
-    queueSummary,
+    planSummary,
     iterations: executed,
     lastRun: getAutopilotLoopConfig(finalState).lastRun,
   });
@@ -13339,6 +14016,61 @@ app.get("/api/workspaces/:id/tree", async (req, res) => {
   try {
     const tree = await buildWorkspaceTree(id);
     return res.json({ tree });
+  } catch (error) {
+    return res.status(404).json({ error: String(error) });
+  }
+});
+
+app.get("/api/workspaces/:id/file", async (req, res) => {
+  const { id } = req.params;
+  const relativePath = typeof req.query.relativePath === "string" ? req.query.relativePath.trim() : "";
+
+  try {
+    const workspace = await resolveWorkspaceContext(await readSystemState(), id);
+    const targetPath = resolveWorkspaceTargetPath(workspace.path, relativePath);
+    const stats = await fs.stat(targetPath);
+    if (!stats.isFile()) {
+      return res.status(400).json({ error: "Selected path is not a file." });
+    }
+
+    const extension = path.extname(targetPath).toLowerCase();
+    const textExtensions = new Set([
+      ".ts", ".tsx", ".js", ".jsx", ".json", ".md", ".txt", ".yml", ".yaml", ".css", ".html", ".xml",
+      ".cs", ".py", ".sh", ".ps1", ".jsonl", ".log", ".ini", ".env", ".toml", ".csv", ".graphql", ".gql",
+      ".sql", ".c", ".cc", ".cpp", ".h", ".hpp", ".java", ".rs", ".go", ".swift", ".kt", ".kts",
+    ]);
+    const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]);
+    const mimeType = imageExtensions.has(extension)
+      ? `image/${extension === ".jpg" ? "jpeg" : extension.slice(1)}`
+      : textExtensions.has(extension)
+        ? "text/plain; charset=utf-8"
+        : "application/octet-stream";
+
+    if (textExtensions.has(extension)) {
+      const content = await fs.readFile(targetPath, "utf-8");
+      return res.json({
+        ok: true,
+        workspaceId: workspace.id,
+        relativePath,
+        fileName: path.basename(targetPath),
+        mimeType,
+        sizeBytes: stats.size,
+        isBinary: false,
+        content,
+      });
+    }
+
+    const bytes = await fs.readFile(targetPath);
+    return res.json({
+      ok: true,
+      workspaceId: workspace.id,
+      relativePath,
+      fileName: path.basename(targetPath),
+      mimeType,
+      sizeBytes: stats.size,
+      isBinary: true,
+      base64Content: bytes.toString("base64"),
+    });
   } catch (error) {
     return res.status(404).json({ error: String(error) });
   }

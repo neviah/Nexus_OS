@@ -48,26 +48,6 @@ export type GameCreatorSetupWizardDraft = {
 export type GameCreatorState = {
   setupWizardDraft?: Partial<GameCreatorSetupWizardDraft>;
   executionMode?: "strict-approval" | "auto-produce";
-  autopilotLoop?: {
-    profile?: "free" | "cost" | "custom";
-    backendHarnessId?: string;
-    maxSteps?: number;
-    maxDurationMinutes?: number;
-    maxRetriesPerTask?: number;
-    customFallbackChain?: Array<{
-      providerId: string;
-      model: string;
-    }>;
-    updatedAt?: string;
-    lastRun?: {
-      status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
-      startedAt?: string;
-      finishedAt?: string;
-      stepsExecuted?: number;
-      blocker?: string;
-      mode?: "strict-approval" | "auto-produce";
-    };
-  };
   conceptSwarm?: {
     generatedAt?: string;
     harnessId?: string;
@@ -171,6 +151,61 @@ export type GameCreatorState = {
   };
 };
 
+export type AutopilotLoopProfile = "free" | "cost" | "custom";
+
+export type AutopilotLoopRunMode = "strict-approval" | "auto-produce";
+
+export type AutopilotLoopTask = {
+  id: string;
+  order: number;
+  title: string;
+  detail: string;
+  status: "pending" | "running" | "done";
+  source: "objective" | "manual";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AutopilotLoopState = {
+  profile?: AutopilotLoopProfile;
+  backendHarnessId?: string;
+  objective?: string;
+  completionContract?: string;
+  taskPlan?: AutopilotLoopTask[];
+  planGeneratedAt?: string;
+  planSource?: "objective" | "manual";
+  maxSteps?: number;
+  maxDurationMinutes?: number;
+  maxRetriesPerTask?: number;
+  customFallbackChain?: Array<{
+    providerId: string;
+    model: string;
+  }>;
+  updatedAt?: string;
+  lastRun?: {
+    status: "idle" | "running" | "paused" | "completed" | "canceled" | "failed";
+    runId?: string;
+    startedAt?: string;
+    finishedAt?: string;
+    stepsExecuted?: number;
+    blocker?: string;
+    mode?: AutopilotLoopRunMode;
+    currentTaskId?: string;
+    currentTaskTitle?: string;
+    completedTaskIds?: string[];
+  };
+  journal?: Array<{
+    seq: number;
+    at: string;
+    level: "info" | "warn" | "error";
+    event: string;
+    message: string;
+    taskId?: string;
+    taskTitle?: string;
+    runId?: string;
+  }>;
+};
+
 export type WorkspaceRecord = {
   id: string;
   name: string;
@@ -256,6 +291,7 @@ export type SystemState = {
   harnessChats?: HarnessChatStore;
   harnessCapabilities?: Record<string, HarnessCapabilitySettings>;
   gameCreator?: GameCreatorState;
+  autopilotLoop?: AutopilotLoopState;
 };
 
 export type HarnessCapabilitySettings = {
