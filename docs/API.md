@@ -312,3 +312,29 @@ Example bounded run request:
 Operational note:
 
 - Re-running runtime job action `install-wan2gp` refreshes the Wan2GP base from upstream before dependency/install checks.
+
+## Stable Audio (Music/SFX)
+
+- `GET /api/tools/music/stable-audio/status`
+  - Returns Stable Audio runtime readiness and supported generation modes.
+- `POST /api/tools/music/stable-audio/launch`
+  - Launches or warms a specific Stable Audio mode (`small-music`, `small-sfx`, `medium`).
+- `POST /api/tools/music/stable-audio/generate`
+  - Generates and saves an audio clip into workspace assets.
+  - Duration limits:
+    - `small-music`: max 120s
+    - `small-sfx`: max 120s
+    - `medium`: max 380s
+- `GET /api/tools/music/file?workspaceId=<id>&relativePath=<path>`
+  - Streams generated audio files (`wav`, `mp3`, `ogg`).
+
+Example generate request:
+
+```json
+{
+  "mode": "small-sfx",
+  "prompt": "retro coin pickup, short decay, no reverb",
+  "duration": 3,
+  "workspaceId": "default"
+}
+```

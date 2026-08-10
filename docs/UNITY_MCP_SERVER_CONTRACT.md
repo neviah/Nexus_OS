@@ -371,7 +371,58 @@ Output data shape:
 }
 ```
 
-### 7) nexus.assets.list
+### 7) nexus.generate.audio
+
+Purpose:
+- Generate and persist music or SFX clips in workspace.
+
+Input schema:
+
+```json
+{
+  "type": "object",
+  "required": ["mode", "prompt"],
+  "properties": {
+    "workspaceId": { "type": "string", "default": "default" },
+    "mode": {
+      "type": "string",
+      "enum": ["small-music", "small-sfx", "medium"],
+      "default": "small-music"
+    },
+    "prompt": { "type": "string", "minLength": 1 },
+    "duration": { "type": "integer", "minimum": 1, "maximum": 380, "default": 30 },
+    "fileName": { "type": "string" }
+  },
+  "additionalProperties": false
+}
+```
+
+NexusOS calls:
+- `GET /api/tools/music/stable-audio/status`
+- `POST /api/tools/music/stable-audio/generate`
+
+Validation rules:
+- `small-music` and `small-sfx` max duration is 120 seconds.
+- `medium` max duration is 380 seconds.
+
+Output data shape:
+
+```json
+{
+  "asset": {
+    "kind": "audio",
+    "provider": "stable-audio",
+    "mode": "small-sfx",
+    "workspaceId": "default",
+    "relativePath": "Assets/music/...wav",
+    "downloadUrl": "/api/tools/music/file?...",
+    "duration": 8,
+    "prompt": "retro coin pickup, short, clean tail"
+  }
+}
+```
+
+### 8) nexus.assets.list
 
 Purpose:
 - List generated files for Unity pickers/import queues.
@@ -420,7 +471,7 @@ Mapping rules:
 - `Assets/models/*` => hunyuan3d file endpoint URL
 - `Assets/music/*` => music file endpoint URL
 
-### 8) nexus.asset.fetch
+### 9) nexus.asset.fetch
 
 Purpose:
 - Return one asset as base64 or a direct URL for UnityWebRequest download.
@@ -480,7 +531,7 @@ When MCP launches runtime jobs, expose this normalized state to Unity:
 
 1. Call `nexus.status`.
 2. Call `nexus.runtime.ensure` if runtime is not ready.
-3. Call generation tool (`nexus.generate.image`, `nexus.generate.video`, or `nexus.generate.model3d`).
+3. Call generation tool (`nexus.generate.image`, `nexus.generate.video`, `nexus.generate.model3d`, or `nexus.generate.audio`).
 4. Receive `relativePath` and `downloadUrl`.
 5. Download bytes in Unity and save into Unity project under `Assets/Generated/Nexus/...`.
 6. Trigger AssetDatabase refresh/import.
@@ -503,7 +554,7 @@ When MCP launches runtime jobs, expose this normalized state to Unity:
 
 ## Implementation Checklist for Unity Team
 
-- Implement all 8 MCP tools above.
+- Implement all 9 MCP tools above.
 - Implement SSE parser with `status`, `done`, `error` support.
 - Implement runtime job poll loop for ensure/install/start flows.
 - Implement direct URL download + base64 fallback.
@@ -516,3 +567,4 @@ When MCP launches runtime jobs, expose this normalized state to Unity:
 - `GET /api/tools/wan2gp/status` now provides H3-aware recommendation and `videoPresets`.
 - Running runtime job action `install-wan2gp` refreshes Wan2GP base from upstream.
 - Media generation and Hunyuan generation are SSE streams and should not be treated as plain JSON endpoints.
+- Stable Audio music/SFX generation is request/response JSON (not SSE) at `POST /api/tools/music/stable-audio/generate`.
