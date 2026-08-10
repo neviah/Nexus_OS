@@ -11524,6 +11524,216 @@ function chooseWanModelFromInstalled(
   return installedModels[0] ?? "auto";
 }
 
+function normalizeWanModelToken(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function isWanH3Model(value: string): boolean {
+  const token = normalizeWanModelToken(value);
+  return token.includes("minimax") || /(?:^|\s)h3(?:\s|$)/.test(token) || token.includes("fl2va") || token.includes("ref2va");
+}
+
+function isWanH3LowVramVariant(value: string): boolean {
+  const token = normalizeWanModelToken(value);
+  return isWanH3Model(value) && /(pruned|20b|w4a8|int8|nvfp4|q4|gguf)/.test(token);
+}
+
+function scoreWanVideoModel(model: string, recommendedProfile: number): number {
+  const token = normalizeWanModelToken(model);
+  let score = 100;
+
+  if (isWanH3Model(model)) {
+    score += recommendedProfile <= 3 ? 420 : (isWanH3LowVramVariant(model) ? 320 : 160);
+  }
+  if (/ltx/.test(token)) {
+    score += recommendedProfile <= 2 ? 260 : 150;
+  }
+  if (/hunyuan|animate|longcat|kandinsky|magihuman/.test(token)) {
+    score += recommendedProfile <= 3 ? 210 : 150;
+  }
+  if (/t2v 1 3b|t2v_1\.3b|fun inp 1 3b|fun_inp_1\.3b/.test(token)) {
+    score += recommendedProfile >= 4 ? 280 : 170;
+  }
+  if (/ sf |schnell|lightning/.test(` ${token} `)) {
+    score += recommendedProfile >= 4 ? 220 : 120;
+  }
+  if (/1 3b|tiny|small/.test(token)) {
+    score += recommendedProfile >= 4 ? 120 : 50;
+  }
+  if (/22b|33b|xl|hq/.test(token)) {
+    score += recommendedProfile <= 2 ? 80 : -30;
+  }
+
+  score -= Math.min(model.length, 80);
+  return score;
+}
+
+function chooseWanVideoModelFromInstalled(installedModels: string[], recommendedProfile: number): string {
+  if (installedModels.length === 0) {
+    return "auto";
+  }
+  const sorted = [...installedModels].sort((left, right) => scoreWanVideoModel(right, recommendedProfile) - scoreWanVideoModel(left, recommendedProfile));
+  return sorted[0] ?? installedModels[0] ?? "auto";
+}
+
+function buildWanVideoRecommendation(input: {
+  model: string;
+  recommendedProfile: number;
+}): {
+  model: string;
+  width: number;
+  height: number;
+  steps: number;
+  durationSeconds: number;
+  fps: number;
+  frameCount: number;
+  presetId: string;
+} {
+  const isH3 = isWanH3Model(input.model);
+  if (!isH3) {
+    return {
+      model: input.model,
+      width: 640,
+      height: 384,
+      steps: 6,
+      durationSeconds: 3,
+      fps: 16,
+      frameCount: 49,
+      presetId: "compat-fast",
+    };
+  }
+
+  const lowVram = input.recommendedProfile >= 4;
+  const durationSeconds = lowVram ? 4 : 5;
+  const fps = 16;
+  return {
+    model: input.model,
+    width: lowVram ? 640 : 832,
+    height: lowVram ? 384 : 480,
+    steps: lowVram ? 12 : 16,
+    durationSeconds,
+    fps,
+    frameCount: durationSeconds * fps + 1,
+    presetId: lowVram ? "h3-low-vram" : "h3-balanced",
+  };
+}
+
+function buildWanVideoPresets(input: {
+  installedVideoModels: string[];
+  recommendedProfile: number;
+  recommendedVideoModel: string;
+}): Array<{
+  id: string;
+  label: string;
+  description: string;
+  model: string;
+  width: number;
+  height: number;
+  steps: number;
+  durationSeconds: number;
+  fps: number;
+  frameCount: number;
+  profile: number;
+}> {
+  const presets: Array<{
+    id: string;
+    label: string;
+    description: string;
+    model: string;
+    width: number;
+    height: number;
+    steps: number;
+    durationSeconds: number;
+    fps: number;
+    frameCount: number;
+    profile: number;
+  }> = [];
+
+  const recommended = buildWanVideoRecommendation({
+    model: input.recommendedVideoModel,
+    recommendedProfile: input.recommendedProfile,
+  });
+
+  presets.push({
+    id: "compat-fast",
+    label: "Compatibility Fast",
+    description: "Low-VRAM baseline with broad compatibility.",
+    model: input.recommendedVideoModel,
+    width: 640,
+    height: 384,
+    steps: 6,
+    durationSeconds: 3,
+    fps: 16,
+    frameCount: 49,
+    profile: Math.max(3, input.recommendedProfile),
+  });
+
+  if (isWanH3Model(input.recommendedVideoModel)) {
+    presets.push({
+      id: "h3-balanced",
+      label: "MiniMax H3 Balanced",
+      description: "Quality/perf balance tuned for H3 with synchronized A/V.",
+      model: input.recommendedVideoModel,
+      width: 832,
+      height: 480,
+      steps: 16,
+      durationSeconds: 5,
+      fps: 16,
+      frameCount: 81,
+      profile: Math.min(input.recommendedProfile, 3),
+    });
+    presets.push({
+      id: "h3-quality",
+      label: "MiniMax H3 Quality",
+      description: "Higher-step H3 preset for stronger motion consistency.",
+      model: input.recommendedVideoModel,
+      width: 832,
+      height: 480,
+      steps: 20,
+      durationSeconds: 5,
+      fps: 16,
+      frameCount: 81,
+      profile: Math.min(input.recommendedProfile, 2),
+    });
+    presets.push({
+      id: "h3-low-vram",
+      label: "MiniMax H3 Low VRAM",
+      description: "Lower memory H3 preset for constrained GPUs.",
+      model: input.recommendedVideoModel,
+      width: 640,
+      height: 384,
+      steps: 12,
+      durationSeconds: 4,
+      fps: 16,
+      frameCount: 65,
+      profile: Math.max(4, input.recommendedProfile),
+    });
+  }
+
+  const deduped = new Map<string, (typeof presets)[number]>();
+  for (const preset of presets) {
+    deduped.set(preset.id, preset);
+  }
+
+  if (!deduped.has(recommended.presetId)) {
+    deduped.set(recommended.presetId, {
+      id: recommended.presetId,
+      label: "Recommended",
+      description: "Auto-selected from installed models and machine profile.",
+      model: recommended.model,
+      width: recommended.width,
+      height: recommended.height,
+      steps: recommended.steps,
+      durationSeconds: recommended.durationSeconds,
+      fps: recommended.fps,
+      frameCount: recommended.frameCount,
+      profile: input.recommendedProfile,
+    });
+  }
+
+  return Array.from(deduped.values());
+}
+
 function buildWanPreferenceTiers(recommendedProfile: number, mode: "image" | "video"): string[][] {
   const lowVramImage = ["flux_schnell", "alpha_sf", "alpha2_sf", "flux", "alpha2", "alpha"];
   const highVramImage = ["qwen_image_20B", "flux", "alpha2", "flux_schnell", "alpha_sf"];
@@ -11558,15 +11768,24 @@ app.get("/api/tools/wan2gp/status", async (_req, res) => {
       installedImageModels,
       buildWanPreferenceTiers(machine.recommendedProfile, "image"),
     );
-    const recommendedVideoModel = chooseWanModelFromInstalled(
+    const recommendedVideoModel = chooseWanVideoModelFromInstalled(installedVideoModels, machine.recommendedProfile);
+    const recommendedVideo = buildWanVideoRecommendation({
+      model: recommendedVideoModel,
+      recommendedProfile: machine.recommendedProfile,
+    });
+    const videoPresets = buildWanVideoPresets({
       installedVideoModels,
-      buildWanPreferenceTiers(machine.recommendedProfile, "video"),
-    );
+      recommendedProfile: machine.recommendedProfile,
+      recommendedVideoModel,
+    });
 
     const notes = [...status.notes];
     if (status.apiReady) {
       notes.push(`Installed image models: ${installedImageModels.length}`);
       notes.push(`Installed video models: ${installedVideoModels.length}`);
+      if (installedVideoModels.some((model) => isWanH3Model(model))) {
+        notes.push("MiniMax H3-compatible model(s) detected. Recommended presets now prioritize H3 when feasible.");
+      }
       if (installedImageModels.length === 0 || installedVideoModels.length === 0) {
         notes.push("Installed-only model routing is active. Install at least one Wan2GP model per mode to generate successfully.");
       }
@@ -11585,19 +11804,22 @@ app.get("/api/tools/wan2gp/status", async (_req, res) => {
           steps: 6,
         },
         video: {
-          model: recommendedVideoModel,
-          width: 640,
-          height: 384,
-          steps: 6,
-          durationSeconds: 3,
-          fps: 16,
-          frameCount: 49,
+          model: recommendedVideo.model,
+          width: recommendedVideo.width,
+          height: recommendedVideo.height,
+          steps: recommendedVideo.steps,
+          durationSeconds: recommendedVideo.durationSeconds,
+          fps: recommendedVideo.fps,
+          frameCount: recommendedVideo.frameCount,
+          presetId: recommendedVideo.presetId,
         },
       },
       modelHints: {
         image: ["auto", ...installedImageModels],
         video: ["auto", ...installedVideoModels],
       },
+      videoPresets,
+      h3Detected: installedVideoModels.some((model) => isWanH3Model(model)),
       modelCatalog: catalog,
     });
   } catch (error) {

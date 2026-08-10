@@ -253,10 +253,14 @@ Example runtime policy update:
   - Updates profile settings (`free`, `cost`, `custom`), budget limits, harness id, and optional custom chain.
 - `GET /api/tools/autopilot-loop/status?workspaceId=<optional>`
   - Returns profile, effective chain source, queue summary, and latest execution run state.
-- `POST /api/tools/autopilot-loop/run-step`
-  - Executes exactly one queue step through the existing Game Creator execution engine.
-- `POST /api/tools/autopilot-loop/run-until-blocker`
-  - Executes up to `maxSteps` tasks and stops on blocker, completion, or step budget.
+- `GET /api/tools/autopilot-loop/journal?workspaceId=<optional>&limit=<optional>`
+  - Returns most recent execution journal entries for live UI streaming and resume context.
+- `POST /api/tools/autopilot-loop/run-start`
+  - Starts an asynchronous Autopilot run in the background.
+- `POST /api/tools/autopilot-loop/stop`
+  - Requests cooperative stop for the active Autopilot run.
+- `POST /api/tools/autopilot-loop/resume`
+  - Resumes from the last known journal checkpoint/run state.
 
 Profile rules:
 
@@ -289,3 +293,18 @@ Example bounded run request:
   "maxSteps": 12
 }
 ```
+
+## Wan2GP Media
+
+- `GET /api/tools/wan2gp/status`
+  - Returns Wan2GP runtime readiness, machine profile hint, installed model hints, and model catalog.
+  - `recommended.video` is profile-aware and now prioritizes MiniMax H3-compatible models when installed.
+  - `videoPresets` includes compatibility and H3-tuned presets (for example `h3-balanced`, `h3-quality`, `h3-low-vram`) when applicable.
+- `GET /api/tools/wan2gp/image/stream?...`
+  - SSE image generation stream. Uses installed-only model routing.
+- `GET /api/tools/wan2gp/video/stream?...`
+  - SSE video generation stream. Uses installed-only model routing with auto model fallback when `model=auto`.
+
+Operational note:
+
+- Re-running runtime job action `install-wan2gp` refreshes the Wan2GP base from upstream before dependency/install checks.

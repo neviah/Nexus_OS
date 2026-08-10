@@ -420,12 +420,15 @@ type Wan2GpStatus = {
       durationSeconds: number;
       fps: number;
       frameCount: number;
+      presetId?: string;
     };
   };
   modelHints: {
     image: string[];
     video: string[];
   };
+  videoPresets?: Wan2GpVideoPreset[];
+  h3Detected?: boolean;
   modelCatalog?: {
     image: Array<{ modelType: string; available: boolean; status: string }>;
     video: Array<{ modelType: string; available: boolean; status: string }>;
@@ -602,6 +605,20 @@ type ImageSizePreset = {
   label: string;
   width: number;
   height: number;
+};
+
+type Wan2GpVideoPreset = {
+  id: string;
+  label: string;
+  description: string;
+  model: string;
+  width: number;
+  height: number;
+  steps: number;
+  durationSeconds: number;
+  fps: number;
+  frameCount: number;
+  profile: number;
 };
 
 type RuntimeJob = {
@@ -2645,6 +2662,46 @@ function App() {
     setStatusMessage(`Applied ${preset.label} preset.`);
   }
 
+  function applyWanVideoPreset(preset: Wan2GpVideoPreset, announce = true) {
+    setVideoModel(preset.model || "auto");
+    setVideoWidth(preset.width);
+    setVideoHeight(preset.height);
+    setVideoSteps(preset.steps);
+    setVideoDurationSeconds(preset.durationSeconds);
+    setVideoFps(preset.fps);
+    setVideoFrameCount(preset.frameCount);
+    if (preset.profile > 0) {
+      setWanProfile(preset.profile);
+    }
+    if (announce) {
+      setStatusMessage(`Applied video preset: ${preset.label}.`);
+    }
+  }
+
+  function applyWanRecommendedVideo(status: Wan2GpStatus, announce = false) {
+    const recommended = status.recommended.video;
+    setVideoModel(recommended.model || "auto");
+    setVideoWidth(recommended.width);
+    setVideoHeight(recommended.height);
+    setVideoSteps(recommended.steps);
+    setVideoDurationSeconds(recommended.durationSeconds);
+    setVideoFps(recommended.fps);
+    setVideoFrameCount(recommended.frameCount);
+    if (status.recommended.profile > 0) {
+      setWanProfile(status.recommended.profile);
+    }
+    if (announce) {
+      setStatusMessage("Applied recommended Wan2GP video defaults.");
+    }
+  }
+
+  function maybeAdoptWanRecommendedVideo(status: Wan2GpStatus) {
+    const available = status.modelHints.video ?? ["auto"];
+    if (videoModel === "auto" || !available.includes(videoModel)) {
+      applyWanRecommendedVideo(status);
+    }
+  }
+
   function openRecentImage(image: ImageGeneratedResult) {
     setImagePrompt(image.prompt);
     setImageNegativePrompt(image.negativePrompt ?? "");
@@ -2666,6 +2723,18 @@ function App() {
     const payload = (await response.json()) as Wan2GpStatus;
     setWan2GpStatus(payload);
     setWanProfile((current) => current > 0 ? current : payload.recommended.profile);
+    maybeAdoptWanRecommendedVideo(payload);
+  }
+
+  async function refreshWan2GpBase() {
+    const result = await runRuntimeJob(
+      "wan2gp-refresh-base",
+      "install-wan2gp",
+      "Wan2GP base refreshed from upstream.",
+    );
+    if (result.ok) {
+      await loadWan2GpStatus();
+    }
   }
 
   async function ensureWan2GpReadyForGeneration(): Promise<boolean> {
@@ -2704,6 +2773,7 @@ function App() {
     }
     const payload = (await refreshed.json()) as Wan2GpStatus;
     setWan2GpStatus(payload);
+    maybeAdoptWanRecommendedVideo(payload);
     if (!payload.apiReady) {
       const detail = payload.notes?.[payload.notes.length - 1] ?? "Wan2GP readiness check failed.";
       setStatusMessage(detail);
@@ -7665,6 +7735,24 @@ function App() {
                   {!wan2GpStatus?.apiReady ? (
                     <small>Wan2GP is not ready yet. Install runtime job: install-wan2gp, then start-wan2gp.</small>
                   ) : null}
+                  <div className="tool-action-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => void refreshWan2GpBase()}
+                      disabled={runtimeBusyAction !== null || videoBusyAction !== null}
+                    >
+                      {runtimeBusyAction === "wan2gp-refresh-base" ? "Refreshing Wan2GP..." : "Refresh Wan2GP Base"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => wan2GpStatus ? applyWanRecommendedVideo(wan2GpStatus, true) : undefined}
+                      disabled={!wan2GpStatus || videoBusyAction !== null}
+                    >
+                      Apply Recommended Defaults
+                    </button>
+                  </div>
                   <label>
                     <span>Model</span>
                     <select value={videoModel} onChange={(event) => setVideoModel(event.target.value)}>
@@ -7673,10 +7761,32 @@ function App() {
                       ))}
                     </select>
                   </label>
+                  {wan2GpStatus?.videoPresets?.length ? (
+                    <div>
+                      <span>Video Presets</span>
+                      <div className="image-preset-row">
+                        {wan2GpStatus.videoPresets.map((preset) => (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            className="ghost"
+                            onClick={() => applyWanVideoPreset(preset)}
+                            disabled={videoBusyAction !== null}
+                            title={preset.description}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   <label>
                     <span>VRAM Profile</span>
                     <input type="number" min={1} max={5} value={wanProfile} onChange={(event) => setWanProfile(Number(event.target.value || 4))} />
                   </label>
+                  {wan2GpStatus?.h3Detected ? (
+                    <small>MiniMax H3 model detected. Recommended presets are tuned for H3 motion and timing.</small>
+                  ) : null}
                   <div className="image-size-grid">
                     <label>
                       <span>Width</span>
