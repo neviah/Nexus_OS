@@ -75,7 +75,7 @@ The names below are the recommended MCP tool names for Unity integration.
 
 Purpose:
 - Validate API connectivity.
-- Fetch Wan2GP and Hunyuan3D readiness and model recommendations.
+- Fetch Wan2GP, Hunyuan3D, and Animato readiness and model recommendations.
 
 Input schema:
 
@@ -91,6 +91,7 @@ NexusOS calls:
 - `GET /api/health`
 - `GET /api/tools/wan2gp/status`
 - `GET /api/tools/hunyuan3d/status`
+- `GET /api/tools/animation/status`
 
 Output data shape:
 
@@ -117,6 +118,10 @@ Output data shape:
   },
   "hunyuan3d": {
     "apiReady": true
+  },
+  "animato": {
+    "apiReady": true,
+    "baseUrl": "http://127.0.0.1:8010"
   }
 }
 ```
@@ -135,7 +140,7 @@ Input schema:
   "properties": {
     "target": {
       "type": "string",
-      "enum": ["wan2gp", "hunyuan3d"]
+      "enum": ["wan2gp", "hunyuan3d", "animato"]
     },
     "refreshBase": { "type": "boolean", "default": false }
   },
@@ -150,9 +155,12 @@ Behavior:
 - For `hunyuan3d`:
   - run install job if needed
   - then run start job
+- For `animato`:
+  - run install job if needed
+  - then run start job
 
 NexusOS calls:
-- `POST /api/tools/runtimes/jobs` with action `install-wan2gp`, `start-wan2gp`, `install-hunyuan3d`, `start-hunyuan3d`
+- `POST /api/tools/runtimes/jobs` with action `install-wan2gp`, `start-wan2gp`, `install-hunyuan3d`, `start-hunyuan3d`, `install-animato`, `start-animato`
 - `GET /api/tools/runtimes/jobs/:jobId` until terminal status
 
 Terminal statuses:
@@ -422,7 +430,55 @@ Output data shape:
 }
 ```
 
-### 8) nexus.assets.list
+### 8) nexus.generate.animation
+
+Purpose:
+- Generate one or more animation variations from a rigged source model.
+
+Input schema:
+
+```json
+{
+  "type": "object",
+  "required": ["prompt", "sourceRelativePath"],
+  "properties": {
+    "workspaceId": { "type": "string", "default": "default" },
+    "prompt": { "type": "string", "minLength": 1 },
+    "sourceRelativePath": { "type": "string", "minLength": 1 },
+    "variations": { "type": "integer", "minimum": 1, "maximum": 5, "default": 1 },
+    "harnessId": { "type": "string" }
+  },
+  "additionalProperties": false
+}
+```
+
+NexusOS calls:
+- `GET /api/tools/animation/status`
+- `POST /api/tools/animation/generate/stream` (SSE)
+
+Requirements:
+- `sourceRelativePath` must point to a rigged `glb`, `gltf`, or `fbx`.
+
+Output data shape:
+
+```json
+{
+  "assets": [
+    {
+      "kind": "animation",
+      "provider": "animato",
+      "variation": 1,
+      "workspaceId": "default",
+      "relativePath": "Assets/models/animato-...-v1.glb",
+      "downloadUrl": "/api/tools/hunyuan3d/file?...",
+      "format": "glb",
+      "prompt": "stylized run cycle with heavy anticipation"
+    }
+  ]
+}
+```
+
+### 9) nexus.assets.list
 
 Purpose:
 - List generated files for Unity pickers/import queues.
@@ -471,7 +527,7 @@ Mapping rules:
 - `Assets/models/*` => hunyuan3d file endpoint URL
 - `Assets/music/*` => music file endpoint URL
 
-### 9) nexus.asset.fetch
+### 10) nexus.asset.fetch
 
 Purpose:
 - Return one asset as base64 or a direct URL for UnityWebRequest download.
@@ -531,11 +587,38 @@ When MCP launches runtime jobs, expose this normalized state to Unity:
 
 1. Call `nexus.status`.
 2. Call `nexus.runtime.ensure` if runtime is not ready.
-3. Call generation tool (`nexus.generate.image`, `nexus.generate.video`, `nexus.generate.model3d`, or `nexus.generate.audio`).
+3. Call generation tool (`nexus.generate.image`, `nexus.generate.video`, `nexus.generate.model3d`, `nexus.generate.audio`, or `nexus.generate.animation`).
 4. Receive `relativePath` and `downloadUrl`.
 5. Download bytes in Unity and save into Unity project under `Assets/Generated/Nexus/...`.
 6. Trigger AssetDatabase refresh/import.
 7. Cache metadata in plugin state for reimport/resume.
+
+## Unity Import Settings Matrix
+
+Use these defaults when importing generated Nexus assets into Unity.
+
+### Audio (Stable Audio output)
+
+| Asset kind | Typical use | Load Type | Compression Format | Quality | Sample Rate | Force To Mono | Preload Audio Data | Load In Background |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| music (`small-music`/`medium`) | BGM / ambience loops | Compressed In Memory | Vorbis | 0.65-0.80 | Preserve | Off | On | On |
+| sfx (`small-sfx`) | UI and gameplay one-shots | Decompress On Load | ADPCM (or PCM for ultra-short UI ticks) | n/a for ADPCM | Optimize | On (unless clearly stereo) | On | Off |
+
+Recommended Unity plugin behavior:
+- If generated clip duration is <= 10s and mode is `small-sfx`, apply SFX profile.
+- Otherwise apply Music profile.
+
+### Animated Models (Animato output)
+
+| Asset kind | Preferred container | Import Animation | Rig | Animation Type | Avatar Definition | Compression | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| animato variation | glb/gltf | On | Generic (or Humanoid if project requires retargeting) | Legacy Off | Create From This Model | Keyframe Reduction (moderate) | Keep source and generated model scale consistent |
+
+Recommended Unity plugin behavior:
+- Detect generated animation files by `Assets/models/animato-*-v*.glb` naming.
+- Enable ModelImporter animation clip import and generate one clip per take.
+- Keep root transform bake policy project-defined (do not hardcode unless team requests).
+- If multiple variations are returned, auto-group them into a generated animation set asset.
 
 ## Error Handling Requirements
 
@@ -554,13 +637,14 @@ When MCP launches runtime jobs, expose this normalized state to Unity:
 
 ## Implementation Checklist for Unity Team
 
-- Implement all 9 MCP tools above.
+- Implement all 10 MCP tools above.
 - Implement SSE parser with `status`, `done`, `error` support.
 - Implement runtime job poll loop for ensure/install/start flows.
 - Implement direct URL download + base64 fallback.
 - Implement deterministic import destination mapping by file kind.
 - Add timeout and cancellation wiring from Unity UI to MCP requests.
 - Add telemetry fields: `requestId`, duration ms, retry count, final status.
+- Implement Unity import defaults from the audio + animation matrix.
 
 ## Known Current API Notes
 
@@ -568,3 +652,4 @@ When MCP launches runtime jobs, expose this normalized state to Unity:
 - Running runtime job action `install-wan2gp` refreshes Wan2GP base from upstream.
 - Media generation and Hunyuan generation are SSE streams and should not be treated as plain JSON endpoints.
 - Stable Audio music/SFX generation is request/response JSON (not SSE) at `POST /api/tools/music/stable-audio/generate`.
+- Animato generation is SSE at `POST /api/tools/animation/generate/stream` and returns one or more clip assets in `done.result.clips`.

@@ -338,3 +338,34 @@ Example generate request:
   "workspaceId": "default"
 }
 ```
+
+## Animato (Model Animation)
+
+- `GET /api/tools/animation/status`
+  - Returns Animato runtime readiness (`installed`, `envReady`, `apiReady`) and local service base URL.
+- `POST /api/tools/animation/generate/stream`
+  - SSE animation generation stream.
+  - Requires:
+    - `prompt` (string)
+    - `sourceRelativePath` (rigged `glb`, `gltf`, or `fbx` in workspace)
+  - Optional:
+    - `workspaceId`
+    - `variations` (1..5)
+    - `harnessId` (for routed script generation)
+- Output (`type=done`) includes `result.clips[]` with:
+  - `variation`
+  - `prompt`
+  - `modelUrl`
+  - `relativePath`
+  - `format` (`glb` or `obj`)
+
+Example request:
+
+```json
+{
+  "workspaceId": "default",
+  "prompt": "confident jog cycle, game-ready timing, slight torso sway",
+  "sourceRelativePath": "Assets/models/hero_rig.glb",
+  "variations": 3
+}
+```
