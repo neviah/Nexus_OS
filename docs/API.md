@@ -127,6 +127,10 @@ and aborts the matching in-flight stream.
 
 ## Unity Tool Bridge
 
+For Unity plugin integration through an MCP adapter server, use:
+
+- `docs/UNITY_MCP_SERVER_CONTRACT.md`
+
 - `GET /api/tools/unity/status?workspaceId=<optional>`
   - Returns Unity Editor discovery, Unity CLI Loop availability, and active Unity policy state.
 - `GET /api/tools/unity/approval`
