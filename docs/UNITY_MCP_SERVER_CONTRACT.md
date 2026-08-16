@@ -20,7 +20,7 @@ flowchart LR
 
 ## Transport and Session Rules
 
-- NexusOS base URL default: `http://127.0.0.1:4380`
+- NexusOS base URL default for the Pinokio launcher: `http://127.0.0.1:18080`
 - Concrete Unity transport: localhost HTTP bridge mounted at `/api/unity` in the NexusOS API.
 - MCP server should require a short-lived session token from Unity.
 - MCP server should send token to NexusOS as `X-Nexus-Session` if you add server-side verification later.
