@@ -22,6 +22,7 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
   upstream.get("/api/tools/wan2gp/status", (_req, res) => res.json({ apiReady: true }));
   upstream.get("/api/tools/hunyuan3d/status", (_req, res) => res.json({ apiReady: false }));
   upstream.get("/api/tools/animation/status", (_req, res) => res.json({ apiReady: false }));
+  upstream.get("/api/tools/music/stable-audio/status", (_req, res) => res.json({ apiReady: true }));
   upstream.get("/api/tools/wan2gp/image/stream", (_req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.write(`data: ${JSON.stringify({ type: "status", message: "Generating test image..." })}\n\n`);
@@ -43,6 +44,15 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
       },
     })}\n\n`);
   });
+  upstream.post("/api/tools/music/stable-audio/generate", (_req, res) => res.json({
+    ok: true,
+    mode: "small-sfx",
+    duration: 3,
+    prompt: "test sound",
+    workspaceId: "default",
+    relativePath: "Assets/music/test.wav",
+    playbackUrl: "/api/tools/music/file?workspaceId=default&relativePath=Assets%2Fmusic%2Ftest.wav",
+  }));
   upstream.get("/api/workspaces/:id/tree", (_req, res) => res.json({
     tree: {
       name: "default",
@@ -57,6 +67,11 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
           type: "directory",
           path: "Assets/images",
           children: [{ name: "test.png", type: "file", path: "Assets/images/test.png" }],
+        }, {
+          name: "music",
+          type: "directory",
+          path: "Assets/music",
+          children: [{ name: "test.wav", type: "file", path: "Assets/music/test.wav" }],
         }],
       }],
     },
@@ -76,9 +91,10 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
 
     const statusResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/status`, { headers });
     assert.equal(statusResponse.status, 200);
-    const status = await statusResponse.json() as { data: { health: { ok: boolean }; wan2gp: { apiReady: boolean } } };
+    const status = await statusResponse.json() as { data: { health: { ok: boolean }; wan2gp: { apiReady: boolean }; stableAudio: { apiReady: boolean } } };
     assert.equal(status.data.health.ok, true);
     assert.equal(status.data.wan2gp.apiReady, true);
+    assert.equal(status.data.stableAudio.apiReady, true);
 
     const startResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/tools/nexus.generate.image`, {
       method: "POST",
@@ -106,6 +122,30 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
     const assetsResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/assets?workspaceId=default`, { headers });
     const assets = await assetsResponse.json() as { data: { assets: Array<{ relativePath: string }> } };
     assert.deepEqual(assets.data.assets.map((asset) => asset.relativePath), ["Assets/images/test.png"]);
+
+    const audioStartResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/tools/nexus.generate.audio`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ mode: "small-sfx", prompt: "test sound", duration: 3 }),
+    });
+    assert.equal(audioStartResponse.status, 202);
+    const audioStarted = await audioStartResponse.json() as { requestId: string };
+
+    let audioCompleted: JobResponse | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const jobResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/jobs/${audioStarted.requestId}`, { headers });
+      const job = await jobResponse.json() as JobResponse;
+      if (job.data.job.status === "completed") {
+        audioCompleted = job;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(audioCompleted?.data.job.result?.asset.relativePath, "Assets/music/test.wav");
+
+    const audioAssetsResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/assets?workspaceId=default&kind=audio`, { headers });
+    const audioAssets = await audioAssetsResponse.json() as { data: { assets: Array<{ relativePath: string }> } };
+    assert.deepEqual(audioAssets.data.assets.map((asset) => asset.relativePath), ["Assets/music/test.wav"]);
   } finally {
     await close(bridgeServer.server);
     await close(upstreamServer.server);

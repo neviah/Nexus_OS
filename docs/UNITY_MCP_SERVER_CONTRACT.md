@@ -37,10 +37,11 @@ The bridge converts NexusOS SSE generation into pollable jobs so Unity can survi
 - Authenticated calls send the token as `X-Nexus-Session`.
 - `GET /api/unity/status` normalizes NexusOS and runtime readiness.
 - `POST /api/unity/tools/nexus.generate.image` starts `nexus.generate.image` and returns a job.
+- `POST /api/unity/tools/nexus.generate.audio` starts `nexus.generate.audio` and returns a job.
 - `GET /api/unity/jobs` lists recent jobs.
 - `GET /api/unity/jobs/:id` returns progress and the final MCP-shaped result.
 - `POST /api/unity/jobs/:id/cancel` cancels the upstream SSE operation.
-- `GET /api/unity/assets` exposes the image library for the selected workspace.
+- `GET /api/unity/assets` exposes image or audio libraries for the selected workspace.
 
 The bridge rejects non-loopback clients. Runtime probes use bounded timeouts and report partial readiness instead of blocking the entire status response.
 

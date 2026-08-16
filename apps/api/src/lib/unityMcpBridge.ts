@@ -34,16 +34,35 @@ type ImageAsset = {
   negativePrompt: string;
 };
 
+type AudioInput = {
+  workspaceId?: string;
+  mode?: "small-music" | "small-sfx" | "medium";
+  prompt?: string;
+  duration?: number;
+  fileName?: string;
+};
+
+type AudioAsset = {
+  kind: "audio";
+  provider: "stable-audio";
+  mode: "small-music" | "small-sfx" | "medium";
+  workspaceId: string;
+  relativePath: string;
+  downloadUrl: string;
+  duration: number;
+  prompt: string;
+};
+
 type BridgeJob = {
   id: string;
-  tool: "nexus.generate.image";
+  tool: "nexus.generate.image" | "nexus.generate.audio";
   status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   message: string;
   workspaceId: string;
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;
-  result?: { asset: ImageAsset };
+  result?: { asset: ImageAsset | AudioAsset };
   error?: { code: string; message: string; retryable: boolean };
   controller: AbortController;
 };
@@ -90,12 +109,13 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
   router.get("/status", async (_req, res) => {
     try {
       const health = await fetchJson(`${baseUrl}/api/health`, 3_000);
-      const [wan2gp, hunyuan3d, animato] = await Promise.all([
+      const [wan2gp, hunyuan3d, animato, stableAudio] = await Promise.all([
         fetchJsonOrUnavailable(`${baseUrl}/api/tools/wan2gp/status`),
         fetchJsonOrUnavailable(`${baseUrl}/api/tools/hunyuan3d/status`),
         fetchJsonOrUnavailable(`${baseUrl}/api/tools/animation/status`),
+        fetchJsonOrUnavailable(`${baseUrl}/api/tools/music/stable-audio/status`),
       ]);
-      return res.json({ ok: true, workspaceId: "default", data: { health, wan2gp, hunyuan3d, animato } });
+      return res.json({ ok: true, workspaceId: "default", data: { health, wan2gp, hunyuan3d, animato, stableAudio } });
     } catch (error) {
       return res.status(502).json(errorEnvelope("nexus_os_unavailable", String(error), true));
     }
@@ -120,6 +140,28 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
     };
     jobs.set(job.id, job);
     void runImageJob(job, input, baseUrl);
+    return res.status(202).json({ ok: true, workspaceId: job.workspaceId, requestId: job.id, data: { job: publicJob(job) } });
+  });
+
+  router.post("/tools/nexus.generate.audio", (req, res) => {
+    const input = req.body as AudioInput;
+    const validationError = validateAudioInput(input);
+    if (validationError) {
+      return res.status(400).json(errorEnvelope("invalid_request", validationError, false));
+    }
+
+    const job: BridgeJob = {
+      id: randomUUID(),
+      tool: "nexus.generate.audio",
+      status: "queued",
+      message: "Audio generation queued.",
+      workspaceId: input.workspaceId?.trim() || "default",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      controller: new AbortController(),
+    };
+    jobs.set(job.id, job);
+    void runAudioJob(job, input, baseUrl);
     return res.status(202).json({ ok: true, workspaceId: job.workspaceId, requestId: job.id, data: { job: publicJob(job) } });
   });
 
@@ -149,11 +191,14 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
 
   router.get("/assets", async (req, res) => {
     const workspaceId = String(req.query.workspaceId ?? "default").trim() || "default";
+    const kind = String(req.query.kind ?? "image").trim().toLowerCase();
     try {
       const response = await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/tree`);
       if (!response.ok) throw new Error(`Workspace tree returned HTTP ${response.status}.`);
       const payload = await response.json() as { tree?: WorkspaceTreeNode };
-      const assets = flattenImageAssets(payload.tree, workspaceId);
+      const assets = kind === "audio"
+        ? flattenAudioAssets(payload.tree, workspaceId)
+        : flattenImageAssets(payload.tree, workspaceId);
       return res.json({ ok: true, workspaceId, data: { assets } });
     } catch (error) {
       return res.status(502).json(errorEnvelope("asset_list_failed", String(error), true));
@@ -161,6 +206,49 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
   });
 
   return router;
+}
+
+async function runAudioJob(job: BridgeJob, input: AudioInput, baseUrl: string): Promise<void> {
+  updateJob(job, "running", "Starting NexusOS audio generation...");
+  try {
+    const response = await fetch(`${baseUrl}/api/tools/music/stable-audio/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: job.workspaceId,
+        mode: input.mode ?? "small-music",
+        prompt: input.prompt!.trim(),
+        duration: input.duration ?? 30,
+        fileName: input.fileName?.trim() || undefined,
+      }),
+      signal: job.controller.signal,
+    });
+    const result = await response.json() as Record<string, unknown>;
+    if (!response.ok || result.ok === false) {
+      throw new Error(String(result.error ?? `Audio generation returned HTTP ${response.status}.`));
+    }
+
+    job.result = {
+      asset: {
+        kind: "audio",
+        provider: "stable-audio",
+        mode: (input.mode ?? "small-music"),
+        workspaceId: String(result.workspaceId ?? job.workspaceId),
+        relativePath: String(result.relativePath ?? ""),
+        downloadUrl: String(result.playbackUrl ?? ""),
+        duration: Number(result.duration ?? input.duration ?? 30),
+        prompt: String(result.prompt ?? input.prompt ?? ""),
+      },
+    };
+    updateJob(job, "completed", "Audio generated and ready to import.", true);
+  } catch (error) {
+    if (job.controller.signal.aborted) {
+      updateJob(job, "canceled", "Audio generation canceled.", true);
+      return;
+    }
+    job.error = { code: "generation_failed", message: String(error), retryable: true };
+    updateJob(job, "failed", job.error.message, true);
+  }
 }
 
 async function runImageJob(job: BridgeJob, input: ImageInput, baseUrl: string): Promise<void> {
@@ -254,12 +342,42 @@ function flattenImageAssets(root: WorkspaceTreeNode | undefined, workspaceId: st
   return rows.sort((a, b) => a.fileName.localeCompare(b.fileName));
 }
 
+function flattenAudioAssets(root: WorkspaceTreeNode | undefined, workspaceId: string): Array<Record<string, string>> {
+  const rows: Array<Record<string, string>> = [];
+  const visit = (node: WorkspaceTreeNode | undefined) => {
+    if (!node) return;
+    if (node.type === "file" && node.path && /\.(wav|mp3|ogg)$/i.test(node.path) && node.path.replace(/\\/g, "/").startsWith("Assets/music/")) {
+      const relativePath = node.path.replace(/\\/g, "/");
+      rows.push({
+        kind: "audio",
+        relativePath,
+        fileName: node.name || relativePath.split("/").pop() || relativePath,
+        downloadUrl: `/api/tools/music/file?workspaceId=${encodeURIComponent(workspaceId)}&relativePath=${encodeURIComponent(relativePath)}`,
+      });
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  visit(root);
+  return rows.sort((a, b) => a.fileName.localeCompare(b.fileName));
+}
+
 function validateImageInput(input: ImageInput): string | null {
   if (!input || !input.prompt?.trim()) return "prompt is required";
   if ((input.width ?? 768) < 256 || (input.width ?? 768) > 1280) return "width must be between 256 and 1280";
   if ((input.height ?? 768) < 256 || (input.height ?? 768) > 1280) return "height must be between 256 and 1280";
   if ((input.steps ?? 6) < 1 || (input.steps ?? 6) > 60) return "steps must be between 1 and 60";
   if ((input.profile ?? 4) < 1 || (input.profile ?? 4) > 5) return "profile must be between 1 and 5";
+  return null;
+}
+
+function validateAudioInput(input: AudioInput): string | null {
+  if (!input || !input.prompt?.trim()) return "prompt is required";
+  if (input.mode !== "small-music" && input.mode !== "small-sfx" && input.mode !== "medium") {
+    return "mode must be one of small-music, small-sfx, or medium";
+  }
+  const duration = input.duration ?? 30;
+  const maxDuration = input.mode === "medium" ? 380 : 120;
+  if (duration < 1 || duration > maxDuration) return `duration must be between 1 and ${maxDuration} seconds for ${input.mode}`;
   return null;
 }
 
