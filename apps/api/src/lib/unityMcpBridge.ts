@@ -115,7 +115,11 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
         fetchJsonOrUnavailable(`${baseUrl}/api/tools/animation/status`),
         fetchJsonOrUnavailable(`${baseUrl}/api/tools/music/stable-audio/status`),
       ]);
-      return res.json({ ok: true, workspaceId: "default", data: { health, wan2gp, hunyuan3d, animato, stableAudio } });
+      return res.json({
+        ok: true,
+        workspaceId: "default",
+        data: { health, wan2gp, hunyuan3d, animato, stableAudio: normalizeRuntimeReadiness(stableAudio) },
+      });
     } catch (error) {
       return res.status(502).json(errorEnvelope("nexus_os_unavailable", String(error), true));
     }
@@ -407,6 +411,14 @@ async function fetchJsonOrUnavailable(url: string): Promise<unknown> {
   } catch (error) {
     return { apiReady: false, error: String(error) };
   }
+}
+
+function normalizeRuntimeReadiness(value: unknown): Record<string, unknown> {
+  const status = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    ...status,
+    apiReady: Boolean(status.apiReady ?? status.ready),
+  };
 }
 
 function errorEnvelope(code: string, message: string, retryable: boolean): Record<string, unknown> {
