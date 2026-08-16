@@ -21,12 +21,28 @@ flowchart LR
 ## Transport and Session Rules
 
 - NexusOS base URL default: `http://127.0.0.1:4380`
+- Concrete Unity transport: localhost HTTP bridge mounted at `/api/unity` in the NexusOS API.
 - MCP server should require a short-lived session token from Unity.
 - MCP server should send token to NexusOS as `X-Nexus-Session` if you add server-side verification later.
 - All tool inputs accept optional `workspaceId`; default is `default`.
 - All returned file references must include both:
   - `relativePath`
   - `downloadUrl`
+
+### Implemented Unity HTTP Bridge
+
+The bridge converts NexusOS SSE generation into pollable jobs so Unity can survive assembly reloads without owning the raw generator stream.
+
+- `POST /api/unity/session` creates a short-lived token.
+- Authenticated calls send the token as `X-Nexus-Session`.
+- `GET /api/unity/status` normalizes NexusOS and runtime readiness.
+- `POST /api/unity/tools/nexus.generate.image` starts `nexus.generate.image` and returns a job.
+- `GET /api/unity/jobs` lists recent jobs.
+- `GET /api/unity/jobs/:id` returns progress and the final MCP-shaped result.
+- `POST /api/unity/jobs/:id/cancel` cancels the upstream SSE operation.
+- `GET /api/unity/assets` exposes the image library for the selected workspace.
+
+The bridge rejects non-loopback clients. Runtime probes use bounded timeouts and report partial readiness instead of blocking the entire status response.
 
 ## Standard MCP Result Shapes
 

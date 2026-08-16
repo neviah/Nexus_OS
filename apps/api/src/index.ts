@@ -122,6 +122,7 @@ import { buildGameCreatorWorkflowSummary } from "./lib/gameCreatorWorkflowSummar
 import { buildGameCreatorWorkflowPlan } from "./lib/gameCreatorWorkflow.js";
 import { buildAnimationReadinessManifest, buildArtifactPreviewMetadata, buildGate3Artifacts, buildGate4Artifacts, evaluateGate3Readiness, evaluateGate4Readiness } from "./lib/gameCreatorGates.js";
 import { buildGameCreatorUnityAuthoringProject, type GameCreatorCanonDocSource } from "./lib/gameCreatorUnityAuthoring.js";
+import { createUnityMcpBridgeRouter } from "./lib/unityMcpBridge.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8080);
@@ -8339,6 +8340,7 @@ async function runScheduledHarnessTask(input: {
 
 app.use(cors());
 app.use(express.json({ limit: "25mb" }));
+app.use("/api/unity", createUnityMcpBridgeRouter({ nexusOsBaseUrl: `http://127.0.0.1:${port}` }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "nexus-os-api" });

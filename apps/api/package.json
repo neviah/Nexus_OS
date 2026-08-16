@@ -14,6 +14,7 @@
     "test:conformance": "tsx --test src/tests/conformanceProfiles.test.ts",
     "test:contract": "tsx --test src/tests/routerContract.test.ts",
     "test:runtime-trust": "tsx --test src/tests/runtimeTrustPolicy.test.ts",
+    "test:unity-bridge": "tsx --test src/tests/unityMcpBridge.test.ts",
     "test:unity-fallback": "tsx --test src/tests/unityCompileFallback.test.ts",
     "test:autopilot-api": "npm run build && tsx --test src/tests/autopilotLoopApi.test.ts",
     "conformance": "tsx src/tests/runConformance.ts"
