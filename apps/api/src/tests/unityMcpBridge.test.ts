@@ -44,6 +44,14 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
       },
     })}\n\n`);
   });
+  upstream.get("/api/tools/wan2gp/video/stream", (_req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.end(`data: ${JSON.stringify({ type: "done", result: {
+      videoUrl: "/api/tools/wan2gp/file?workspaceId=default&relativePath=Assets%2Fvideos%2Ftest.mp4",
+      relativePath: "Assets/videos/test.mp4", workspaceId: "default", provider: "wan2gp", model: "test-video",
+      width: 640, height: 384, steps: 6, durationSeconds: 3, fps: 16, frameCount: 49, seed: 1, profile: 4, prompt: "test video",
+    } })}\n\n`);
+  });
   upstream.post("/api/tools/music/stable-audio/generate", (_req, res) => res.json({
     ok: true,
     mode: "small-sfx",
@@ -77,6 +85,13 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
       sourceRelativePath: "Assets/models/test.obj",
     } })}\n\n`);
   });
+  upstream.post("/api/tools/animation/generate/stream", (_req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.end(`data: ${JSON.stringify({ type: "done", result: { workspaceId: "default", clips: [
+      { variation: 1, prompt: "run one", modelUrl: "/api/tools/hunyuan3d/file?workspaceId=default&relativePath=Assets%2Fmodels%2Fanimato-run-v1.glb", relativePath: "Assets/models/animato-run-v1.glb", format: "glb" },
+      { variation: 2, prompt: "run two", modelUrl: "/api/tools/hunyuan3d/file?workspaceId=default&relativePath=Assets%2Fmodels%2Fanimato-run-v2.glb", relativePath: "Assets/models/animato-run-v2.glb", format: "glb" },
+    ] } })}\n\n`);
+  });
   upstream.get("/api/workspaces/:id/tree", (_req, res) => res.json({
     tree: {
       name: "default",
@@ -100,7 +115,15 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
           name: "models",
           type: "directory",
           path: "Assets/models",
-          children: [{ name: "test.obj", type: "file", path: "Assets/models/test.obj" }],
+          children: [
+            { name: "test.obj", type: "file", path: "Assets/models/test.obj" },
+            { name: "animato-run-v1.glb", type: "file", path: "Assets/models/animato-run-v1.glb" },
+          ],
+        }, {
+          name: "videos",
+          type: "directory",
+          path: "Assets/videos",
+          children: [{ name: "test.mp4", type: "file", path: "Assets/videos/test.mp4" }],
         }],
       }],
     },
@@ -133,7 +156,7 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
     assert.equal(startResponse.status, 202);
     const started = await startResponse.json() as { requestId: string };
 
-    type JobResponse = { data: { job: { status: string; result?: { asset: { relativePath: string } } } } };
+    type JobResponse = { data: { job: { status: string; result?: { asset?: { relativePath: string }; assets?: Array<{ relativePath: string }> } } } };
     let completed: JobResponse | undefined;
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const jobResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/jobs/${started.requestId}`, { headers });
@@ -146,7 +169,7 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
     }
 
     assert.equal(completed?.data.job.status, "completed");
-    assert.equal(completed?.data.job.result?.asset.relativePath, "Assets/images/test.png");
+    assert.equal(completed?.data.job.result?.asset?.relativePath, "Assets/images/test.png");
 
     const assetsResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/assets?workspaceId=default`, { headers });
     const assets = await assetsResponse.json() as { data: { assets: Array<{ relativePath: string }> } };
@@ -170,7 +193,7 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(audioCompleted?.data.job.result?.asset.relativePath, "Assets/music/test.wav");
+    assert.equal(audioCompleted?.data.job.result?.asset?.relativePath, "Assets/music/test.wav");
 
     const audioAssetsResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/assets?workspaceId=default&kind=audio`, { headers });
     const audioAssets = await audioAssetsResponse.json() as { data: { assets: Array<{ relativePath: string }> } };
@@ -190,7 +213,7 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
       if (job.data.job.status === "completed") { modelCompleted = job; break; }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(modelCompleted?.data.job.result?.asset.relativePath, "Assets/models/test.obj");
+    assert.equal(modelCompleted?.data.job.result?.asset?.relativePath, "Assets/models/test.obj");
 
     const finishResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/tools/nexus.finish.model3d`, {
       method: "POST",
@@ -206,11 +229,42 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
       if (job.data.job.status === "completed") { finishCompleted = job; break; }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(finishCompleted?.data.job.result?.asset.relativePath, "Assets/models/test-finished.obj");
+    assert.equal(finishCompleted?.data.job.result?.asset?.relativePath, "Assets/models/test-finished.obj");
 
     const modelAssetsResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/assets?workspaceId=default&kind=model3d`, { headers });
     const modelAssets = await modelAssetsResponse.json() as { data: { assets: Array<{ relativePath: string }> } };
     assert.deepEqual(modelAssets.data.assets.map((asset) => asset.relativePath), ["Assets/models/test.obj"]);
+
+    const videoStart = await fetch(`${bridgeServer.baseUrl}/api/unity/tools/nexus.generate.video`, {
+      method: "POST", headers, body: JSON.stringify({ prompt: "test video" }),
+    });
+    assert.equal(videoStart.status, 202);
+    const videoId = (await videoStart.json() as { requestId: string }).requestId;
+    let videoCompleted: JobResponse | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const job = await (await fetch(`${bridgeServer.baseUrl}/api/unity/jobs/${videoId}`, { headers })).json() as JobResponse;
+      if (job.data.job.status === "completed") { videoCompleted = job; break; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(videoCompleted?.data.job.result?.asset?.relativePath, "Assets/videos/test.mp4");
+
+    const animationStart = await fetch(`${bridgeServer.baseUrl}/api/unity/tools/nexus.generate.animation`, {
+      method: "POST", headers, body: JSON.stringify({ prompt: "run", sourceRelativePath: "Assets/models/rigged.glb", variations: 2 }),
+    });
+    assert.equal(animationStart.status, 202);
+    const animationId = (await animationStart.json() as { requestId: string }).requestId;
+    let animationCompleted: JobResponse | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const job = await (await fetch(`${bridgeServer.baseUrl}/api/unity/jobs/${animationId}`, { headers })).json() as JobResponse;
+      if (job.data.job.status === "completed") { animationCompleted = job; break; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(animationCompleted?.data.job.result?.assets?.map((asset) => asset.relativePath), ["Assets/models/animato-run-v1.glb", "Assets/models/animato-run-v2.glb"]);
+
+    const videoAssets = await (await fetch(`${bridgeServer.baseUrl}/api/unity/assets?workspaceId=default&kind=video`, { headers })).json() as { data: { assets: Array<{ relativePath: string }> } };
+    assert.deepEqual(videoAssets.data.assets.map((asset) => asset.relativePath), ["Assets/videos/test.mp4"]);
+    const animationAssets = await (await fetch(`${bridgeServer.baseUrl}/api/unity/assets?workspaceId=default&kind=animation`, { headers })).json() as { data: { assets: Array<{ relativePath: string }> } };
+    assert.deepEqual(animationAssets.data.assets.map((asset) => asset.relativePath), ["Assets/models/animato-run-v1.glb"]);
   } finally {
     await close(bridgeServer.server);
     await close(upstreamServer.server);

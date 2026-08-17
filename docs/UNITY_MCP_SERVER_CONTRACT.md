@@ -40,10 +40,12 @@ The bridge converts NexusOS SSE generation into pollable jobs so Unity can survi
 - `POST /api/unity/tools/nexus.generate.audio` starts `nexus.generate.audio` and returns a job.
 - `POST /api/unity/tools/nexus.generate.model3d` starts `nexus.generate.model3d` and returns a job.
 - `POST /api/unity/tools/nexus.finish.model3d` starts `nexus.finish.model3d` and returns a job.
+- `POST /api/unity/tools/nexus.generate.video` starts `nexus.generate.video` and returns a job.
+- `POST /api/unity/tools/nexus.generate.animation` starts `nexus.generate.animation` and may return multiple assets.
 - `GET /api/unity/jobs` lists recent jobs.
 - `GET /api/unity/jobs/:id` returns progress and the final MCP-shaped result.
 - `POST /api/unity/jobs/:id/cancel` cancels the upstream SSE operation.
-- `GET /api/unity/assets` exposes image, audio, or model libraries for the selected workspace.
+- `GET /api/unity/assets` exposes image, audio, model, video, or animation libraries for the selected workspace.
 
 The bridge rejects non-loopback clients. Runtime probes use bounded timeouts and report partial readiness instead of blocking the entire status response.
 

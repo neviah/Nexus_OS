@@ -89,16 +89,71 @@ type Model3dAsset = {
   sourceRelativePath: string;
 };
 
+type VideoInput = {
+  workspaceId?: string;
+  prompt?: string;
+  negativePrompt?: string;
+  model?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  durationSeconds?: number;
+  fps?: number;
+  frameCount?: number;
+  seed?: number;
+  profile?: number;
+};
+
+type AnimationInput = {
+  workspaceId?: string;
+  prompt?: string;
+  sourceRelativePath?: string;
+  variations?: number;
+  harnessId?: string;
+};
+
+type VideoAsset = {
+  kind: "video";
+  provider: string;
+  model: string;
+  workspaceId: string;
+  relativePath: string;
+  downloadUrl: string;
+  width: number;
+  height: number;
+  steps: number;
+  seed: number;
+  profile: number;
+  prompt: string;
+  negativePrompt: string;
+  durationSeconds: number;
+  fps: number;
+  frameCount: number;
+};
+
+type AnimationAsset = {
+  kind: "animation";
+  provider: "animato";
+  variation: number;
+  workspaceId: string;
+  relativePath: string;
+  downloadUrl: string;
+  format: string;
+  prompt: string;
+};
+
+type GeneratedAsset = ImageAsset | AudioAsset | Model3dAsset | VideoAsset | AnimationAsset;
+
 type BridgeJob = {
   id: string;
-  tool: "nexus.generate.image" | "nexus.generate.audio" | "nexus.generate.model3d" | "nexus.finish.model3d";
+  tool: "nexus.generate.image" | "nexus.generate.audio" | "nexus.generate.model3d" | "nexus.finish.model3d" | "nexus.generate.video" | "nexus.generate.animation";
   status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   message: string;
   workspaceId: string;
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;
-  result?: { asset: ImageAsset | AudioAsset | Model3dAsset };
+  result?: { asset?: GeneratedAsset; assets?: GeneratedAsset[] };
   error?: { code: string; message: string; retryable: boolean };
   controller: AbortController;
 };
@@ -225,6 +280,26 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
     return res.status(202).json({ ok: true, workspaceId: job.workspaceId, requestId: job.id, data: { job: publicJob(job) } });
   });
 
+  router.post("/tools/nexus.generate.video", (req, res) => {
+    const input = req.body as VideoInput;
+    const validationError = validateVideoInput(input);
+    if (validationError) return res.status(400).json(errorEnvelope("invalid_request", validationError, false));
+    const job = createJob("nexus.generate.video", "Video generation queued.", input.workspaceId);
+    jobs.set(job.id, job);
+    void runVideoJob(job, input, baseUrl);
+    return res.status(202).json({ ok: true, workspaceId: job.workspaceId, requestId: job.id, data: { job: publicJob(job) } });
+  });
+
+  router.post("/tools/nexus.generate.animation", (req, res) => {
+    const input = req.body as AnimationInput;
+    const validationError = validateAnimationInput(input);
+    if (validationError) return res.status(400).json(errorEnvelope("invalid_request", validationError, false));
+    const job = createJob("nexus.generate.animation", "Animation generation queued.", input.workspaceId);
+    jobs.set(job.id, job);
+    void runAnimationJob(job, input, baseUrl);
+    return res.status(202).json({ ok: true, workspaceId: job.workspaceId, requestId: job.id, data: { job: publicJob(job) } });
+  });
+
   router.get("/jobs", (_req, res) => {
     const rows = [...jobs.values()]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -260,7 +335,11 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
         ? flattenAudioAssets(payload.tree, workspaceId)
         : kind === "model3d"
           ? flattenModel3dAssets(payload.tree, workspaceId)
-          : flattenImageAssets(payload.tree, workspaceId);
+          : kind === "video"
+            ? flattenVideoAssets(payload.tree, workspaceId)
+            : kind === "animation"
+              ? flattenAnimationAssets(payload.tree, workspaceId)
+              : flattenImageAssets(payload.tree, workspaceId);
       return res.json({ ok: true, workspaceId, data: { assets } });
     } catch (error) {
       return res.status(502).json(errorEnvelope("asset_list_failed", String(error), true));
@@ -303,6 +382,62 @@ async function runModel3dFinishJob(job: BridgeJob, input: Model3dFinishInput, ba
     "Finished 3D model ready to import.",
     normalizeModel3dAsset,
   );
+}
+
+async function runVideoJob(job: BridgeJob, input: VideoInput, baseUrl: string): Promise<void> {
+  updateJob(job, "running", "Starting Wan2GP video generation...");
+  const query = new URLSearchParams({
+    workspaceId: job.workspaceId,
+    prompt: input.prompt!.trim(),
+    negativePrompt: input.negativePrompt?.trim() ?? "",
+    model: input.model?.trim() || "auto",
+    width: String(input.width ?? 640),
+    height: String(input.height ?? 384),
+    steps: String(input.steps ?? 6),
+    durationSeconds: String(input.durationSeconds ?? 3),
+    fps: String(input.fps ?? 16),
+    frameCount: String(input.frameCount ?? 49),
+    seed: String(input.seed ?? -1),
+    profile: String(input.profile ?? 4),
+  });
+  try {
+    const response = await fetch(`${baseUrl}/api/tools/wan2gp/video/stream?${query}`, { signal: job.controller.signal });
+    if (!response.ok || !response.body) throw new Error(`Video generation returned HTTP ${response.status}.`);
+    const result = await consumeSseResult(response, job);
+    job.result = { asset: normalizeVideoAsset(result) };
+    updateJob(job, "completed", "Video generated and ready to import.", true);
+  } catch (error) {
+    finishFailedJob(job, error, "Video generation canceled.");
+  }
+}
+
+async function runAnimationJob(job: BridgeJob, input: AnimationInput, baseUrl: string): Promise<void> {
+  updateJob(job, "running", "Starting Animato generation...");
+  try {
+    const response = await fetch(`${baseUrl}/api/tools/animation/generate/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...input, workspaceId: job.workspaceId }),
+      signal: job.controller.signal,
+    });
+    if (!response.ok || !response.body) throw new Error(`Animation generation returned HTTP ${response.status}.`);
+    const result = await consumeSseResult(response, job);
+    const clips = Array.isArray(result.clips) ? result.clips as Array<Record<string, unknown>> : [];
+    if (!clips.length) throw new Error("Animato completed without animation clips.");
+    job.result = { assets: clips.map((clip) => normalizeAnimationAsset(clip, job.workspaceId)) };
+    updateJob(job, "completed", `${clips.length} animation variation(s) ready to import.`, true);
+  } catch (error) {
+    finishFailedJob(job, error, "Animation generation canceled.");
+  }
+}
+
+function finishFailedJob(job: BridgeJob, error: unknown, canceledMessage: string): void {
+  if (job.controller.signal.aborted) {
+    updateJob(job, "canceled", canceledMessage, true);
+    return;
+  }
+  job.error = { code: "generation_failed", message: String(error), retryable: true };
+  updateJob(job, "failed", job.error.message, true);
 }
 
 async function runSseAssetJob(
@@ -489,6 +624,40 @@ function normalizeModel3dAsset(result: Record<string, unknown>): Model3dAsset {
   };
 }
 
+function normalizeVideoAsset(result: Record<string, unknown>): VideoAsset {
+  return {
+    kind: "video",
+    provider: String(result.provider ?? "wan2gp"),
+    model: String(result.model ?? "auto"),
+    workspaceId: String(result.workspaceId ?? "default"),
+    relativePath: String(result.relativePath ?? ""),
+    downloadUrl: String(result.videoUrl ?? result.downloadUrl ?? ""),
+    width: Number(result.width ?? 0),
+    height: Number(result.height ?? 0),
+    steps: Number(result.steps ?? 0),
+    seed: Number(result.seed ?? -1),
+    profile: Number(result.profile ?? 4),
+    prompt: String(result.prompt ?? ""),
+    negativePrompt: String(result.negativePrompt ?? ""),
+    durationSeconds: Number(result.durationSeconds ?? 0),
+    fps: Number(result.fps ?? 0),
+    frameCount: Number(result.frameCount ?? 0),
+  };
+}
+
+function normalizeAnimationAsset(result: Record<string, unknown>, workspaceId: string): AnimationAsset {
+  return {
+    kind: "animation",
+    provider: "animato",
+    variation: Number(result.variation ?? 1),
+    workspaceId,
+    relativePath: String(result.relativePath ?? ""),
+    downloadUrl: String(result.modelUrl ?? result.downloadUrl ?? ""),
+    format: String(result.format ?? "glb"),
+    prompt: String(result.prompt ?? ""),
+  };
+}
+
 function flattenImageAssets(root: WorkspaceTreeNode | undefined, workspaceId: string): Array<Record<string, string>> {
   const rows: Array<Record<string, string>> = [];
   const visit = (node: WorkspaceTreeNode | undefined) => {
@@ -544,6 +713,44 @@ function flattenModel3dAssets(root: WorkspaceTreeNode | undefined, workspaceId: 
     for (const child of node.children ?? []) visit(child);
   };
   visit(root);
+  return rows
+    .filter((row) => !row.fileName.toLowerCase().startsWith("animato-"))
+    .sort((a, b) => a.fileName.localeCompare(b.fileName));
+}
+
+function flattenVideoAssets(root: WorkspaceTreeNode | undefined, workspaceId: string): Array<Record<string, string>> {
+  return flattenAssets(root, workspaceId, "video", "Assets/videos/", /\.(mp4|webm|mov)$/i, "/api/tools/wan2gp/file");
+}
+
+function flattenAnimationAssets(root: WorkspaceTreeNode | undefined, workspaceId: string): Array<Record<string, string>> {
+  const rows = flattenAssets(root, workspaceId, "animation", "Assets/models/", /\.(glb|gltf|fbx)$/i, "/api/tools/hunyuan3d/file");
+  return rows.filter((row) => row.fileName.toLowerCase().startsWith("animato-"));
+}
+
+function flattenAssets(
+  root: WorkspaceTreeNode | undefined,
+  workspaceId: string,
+  kind: string,
+  prefix: string,
+  extensionPattern: RegExp,
+  endpoint: string,
+): Array<Record<string, string>> {
+  const rows: Array<Record<string, string>> = [];
+  const visit = (node: WorkspaceTreeNode | undefined) => {
+    if (!node) return;
+    if (node.type === "file" && node.path && extensionPattern.test(node.path) && node.path.replace(/\\/g, "/").startsWith(prefix)) {
+      const relativePath = node.path.replace(/\\/g, "/");
+      rows.push({
+        kind,
+        relativePath,
+        fileName: node.name || relativePath.split("/").pop() || relativePath,
+        format: relativePath.split(".").pop()?.toLowerCase() ?? "",
+        downloadUrl: `${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}&relativePath=${encodeURIComponent(relativePath)}`,
+      });
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  visit(root);
   return rows.sort((a, b) => a.fileName.localeCompare(b.fileName));
 }
 
@@ -581,6 +788,24 @@ function validateModel3dFinishInput(input: Model3dFinishInput): string | null {
   if (input.outputFormat !== "obj" && input.outputFormat !== "glb") return "outputFormat must be obj or glb";
   const profiles = ["draft", "game-ready-low", "game-ready-med", "game-ready-high"];
   if (!input.profile || !profiles.includes(input.profile)) return "profile is invalid";
+  return null;
+}
+
+function validateVideoInput(input: VideoInput): string | null {
+  if (!input || !input.prompt?.trim()) return "prompt is required";
+  if ((input.width ?? 640) < 320 || (input.width ?? 640) > 1024) return "width must be between 320 and 1024";
+  if ((input.height ?? 384) < 192 || (input.height ?? 384) > 1024) return "height must be between 192 and 1024";
+  if ((input.durationSeconds ?? 3) < 1 || (input.durationSeconds ?? 3) > 12) return "durationSeconds must be between 1 and 12";
+  if ((input.fps ?? 16) < 8 || (input.fps ?? 16) > 32) return "fps must be between 8 and 32";
+  if ((input.frameCount ?? 49) < 17 || (input.frameCount ?? 49) > 193) return "frameCount must be between 17 and 193";
+  return null;
+}
+
+function validateAnimationInput(input: AnimationInput): string | null {
+  if (!input || !input.prompt?.trim()) return "prompt is required";
+  if (!input.sourceRelativePath?.trim()) return "sourceRelativePath is required";
+  if (!/\.(glb|gltf|fbx)$/i.test(input.sourceRelativePath)) return "sourceRelativePath must be a rigged glb, gltf, or fbx model";
+  if ((input.variations ?? 1) < 1 || (input.variations ?? 1) > 5) return "variations must be between 1 and 5";
   return null;
 }
 
