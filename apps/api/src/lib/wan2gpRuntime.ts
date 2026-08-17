@@ -391,7 +391,29 @@ async function patchWanAttentionCudaFallback(): Promise<void> {
   }
 }
 
-async function checkWanApiReady(): Promise<boolean> {
+async function checkWanApiReady(forceRefresh = false): Promise<boolean> {
+  const now = Date.now();
+  if (!forceRefresh && wanReadinessCache && now - wanReadinessCache.checkedAt < 5 * 60 * 1000) {
+    return wanReadinessCache.ready;
+  }
+  if (wanReadinessProbe) {
+    return wanReadinessProbe;
+  }
+
+  wanReadinessProbe = runWanApiReadinessProbe();
+  try {
+    const ready = await wanReadinessProbe;
+    wanReadinessCache = { ready, checkedAt: Date.now() };
+    return ready;
+  } finally {
+    wanReadinessProbe = null;
+  }
+}
+
+let wanReadinessCache: { ready: boolean; checkedAt: number } | null = null;
+let wanReadinessProbe: Promise<boolean> | null = null;
+
+async function runWanApiReadinessProbe(): Promise<boolean> {
   const pythonPath = getWanPythonPath();
   try {
     await fs.access(pythonPath);
@@ -409,11 +431,31 @@ async function checkWanApiReady(): Promise<boolean> {
   ].join("\n"), "utf-8");
 
   try {
-    await execFileAsync(pythonPath, [smokeScript], {
-      cwd: wanAppRoot,
-      windowsHide: true,
-      timeout: 120000,
-      maxBuffer: 256 * 1024,
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(pythonPath, [smokeScript], {
+        cwd: wanAppRoot,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let settled = false;
+      let output = "";
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        error ? reject(error) : resolve();
+      };
+      const append = (chunk: Buffer | string) => {
+        output = (output + String(chunk)).slice(-256 * 1024);
+      };
+      child.stdout?.on("data", append);
+      child.stderr?.on("data", append);
+      child.once("error", (error) => finish(error));
+      child.once("exit", (code) => finish(code === 0 ? undefined : new Error(`Wan2GP readiness probe exited with code ${code ?? "unknown"}. ${output}`.trim())));
+      const timeout = setTimeout(() => {
+        if (child.pid) void terminateChild(child.pid);
+        finish(new Error("Wan2GP readiness probe timed out after 120 seconds."));
+      }, 120_000);
     });
     lastWanReadinessError = null;
     return true;
@@ -725,6 +767,7 @@ export async function getWan2GpStatus(): Promise<Wan2GpStatus> {
 }
 
 export async function installWan2Gp(): Promise<void> {
+  wanReadinessCache = null;
   await ensureWanRepo();
   await ensureWanEnv();
   await patchWanAttentionCudaFallback();
@@ -738,7 +781,7 @@ export async function startWan2GpIfNeeded(): Promise<void> {
   if (!status.installed || !status.envReady) {
     throw new Error("Wan2GP is not installed. Run install first.");
   }
-  const ready = await checkWanApiReady();
+  const ready = await checkWanApiReady(true);
   if (!ready) {
     throw new Error(`Wan2GP API readiness check failed.${lastWanReadinessError ? ` ${lastWanReadinessError}` : ""}`);
   }
@@ -765,7 +808,7 @@ export async function generateWithWan2GpStreaming(
   const frameCount = clampInt(input.frameCount ?? (fps * durationSeconds + 1), 17, 193);
   const normalizedModel = normalizeWanModel(input.model);
   const maxDurationMs = mode === "image" ? 12 * 60 * 1000 : 20 * 60 * 1000;
-  const inactivityTimeoutMs = 2 * 60 * 1000;
+  const inactivityTimeoutMs = mode === "image" ? 5 * 60 * 1000 : 3 * 60 * 1000;
   const heartbeatIntervalMs = 20 * 1000;
 
   await fs.mkdir(wanAppRoot, { recursive: true });

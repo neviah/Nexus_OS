@@ -49,6 +49,8 @@ The bridge converts NexusOS SSE generation into pollable jobs so Unity can survi
 
 The bridge rejects non-loopback clients. Runtime probes use bounded timeouts and report partial readiness instead of blocking the entire status response.
 
+Unity-facing job progress and errors use NexusOS product language rather than internal provider/process names. Text-to-3D source-image failures should identify the stage and provide retry, lighter-profile, and Image URL recovery options.
+
 ## Standard MCP Result Shapes
 
 ### Success envelope

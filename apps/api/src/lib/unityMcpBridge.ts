@@ -58,6 +58,10 @@ type Model3dInput = {
   imageUrl?: string;
   textPrompt?: string;
   textNegativePrompt?: string;
+  textImageWidth?: number;
+  textImageHeight?: number;
+  textImageSteps?: number;
+  textImageProfile?: number;
   modelPath?: string;
   subfolder?: string;
   numInferenceSteps?: number;
@@ -366,7 +370,13 @@ async function runModel3dJob(job: BridgeJob, input: Model3dInput, baseUrl: strin
   await runSseAssetJob(
     job,
     `${baseUrl}/api/tools/hunyuan3d/generate/stream`,
-    input,
+    {
+      ...input,
+      textImageWidth: input.textImageWidth ?? 512,
+      textImageHeight: input.textImageHeight ?? 512,
+      textImageSteps: input.textImageSteps ?? 4,
+      textImageProfile: input.textImageProfile ?? 4,
+    },
     "Starting Hunyuan3D generation...",
     "3D model generated and ready to import.",
     normalizeModel3dAsset,
@@ -436,7 +446,7 @@ function finishFailedJob(job: BridgeJob, error: unknown, canceledMessage: string
     updateJob(job, "canceled", canceledMessage, true);
     return;
   }
-  job.error = { code: "generation_failed", message: String(error), retryable: true };
+  job.error = { code: "generation_failed", message: toNexusOsMessage(String(error)), retryable: true };
   updateJob(job, "failed", job.error.message, true);
 }
 
@@ -465,7 +475,7 @@ async function runSseAssetJob(
       updateJob(job, "canceled", "3D operation canceled.", true);
       return;
     }
-    job.error = { code: "generation_failed", message: String(error), retryable: true };
+    job.error = { code: "generation_failed", message: toNexusOsMessage(String(error)), retryable: true };
     updateJob(job, "failed", job.error.message, true);
   }
 }
@@ -484,8 +494,8 @@ async function consumeSseResult(response: globalThis.Response, job: BridgeJob): 
       const data = frame.split(/\r?\n/).find((line) => line.startsWith("data:"))?.slice(5).trim();
       if (!data) continue;
       const event = JSON.parse(data) as { type?: string; message?: string; result?: Record<string, unknown> };
-      if (event.type === "status") updateJob(job, "running", event.message || "3D operation in progress...");
-      if (event.type === "error") throw new Error(event.message || "3D operation failed.");
+      if (event.type === "status") updateJob(job, "running", toNexusOsMessage(event.message || "3D operation in progress..."));
+      if (event.type === "error") throw new Error(toNexusOsMessage(event.message || "3D operation failed."));
       if (event.type === "done" && event.result) result = event.result;
     }
     if (done) break;
@@ -532,7 +542,7 @@ async function runAudioJob(job: BridgeJob, input: AudioInput, baseUrl: string): 
       updateJob(job, "canceled", "Audio generation canceled.", true);
       return;
     }
-    job.error = { code: "generation_failed", message: String(error), retryable: true };
+    job.error = { code: "generation_failed", message: toNexusOsMessage(String(error)), retryable: true };
     updateJob(job, "failed", job.error.message, true);
   }
 }
@@ -569,8 +579,8 @@ async function runImageJob(job: BridgeJob, input: ImageInput, baseUrl: string): 
         const data = frame.split(/\r?\n/).find((line) => line.startsWith("data:"))?.slice(5).trim();
         if (!data) continue;
         const event = JSON.parse(data) as { type?: string; message?: string; result?: Record<string, unknown> };
-        if (event.type === "status") updateJob(job, "running", event.message || "Generating image...");
-        if (event.type === "error") throw new Error(event.message || "Image generation failed.");
+        if (event.type === "status") updateJob(job, "running", toNexusOsMessage(event.message || "Generating image..."));
+        if (event.type === "error") throw new Error(toNexusOsMessage(event.message || "Image generation failed."));
         if (event.type === "done" && event.result) {
           job.result = { asset: normalizeImageAsset(event.result) };
           updateJob(job, "completed", "Image generated and ready to import.", true);
@@ -586,7 +596,7 @@ async function runImageJob(job: BridgeJob, input: ImageInput, baseUrl: string): 
       updateJob(job, "canceled", "Image generation canceled.", true);
       return;
     }
-    job.error = { code: "generation_failed", message: String(error), retryable: true };
+    job.error = { code: "generation_failed", message: toNexusOsMessage(String(error)), retryable: true };
     updateJob(job, "failed", job.error.message, true);
   }
 }
@@ -843,6 +853,18 @@ function normalizeRuntimeReadiness(value: unknown): Record<string, unknown> {
     ...status,
     apiReady: Boolean(status.apiReady ?? status.ready),
   };
+}
+
+function toNexusOsMessage(message: string): string {
+  const clean = message.replace(/^(Error:\s*)+/i, "").trim();
+  if (/Wan2GP generation stalled without output/i.test(clean)) {
+    return "NexusOS source-image generation stopped because the local model produced no output for five minutes. Retry, choose a lighter image model/profile, or generate an image first and use Image URL.";
+  }
+  return clean
+    .replace(/Wan2GP/gi, "NexusOS")
+    .replace(/Hunyuan3D-2GP|Hunyuan3D/gi, "NexusOS 3D")
+    .replace(/Animato/gi, "NexusOS animation")
+    .replace(/Blender/gi, "NexusOS finishing");
 }
 
 function errorEnvelope(code: string, message: string, retryable: boolean): Record<string, unknown> {
