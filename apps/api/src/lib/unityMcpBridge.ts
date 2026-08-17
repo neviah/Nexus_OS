@@ -53,16 +53,52 @@ type AudioAsset = {
   prompt: string;
 };
 
+type Model3dInput = {
+  workspaceId?: string;
+  imageUrl?: string;
+  textPrompt?: string;
+  textNegativePrompt?: string;
+  modelPath?: string;
+  subfolder?: string;
+  numInferenceSteps?: number;
+  octreeResolution?: number;
+  guidanceScale?: number;
+  seed?: number;
+  format?: "glb" | "obj";
+};
+
+type Model3dFinishInput = {
+  workspaceId?: string;
+  relativePath?: string;
+  outputFormat?: "glb" | "obj";
+  profile?: "draft" | "game-ready-low" | "game-ready-med" | "game-ready-high";
+  sourceImageUrl?: string;
+  sourceRelativePath?: string;
+};
+
+type Model3dAsset = {
+  kind: "model3d";
+  provider: string;
+  workspaceId: string;
+  relativePath: string;
+  downloadUrl: string;
+  format: string;
+  finishProfile: string;
+  sourceKind: string;
+  sourceImageUrl: string;
+  sourceRelativePath: string;
+};
+
 type BridgeJob = {
   id: string;
-  tool: "nexus.generate.image" | "nexus.generate.audio";
+  tool: "nexus.generate.image" | "nexus.generate.audio" | "nexus.generate.model3d" | "nexus.finish.model3d";
   status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled";
   message: string;
   workspaceId: string;
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;
-  result?: { asset: ImageAsset | AudioAsset };
+  result?: { asset: ImageAsset | AudioAsset | Model3dAsset };
   error?: { code: string; message: string; retryable: boolean };
   controller: AbortController;
 };
@@ -169,6 +205,26 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
     return res.status(202).json({ ok: true, workspaceId: job.workspaceId, requestId: job.id, data: { job: publicJob(job) } });
   });
 
+  router.post("/tools/nexus.generate.model3d", (req, res) => {
+    const input = req.body as Model3dInput;
+    const validationError = validateModel3dInput(input);
+    if (validationError) return res.status(400).json(errorEnvelope("invalid_request", validationError, false));
+    const job = createJob("nexus.generate.model3d", "3D generation queued.", input.workspaceId);
+    jobs.set(job.id, job);
+    void runModel3dJob(job, input, baseUrl);
+    return res.status(202).json({ ok: true, workspaceId: job.workspaceId, requestId: job.id, data: { job: publicJob(job) } });
+  });
+
+  router.post("/tools/nexus.finish.model3d", (req, res) => {
+    const input = req.body as Model3dFinishInput;
+    const validationError = validateModel3dFinishInput(input);
+    if (validationError) return res.status(400).json(errorEnvelope("invalid_request", validationError, false));
+    const job = createJob("nexus.finish.model3d", "3D finishing queued.", input.workspaceId);
+    jobs.set(job.id, job);
+    void runModel3dFinishJob(job, input, baseUrl);
+    return res.status(202).json({ ok: true, workspaceId: job.workspaceId, requestId: job.id, data: { job: publicJob(job) } });
+  });
+
   router.get("/jobs", (_req, res) => {
     const rows = [...jobs.values()]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -187,7 +243,7 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
     const job = jobs.get(req.params.id);
     if (!job) return res.status(404).json(errorEnvelope("job_not_found", "Generation job was not found.", false));
     if (job.status === "queued" || job.status === "running") {
-      updateJob(job, "canceling", "Canceling image generation...");
+      updateJob(job, "canceling", "Canceling asset operation...");
       job.controller.abort();
     }
     return res.json({ ok: true, workspaceId: job.workspaceId, requestId: job.id, data: { job: publicJob(job) } });
@@ -202,7 +258,9 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
       const payload = await response.json() as { tree?: WorkspaceTreeNode };
       const assets = kind === "audio"
         ? flattenAudioAssets(payload.tree, workspaceId)
-        : flattenImageAssets(payload.tree, workspaceId);
+        : kind === "model3d"
+          ? flattenModel3dAssets(payload.tree, workspaceId)
+          : flattenImageAssets(payload.tree, workspaceId);
       return res.json({ ok: true, workspaceId, data: { assets } });
     } catch (error) {
       return res.status(502).json(errorEnvelope("asset_list_failed", String(error), true));
@@ -210,6 +268,95 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
   });
 
   return router;
+}
+
+function createJob(tool: BridgeJob["tool"], message: string, workspaceId?: string): BridgeJob {
+  return {
+    id: randomUUID(),
+    tool,
+    status: "queued",
+    message,
+    workspaceId: workspaceId?.trim() || "default",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    controller: new AbortController(),
+  };
+}
+
+async function runModel3dJob(job: BridgeJob, input: Model3dInput, baseUrl: string): Promise<void> {
+  await runSseAssetJob(
+    job,
+    `${baseUrl}/api/tools/hunyuan3d/generate/stream`,
+    input,
+    "Starting Hunyuan3D generation...",
+    "3D model generated and ready to import.",
+    normalizeModel3dAsset,
+  );
+}
+
+async function runModel3dFinishJob(job: BridgeJob, input: Model3dFinishInput, baseUrl: string): Promise<void> {
+  await runSseAssetJob(
+    job,
+    `${baseUrl}/api/tools/hunyuan3d/finish/stream`,
+    input,
+    "Starting Blender finishing...",
+    "Finished 3D model ready to import.",
+    normalizeModel3dAsset,
+  );
+}
+
+async function runSseAssetJob(
+  job: BridgeJob,
+  url: string,
+  input: object,
+  startingMessage: string,
+  completedMessage: string,
+  normalize: (result: Record<string, unknown>) => Model3dAsset,
+): Promise<void> {
+  updateJob(job, "running", startingMessage);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...input, workspaceId: job.workspaceId }),
+      signal: job.controller.signal,
+    });
+    if (!response.ok || !response.body) throw new Error(`NexusOS stream returned HTTP ${response.status}.`);
+    const result = await consumeSseResult(response, job);
+    job.result = { asset: normalize(result) };
+    updateJob(job, "completed", completedMessage, true);
+  } catch (error) {
+    if (job.controller.signal.aborted) {
+      updateJob(job, "canceled", "3D operation canceled.", true);
+      return;
+    }
+    job.error = { code: "generation_failed", message: String(error), retryable: true };
+    updateJob(job, "failed", job.error.message, true);
+  }
+}
+
+async function consumeSseResult(response: globalThis.Response, job: BridgeJob): Promise<Record<string, unknown>> {
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: Record<string, unknown> | undefined;
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const frames = buffer.split(/\r?\n\r?\n/);
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      const data = frame.split(/\r?\n/).find((line) => line.startsWith("data:"))?.slice(5).trim();
+      if (!data) continue;
+      const event = JSON.parse(data) as { type?: string; message?: string; result?: Record<string, unknown> };
+      if (event.type === "status") updateJob(job, "running", event.message || "3D operation in progress...");
+      if (event.type === "error") throw new Error(event.message || "3D operation failed.");
+      if (event.type === "done" && event.result) result = event.result;
+    }
+    if (done) break;
+  }
+  if (!result) throw new Error("NexusOS stream ended without a completed asset.");
+  return result;
 }
 
 async function runAudioJob(job: BridgeJob, input: AudioInput, baseUrl: string): Promise<void> {
@@ -327,6 +474,21 @@ function normalizeImageAsset(result: Record<string, unknown>): ImageAsset {
   };
 }
 
+function normalizeModel3dAsset(result: Record<string, unknown>): Model3dAsset {
+  return {
+    kind: "model3d",
+    provider: String(result.provider ?? "hunyuan3d"),
+    workspaceId: String(result.workspaceId ?? "default"),
+    relativePath: String(result.relativePath ?? ""),
+    downloadUrl: String(result.modelUrl ?? result.downloadUrl ?? ""),
+    format: String(result.format ?? "obj"),
+    finishProfile: String(result.profile ?? ""),
+    sourceKind: String(result.sourceKind ?? ""),
+    sourceImageUrl: String(result.sourceImageUrl ?? ""),
+    sourceRelativePath: String(result.sourceRelativePath ?? ""),
+  };
+}
+
 function flattenImageAssets(root: WorkspaceTreeNode | undefined, workspaceId: string): Array<Record<string, string>> {
   const rows: Array<Record<string, string>> = [];
   const visit = (node: WorkspaceTreeNode | undefined) => {
@@ -365,6 +527,26 @@ function flattenAudioAssets(root: WorkspaceTreeNode | undefined, workspaceId: st
   return rows.sort((a, b) => a.fileName.localeCompare(b.fileName));
 }
 
+function flattenModel3dAssets(root: WorkspaceTreeNode | undefined, workspaceId: string): Array<Record<string, string>> {
+  const rows: Array<Record<string, string>> = [];
+  const visit = (node: WorkspaceTreeNode | undefined) => {
+    if (!node) return;
+    if (node.type === "file" && node.path && /\.(obj|glb|gltf)$/i.test(node.path) && node.path.replace(/\\/g, "/").startsWith("Assets/models/")) {
+      const relativePath = node.path.replace(/\\/g, "/");
+      rows.push({
+        kind: "model3d",
+        relativePath,
+        fileName: node.name || relativePath.split("/").pop() || relativePath,
+        format: relativePath.split(".").pop()?.toLowerCase() ?? "",
+        downloadUrl: `/api/tools/hunyuan3d/file?workspaceId=${encodeURIComponent(workspaceId)}&relativePath=${encodeURIComponent(relativePath)}`,
+      });
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  visit(root);
+  return rows.sort((a, b) => a.fileName.localeCompare(b.fileName));
+}
+
 function validateImageInput(input: ImageInput): string | null {
   if (!input || !input.prompt?.trim()) return "prompt is required";
   if ((input.width ?? 768) < 256 || (input.width ?? 768) > 1280) return "width must be between 256 and 1280";
@@ -382,6 +564,23 @@ function validateAudioInput(input: AudioInput): string | null {
   const duration = input.duration ?? 30;
   const maxDuration = input.mode === "medium" ? 380 : 120;
   if (duration < 1 || duration > maxDuration) return `duration must be between 1 and ${maxDuration} seconds for ${input.mode}`;
+  return null;
+}
+
+function validateModel3dInput(input: Model3dInput): string | null {
+  if (!input || (!input.textPrompt?.trim() && !input.imageUrl?.trim())) return "textPrompt or imageUrl is required";
+  if (input.format !== "obj" && input.format !== "glb") return "format must be obj or glb";
+  if ((input.numInferenceSteps ?? 20) < 1 || (input.numInferenceSteps ?? 20) > 100) return "numInferenceSteps must be between 1 and 100";
+  if ((input.octreeResolution ?? 192) < 64 || (input.octreeResolution ?? 192) > 512) return "octreeResolution must be between 64 and 512";
+  return null;
+}
+
+function validateModel3dFinishInput(input: Model3dFinishInput): string | null {
+  if (!input || !input.relativePath?.trim()) return "relativePath is required";
+  if (!/\.(obj|glb|gltf)$/i.test(input.relativePath)) return "relativePath must be an obj, glb, or gltf model";
+  if (input.outputFormat !== "obj" && input.outputFormat !== "glb") return "outputFormat must be obj or glb";
+  const profiles = ["draft", "game-ready-low", "game-ready-med", "game-ready-high"];
+  if (!input.profile || !profiles.includes(input.profile)) return "profile is invalid";
   return null;
 }
 

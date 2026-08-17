@@ -53,6 +53,30 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
     relativePath: "Assets/music/test.wav",
     playbackUrl: "/api/tools/music/file?workspaceId=default&relativePath=Assets%2Fmusic%2Ftest.wav",
   }));
+  upstream.post("/api/tools/hunyuan3d/generate/stream", (_req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.write(`data: ${JSON.stringify({ type: "status", message: "Generating mesh..." })}\n\n`);
+    res.end(`data: ${JSON.stringify({ type: "done", result: {
+      modelUrl: "/api/tools/hunyuan3d/file?workspaceId=default&relativePath=Assets%2Fmodels%2Ftest.obj",
+      relativePath: "Assets/models/test.obj",
+      workspaceId: "default",
+      provider: "hunyuan3d",
+      format: "obj",
+      sourceKind: "text",
+    } })}\n\n`);
+  });
+  upstream.post("/api/tools/hunyuan3d/finish/stream", (_req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.end(`data: ${JSON.stringify({ type: "done", result: {
+      modelUrl: "/api/tools/hunyuan3d/file?workspaceId=default&relativePath=Assets%2Fmodels%2Ftest-finished.obj",
+      relativePath: "Assets/models/test-finished.obj",
+      workspaceId: "default",
+      provider: "blender-headless",
+      format: "obj",
+      profile: "game-ready-med",
+      sourceRelativePath: "Assets/models/test.obj",
+    } })}\n\n`);
+  });
   upstream.get("/api/workspaces/:id/tree", (_req, res) => res.json({
     tree: {
       name: "default",
@@ -72,6 +96,11 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
           type: "directory",
           path: "Assets/music",
           children: [{ name: "test.wav", type: "file", path: "Assets/music/test.wav" }],
+        }, {
+          name: "models",
+          type: "directory",
+          path: "Assets/models",
+          children: [{ name: "test.obj", type: "file", path: "Assets/models/test.obj" }],
         }],
       }],
     },
@@ -146,6 +175,42 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
     const audioAssetsResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/assets?workspaceId=default&kind=audio`, { headers });
     const audioAssets = await audioAssetsResponse.json() as { data: { assets: Array<{ relativePath: string }> } };
     assert.deepEqual(audioAssets.data.assets.map((asset) => asset.relativePath), ["Assets/music/test.wav"]);
+
+    const modelStartResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/tools/nexus.generate.model3d`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ textPrompt: "test model", format: "obj" }),
+    });
+    assert.equal(modelStartResponse.status, 202);
+    const modelStarted = await modelStartResponse.json() as { requestId: string };
+    let modelCompleted: JobResponse | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await fetch(`${bridgeServer.baseUrl}/api/unity/jobs/${modelStarted.requestId}`, { headers });
+      const job = await response.json() as JobResponse;
+      if (job.data.job.status === "completed") { modelCompleted = job; break; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(modelCompleted?.data.job.result?.asset.relativePath, "Assets/models/test.obj");
+
+    const finishResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/tools/nexus.finish.model3d`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ relativePath: "Assets/models/test.obj", outputFormat: "obj", profile: "game-ready-med" }),
+    });
+    assert.equal(finishResponse.status, 202);
+    const finishStarted = await finishResponse.json() as { requestId: string };
+    let finishCompleted: JobResponse | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await fetch(`${bridgeServer.baseUrl}/api/unity/jobs/${finishStarted.requestId}`, { headers });
+      const job = await response.json() as JobResponse;
+      if (job.data.job.status === "completed") { finishCompleted = job; break; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(finishCompleted?.data.job.result?.asset.relativePath, "Assets/models/test-finished.obj");
+
+    const modelAssetsResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/assets?workspaceId=default&kind=model3d`, { headers });
+    const modelAssets = await modelAssetsResponse.json() as { data: { assets: Array<{ relativePath: string }> } };
+    assert.deepEqual(modelAssets.data.assets.map((asset) => asset.relativePath), ["Assets/models/test.obj"]);
   } finally {
     await close(bridgeServer.server);
     await close(upstreamServer.server);
