@@ -23,6 +23,7 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
   upstream.get("/api/tools/hunyuan3d/status", (_req, res) => res.json({ apiReady: false }));
   upstream.get("/api/tools/animation/status", (_req, res) => res.json({ apiReady: false }));
   upstream.get("/api/tools/music/stable-audio/status", (_req, res) => res.json({ apiReady: true }));
+  upstream.get("/api/tools/hunyuan3d/finish/status", (_req, res) => res.json({ installed: true, apiReady: true }));
   upstream.get("/api/tools/wan2gp/image/stream", (_req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.write(`data: ${JSON.stringify({ type: "status", message: "Generating test image..." })}\n\n`);
@@ -143,10 +144,11 @@ test("Unity bridge creates a session, runs an image job, and lists images", asyn
 
     const statusResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/status`, { headers });
     assert.equal(statusResponse.status, 200);
-    const status = await statusResponse.json() as { data: { health: { ok: boolean }; wan2gp: { apiReady: boolean }; stableAudio: { apiReady: boolean } } };
+    const status = await statusResponse.json() as { data: { health: { ok: boolean }; wan2gp: { apiReady: boolean }; stableAudio: { apiReady: boolean }; blenderFinish: { apiReady: boolean } } };
     assert.equal(status.data.health.ok, true);
     assert.equal(status.data.wan2gp.apiReady, true);
     assert.equal(status.data.stableAudio.apiReady, true);
+    assert.equal(status.data.blenderFinish.apiReady, true);
 
     const startResponse = await fetch(`${bridgeServer.baseUrl}/api/unity/tools/nexus.generate.image`, {
       method: "POST",

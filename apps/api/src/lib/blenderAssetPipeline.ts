@@ -77,6 +77,20 @@ async function resolveBlenderExecutable(): Promise<string> {
   );
 }
 
+export async function getBlenderFinishStatus(): Promise<{ installed: boolean; apiReady: boolean; executablePath: string | null; message: string }> {
+  try {
+    const executablePath = await resolveBlenderExecutable();
+    return { installed: true, apiReady: true, executablePath, message: "NexusOS game-ready 3D finishing is available." };
+  } catch {
+    return {
+      installed: false,
+      apiReady: false,
+      executablePath: null,
+      message: "Blender is not installed. Install Blender to enable normals, UVs, decimation, and source-image materials for generated models.",
+    };
+  }
+}
+
 function buildBlenderPipelineScript(): string {
   return [
     "import bpy",

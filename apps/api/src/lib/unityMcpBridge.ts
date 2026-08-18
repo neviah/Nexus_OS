@@ -204,16 +204,24 @@ export function createUnityMcpBridgeRouter(options: UnityBridgeOptions): express
   router.get("/status", async (_req, res) => {
     try {
       const health = await fetchJson(`${baseUrl}/api/health`, 3_000);
-      const [wan2gp, hunyuan3d, animato, stableAudio] = await Promise.all([
+      const [wan2gp, hunyuan3d, animato, stableAudio, blenderFinish] = await Promise.all([
         fetchJsonOrUnavailable(`${baseUrl}/api/tools/wan2gp/status`),
         fetchJsonOrUnavailable(`${baseUrl}/api/tools/hunyuan3d/status`),
         fetchJsonOrUnavailable(`${baseUrl}/api/tools/animation/status`),
         fetchJsonOrUnavailable(`${baseUrl}/api/tools/music/stable-audio/status`),
+        fetchJsonOrUnavailable(`${baseUrl}/api/tools/hunyuan3d/finish/status`),
       ]);
       return res.json({
         ok: true,
         workspaceId: "default",
-        data: { health, wan2gp, hunyuan3d, animato, stableAudio: normalizeRuntimeReadiness(stableAudio) },
+        data: {
+          health,
+          wan2gp,
+          hunyuan3d,
+          animato,
+          stableAudio: normalizeRuntimeReadiness(stableAudio),
+          blenderFinish: normalizeRuntimeReadiness(blenderFinish),
+        },
       });
     } catch (error) {
       return res.status(502).json(errorEnvelope("nexus_os_unavailable", String(error), true));

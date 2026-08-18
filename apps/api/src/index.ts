@@ -91,6 +91,7 @@ import {
   startHunyuan3dIfNeeded,
 } from "./lib/hunyuan3dRuntime.js";
 import {
+  getBlenderFinishStatus,
   runBlenderFinishStreaming,
   type BlenderFinishProfile,
 } from "./lib/blenderAssetPipeline.js";
@@ -12580,9 +12581,11 @@ async function streamHunyuan3dFinish(
 
   const controller = new AbortController();
   const onClientDisconnect = () => {
-    controller.abort();
+    if (!res.writableEnded) {
+      controller.abort();
+    }
   };
-  req.on("close", onClientDisconnect);
+  res.on("close", onClientDisconnect);
 
   try {
     send({ type: "status", message: "Resolving workspace mesh path..." });
@@ -12659,7 +12662,7 @@ async function streamHunyuan3dFinish(
     }
     res.end();
   } finally {
-    req.off("close", onClientDisconnect);
+    res.off("close", onClientDisconnect);
   }
 }
 
@@ -12939,6 +12942,10 @@ app.post("/api/tools/hunyuan3d/finish/stream", async (req, res) => {
     sourceRelativePath?: string;
   };
   await streamHunyuan3dFinish(req, res, body ?? {});
+});
+
+app.get("/api/tools/hunyuan3d/finish/status", async (_req, res) => {
+  return res.json(await getBlenderFinishStatus());
 });
 
 app.get("/api/tools/animation/status", async (_req, res) => {
